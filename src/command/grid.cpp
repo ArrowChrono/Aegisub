@@ -543,6 +543,58 @@ struct grid_sort_style_selected final : public validate_sel_multiple {
 	}
 };
 
+struct grid_sort_text final : public Command {
+	CMD_NAME("grid/sort/text")
+	STR_MENU("Te&xt")
+	STR_DISP("Text")
+	STR_HELP("Sort all subtitles by their text, including styling tags")
+
+	void operator()(agi::Context *c) override {
+		auto *ass = c->GetCore().ass.get();
+		ass->Sort(AssFile::CompText);
+		ass->Commit(from_wx(_("sort")), AssFile::COMMIT_ORDER);
+	}
+};
+
+struct grid_sort_text_selected final : public validate_sel_multiple {
+	CMD_NAME("grid/sort/text/selected")
+	STR_MENU("Te&xt")
+	STR_DISP("Text")
+	STR_HELP("Sort selected subtitles by their text, including styling tags")
+
+	void operator()(agi::Context *c) override {
+		auto core = c->GetCore();
+		core.ass->Sort(AssFile::CompText, core.selectionController->GetSelectedSet());
+		core.ass->Commit(from_wx(_("sort")), AssFile::COMMIT_ORDER);
+	}
+};
+
+struct grid_sort_text_stripped final : public Command {
+	CMD_NAME("grid/sort/text_stripped")
+	STR_MENU("Stri&pped Text")
+	STR_DISP("Stripped Text")
+	STR_HELP("Sort all subtitles by their stripped text")
+
+	void operator()(agi::Context *c) override {
+		auto *ass = c->GetCore().ass.get();
+		ass->Sort(AssFile::CompTextStripped);
+		ass->Commit(from_wx(_("sort")), AssFile::COMMIT_ORDER);
+	}
+};
+
+struct grid_sort_text_stripped_selected final : public validate_sel_multiple {
+	CMD_NAME("grid/sort/text_stripped/selected")
+	STR_MENU("Stri&pped Text")
+	STR_DISP("Stripped Text")
+	STR_HELP("Sort selected subtitles by their stripped text")
+
+	void operator()(agi::Context *c) override {
+		auto core = c->GetCore();
+		core.ass->Sort(AssFile::CompTextStripped, core.selectionController->GetSelectedSet());
+		core.ass->Commit(from_wx(_("sort")), AssFile::COMMIT_ORDER);
+	}
+};
+
 struct grid_tag_cycle_hiding final : public Command {
 	CMD_NAME("grid/tag/cycle_hiding")
 	CMD_ICON(toggle_tag_hiding)
@@ -695,12 +747,16 @@ namespace cmd {
 		reg(agi::make_unique<grid_sort_layer>());
 		reg(agi::make_unique<grid_sort_start>());
 		reg(agi::make_unique<grid_sort_style>());
+		reg(agi::make_unique<grid_sort_text>());
+		reg(agi::make_unique<grid_sort_text_stripped>());
 		reg(agi::make_unique<grid_sort_actor_selected>());
 		reg(agi::make_unique<grid_sort_effect_selected>());
 		reg(agi::make_unique<grid_sort_end_selected>());
 		reg(agi::make_unique<grid_sort_layer_selected>());
 		reg(agi::make_unique<grid_sort_start_selected>());
 		reg(agi::make_unique<grid_sort_style_selected>());
+		reg(agi::make_unique<grid_sort_text_selected>());
+		reg(agi::make_unique<grid_sort_text_stripped_selected>());
 		reg(agi::make_unique<grid_move_down>());
 		reg(agi::make_unique<grid_move_up>());
 		reg(agi::make_unique<grid_swap>());
