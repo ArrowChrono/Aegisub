@@ -252,8 +252,10 @@ bool RenderCsriBgraOverlay(csri_inst *instance, SubtitleOverlay& overlay, double
 	};
 
 	std::lock_guard<std::mutex> lock(csri_mutex);
-	if (!csri_request_fmt(instance, &format))
-		csri_render(instance, &frame, time);
+	if (!csri_request_fmt(instance, &format)) {
+		// Avoid losing a millisecond at subtitle boundaries: https://github.com/arch1t3cht/Aegisub/issues/205
+		csri_render(instance, &frame, time + 1e-9);
+	}
 	return true;
 }
 

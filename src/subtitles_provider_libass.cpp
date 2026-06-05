@@ -52,6 +52,7 @@
 #include "translation_service.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <mutex>
 
@@ -301,7 +302,9 @@ bool LibassSubtitlesProvider::RenderOverlay(SourceFrame const& source, SubtitleO
 	api.ass_set_frame_size(ass_renderer, render_width, render_height);
 	api.ass_set_storage_size(ass_renderer, render_width, render_height);
 
-	ASS_Image* img = api.ass_render_frame(ass_renderer, ass_track, int(time * 1000), nullptr);
+	// Avoid losing a millisecond at subtitle boundaries: https://github.com/arch1t3cht/Aegisub/issues/205
+	ASS_Image *img = api.ass_render_frame(
+		ass_renderer, ass_track, static_cast<long long>(std::floor((time * 1000) + 1e-6)), nullptr);
 	BgraSubtitleTargetView target {
 		overlay.planes[0].data,
 		overlay.planes[0].stride,
