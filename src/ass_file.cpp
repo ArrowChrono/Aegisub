@@ -114,6 +114,7 @@ AssFile::AssFile(const AssFile &from)
 : Info(from.Info)
 , Attachments(from.Attachments)
 , Extradata(from.Extradata)
+, Properties(from.Properties)
 , transient_fonts(from.transient_fonts)
 , next_extradata_id(from.next_extradata_id)
 {
