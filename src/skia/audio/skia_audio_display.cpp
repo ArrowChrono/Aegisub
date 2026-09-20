@@ -2,6 +2,7 @@
 
 #include "skia_audio_content_worker.h"
 #include "skia_audio_presenter.h"
+#include "skia_audio_tile_diagnostics.h"
 
 #include "../../include/aegisub/context.h"
 #include "../../project.h"
@@ -23,6 +24,9 @@
 #include <libaegisub/ass/time.h>
 #include <libaegisub/color.h>
 #include <libaegisub/log.h>
+#include <libaegisub/fs.h>
+#include <libaegisub/path.h>
+#include <libaegisub/scope_exit.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -50,7 +54,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <locale>
 #include <utility>
 
 namespace aegisub::skia::audio {
@@ -311,6 +318,7 @@ struct SkiaAudioDisplay::Impl {
 	bool has_last_content_request = false;
 	bool content_budget_soft_limit_active = false;
 	FrameViewport viewport;
+	FrameTarget diagnostic_frame_target;
 	int zoom_level = 0;
 	int scroll_left = 0;
 	int content_scroll_left = 0;
@@ -1210,6 +1218,8 @@ void SkiaAudioDisplay::OnPaint(wxPaintEvent&) try {
 		RequestFallback(impl->presenter->TakeFailureLogMessage());
 	}
 	else if (content_frame_rendered) {
+		if (TileDiagnosticsEnabled())
+			impl->diagnostic_frame_target = target;
 		impl->content_frame_presented = true;
 		++impl->successful_content_frames;
 		if (!impl->deferred_failure_injection_armed
@@ -2079,12 +2089,91 @@ void SkiaAudioDisplay::OnFocus(wxFocusEvent& event) {
 }
 
 void SkiaAudioDisplay::OnKeyDown(wxKeyEvent& event) {
+	if (TileDiagnosticsEnabled() && event.GetKeyCode() == WXK_F12 && event.ControlDown() && event.ShiftDown() && !event.AltDown()) {
+		CaptureTileDiagnostics();
+		return;
+	}
 	// Mirrors the legacy AudioDisplay and VideoDisplay contract: hotkey::check
 	// dispatches the binding and calls evt.Skip() itself when nothing matches,
 	// so unmatched keys propagate without an extra Skip wrapper here. The ctor
 	// sets wxWANTS_CHARS and binds wxEVT_CHAR_HOOK so navigation keys (arrows,
 	// space, tab) reach this handler before default wx handling can swallow them.
 	hotkey::check("Audio", impl->project_context, event);
+}
+
+void SkiaAudioDisplay::CaptureTileDiagnostics() try {
+	if (!impl || !TileDiagnosticsEnabled())
+		return;
+	auto const frame = impl->last_presented_content_frame;
+	if (!frame || !impl->context || !impl->context->IsOK()) {
+		LOG_W("audio/display/tile-diagnostics") << "No presented content frame is available for capture";
+		return;
+	}
+	auto const session = perf_trace::GetSessionDirectory();
+	if (session.empty() || !perf_trace::IsEnabled()) {
+		LOG_W("audio/display/tile-diagnostics") << "Capture requires AEGISUB_PERF_TRACE=audio,log at startup";
+		return;
+	}
+
+	// This is a readback of the existing frame, not a paint or a content request.
+	// Preserve the previously current native context if another widget owned it.
+#ifdef _WIN32
+	auto const previous_dc = wglGetCurrentDC();
+	auto const previous_context = wglGetCurrentContext();
+	auto restore_context = agi::make_scope_exit([&] {
+		wglMakeCurrent(previous_dc, previous_context);
+	});
+#endif
+	if (!SetCurrent(*impl->context)) {
+		LOG_E("audio/display/tile-diagnostics") << "Could not activate the audio context for capture";
+		return;
+	}
+	auto const directory = agi::fs::UniquePath(session / "tile-capture-%%%%%%%%");
+	agi::fs::CreateDirectory(directory);
+	LOG_I("audio/display/tile-diagnostics") << "Begin " << agi::fs::PathToString(directory.filename())
+											<< ", trace frame " << impl->trace_frame_sequence;
+	std::string error;
+	auto const captured = impl->presenter->CaptureTileDiagnostics(
+		impl->ContextToken(), impl->diagnostic_frame_target, *frame, directory, error);
+
+	std::ofstream metadata(directory / "display.txt", std::ios::binary);
+	metadata.imbue(std::locale::classic());
+	metadata << std::setprecision(17)
+			 << "capture_succeeded=" << captured << '\n'
+			 << "trace_frame_id=" << impl->trace_frame_sequence << '\n'
+			 << "current_provider_generation=" << impl->content_generation.provider << '\n'
+			 << "current_analysis_generation=" << impl->content_generation.analysis << '\n'
+			 << "last_presented_complete=" << impl->last_presented_complete_content_viewport << '\n'
+			 << "last_presented_retained=" << impl->last_presented_retained_content_frame << '\n'
+			 << "last_presented_ready_tiles=" << impl->last_presented_ready_tile_count << '\n'
+			 << "last_presented_visible_tiles=" << impl->last_presented_visible_tile_count << '\n'
+			 << "zoom_level=" << impl->zoom_level << '\n'
+			 << "milliseconds_per_pixel=" << impl->content_analysis.milliseconds_per_pixel << '\n'
+			 << "source_mode=" << (impl->content_analysis.source_mode == ContentSourceMode::Int16Mono ? "int16_mono" : "float_interleaved") << '\n'
+			 << "spectrum_channel_mode=" << static_cast<int>(impl->content_analysis.spectrum_channel_mode) << '\n'
+			 << "spectrum_derivation_size=" << impl->content_analysis.spectrum_derivation_size << '\n'
+			 << "spectrum_derivation_distance=" << impl->content_analysis.spectrum_derivation_distance << '\n';
+	if (impl->provider) {
+		metadata << "sample_rate=" << impl->provider->GetSampleRate() << '\n'
+				 << "channels=" << impl->provider->GetChannels() << '\n'
+				 << "bytes_per_sample=" << impl->provider->GetBytesPerSample() << '\n'
+				 << "float_samples=" << impl->provider->AreSamplesFloat() << '\n'
+				 << "num_samples=" << impl->provider->GetNumSamples() << '\n'
+				 << "decoded_samples=" << impl->provider->GetDecodedSamples() << '\n';
+	}
+	metadata.close();
+	if (!metadata)
+		LOG_E("audio/display/tile-diagnostics") << "Could not write capture display metadata";
+	if (captured)
+		LOG_I("audio/display/tile-diagnostics") << "Saved " << agi::fs::PathToString(directory.filename());
+	else
+		LOG_E("audio/display/tile-diagnostics") << "Capture failed: " << error;
+}
+catch (std::exception const& error) {
+	LOG_E("audio/display/tile-diagnostics") << "Capture failed: " << error.what();
+}
+catch (...) {
+	LOG_E("audio/display/tile-diagnostics") << "Capture failed with an unknown diagnostic error";
 }
 
 void SkiaAudioDisplay::OnAudioOpen(agi::AudioProvider *provider) {

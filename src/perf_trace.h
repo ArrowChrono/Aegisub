@@ -185,6 +185,13 @@ struct AudioContentTileEvent {
 	std::uint64_t fft_cache_misses_delta = 0;
 	std::uint64_t fft_visible_builds_delta = 0;
 	std::uint64_t fft_cache_evictions_delta = 0;
+	bool include_diagnostics = false;
+	std::uint64_t diagnostic_hash = 0;
+	std::uint64_t diagnostic_elements = 0;
+	std::uint64_t diagnostic_nonfinite = 0;
+	std::uint64_t diagnostic_nonzero_columns = 0;
+	double diagnostic_minimum = 0;
+	double diagnostic_maximum = 0;
 };
 
 bool IsEnabled();

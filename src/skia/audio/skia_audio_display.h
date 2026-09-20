@@ -65,6 +65,7 @@ class SkiaAudioDisplay final : public wxGLCanvas {
 	void OnMouseCaptureLost(wxMouseCaptureLostEvent& event);
 	void OnFocus(wxFocusEvent& event);
 	void OnKeyDown(wxKeyEvent& event);
+	void CaptureTileDiagnostics();
 	void EmitMiddleSeekOutput(int time_ms, bool commit);
 	void ScheduleMiddleSeekTimer();
 	void FinishMiddleSeek(int time_ms);

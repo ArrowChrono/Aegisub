@@ -1361,6 +1361,7 @@ if(WITH_SKIA_AUDIO_DISPLAY)
         src/skia/audio/skia_audio_content.cpp
         src/skia/audio/skia_audio_content_analysis.cpp
         src/skia/audio/skia_audio_content_worker.cpp
+        src/skia/audio/skia_audio_tile_diagnostics.cpp
         src/skia/audio/skia_audio_frame_model.cpp
         src/skia/audio/skia_audio_upload_payload.cpp
         src/skia/audio/skia_audio_display_contract.cpp

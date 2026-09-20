@@ -1,4 +1,5 @@
 #include "skia_audio_presenter.h"
+#include "skia_audio_tile_diagnostics.h"
 
 #include "../../perf_trace.h"
 #include "../../skia_runtime/platform_font_runtime.h"
@@ -44,16 +45,21 @@
 #include <include/gpu/ganesh/GrDirectContext.h>
 #include <include/gpu/ganesh/SkImageGanesh.h>
 #include <include/gpu/ganesh/SkSurfaceGanesh.h>
+#include <include/gpu/ganesh/gl/GrGLInterface.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <locale>
 #include <optional>
 #include <queue>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -732,6 +738,109 @@ sk_sp<SkImage> RasterizeMarkerLayer(
 	return surface->makeImageSnapshot();
 }
 
+// readPixels may change these bindings too; keep the guard alive through both
+// raw front-buffer capture and Skia texture readback. No GL context is switched.
+class DiagnosticReadbackState final {
+	GrGLInterface const& gl;
+	GrDirectContext& context;
+	bool separate_framebuffers = false;
+	bool pack_buffer_supported = false;
+	GLint read_framebuffer = 0;
+	GLint draw_framebuffer = 0;
+	GLint read_buffer = 0;
+	GLint default_read_buffer = 0;
+	GLint pack_buffer = 0;
+	static constexpr GLenum framebuffer = 0x8D40;
+	static constexpr GLenum read_framebuffer_target = 0x8CA8;
+	static constexpr GLenum draw_framebuffer_target = 0x8CA9;
+	static constexpr GLenum pixel_pack_buffer = 0x88EB;
+	static constexpr std::array<GLenum, 6> pack_names{
+		GL_PACK_ALIGNMENT, GL_PACK_ROW_LENGTH, GL_PACK_SKIP_ROWS,
+		GL_PACK_SKIP_PIXELS, GL_PACK_SWAP_BYTES, GL_PACK_LSB_FIRST};
+	std::array<GLint, pack_names.size()> pack_values{};
+
+	public:
+	explicit DiagnosticReadbackState(GrGLInterface const& gl, GrDirectContext& context, std::string const& version)
+		: gl(gl), context(context) {
+		int major = 0;
+		int minor = 0;
+		char dot = 0;
+		std::istringstream version_stream(version);
+		version_stream.imbue(std::locale::classic());
+		version_stream >> major >> dot >> minor;
+		separate_framebuffers = major >= 3 || gl.fExtensions.has("GL_ARB_framebuffer_object") || gl.fExtensions.has("GL_EXT_framebuffer_blit");
+		pack_buffer_supported = major > 2 || (major == 2 && minor >= 1) || gl.fExtensions.has("GL_ARB_pixel_buffer_object") || gl.fExtensions.has("GL_EXT_pixel_buffer_object");
+		glGetIntegerv(separate_framebuffers ? 0x8CAA : 0x8CA6, &read_framebuffer);
+		glGetIntegerv(0x8CA6, &draw_framebuffer);
+		glGetIntegerv(GL_READ_BUFFER, &read_buffer);
+		for (std::size_t i = 0; i < pack_names.size(); ++i)
+			glGetIntegerv(pack_names[i], &pack_values[i]);
+		if (pack_buffer_supported)
+			glGetIntegerv(0x88ED, &pack_buffer);
+		gl.fFunctions.fBindFramebuffer(separate_framebuffers ? read_framebuffer_target : framebuffer, 0);
+		glGetIntegerv(GL_READ_BUFFER, &default_read_buffer);
+	}
+
+	~DiagnosticReadbackState() {
+		gl.fFunctions.fBindFramebuffer(separate_framebuffers ? read_framebuffer_target : framebuffer, 0);
+		glReadBuffer(static_cast<GLenum>(default_read_buffer));
+		gl.fFunctions.fBindFramebuffer(
+			separate_framebuffers ? read_framebuffer_target : framebuffer,
+			static_cast<GLuint>(read_framebuffer));
+		glReadBuffer(static_cast<GLenum>(read_buffer));
+		if (separate_framebuffers)
+			gl.fFunctions.fBindFramebuffer(draw_framebuffer_target, static_cast<GLuint>(draw_framebuffer));
+		for (std::size_t i = 0; i < pack_names.size(); ++i)
+			glPixelStorei(pack_names[i], pack_values[i]);
+		if (pack_buffer_supported)
+			gl.fFunctions.fBindBuffer(pixel_pack_buffer, static_cast<GLuint>(pack_buffer));
+		// Restoration bypasses Ganesh too. Invalidate its binding knowledge on
+		// every exit, including exceptions, after all raw GL state is restored.
+		context.resetContext();
+	}
+
+	void PrepareFrontRead() const {
+		if (pack_buffer_supported)
+			gl.fFunctions.fBindBuffer(pixel_pack_buffer, 0);
+		for (auto name : pack_names)
+			glPixelStorei(name, name == GL_PACK_ALIGNMENT ? 1 : 0);
+		glReadBuffer(GL_FRONT);
+	}
+};
+
+void WriteDiagnosticBytes(std::filesystem::path const& path, std::span<std::uint8_t const> bytes) {
+	std::ofstream file(path, std::ios::binary);
+	file.exceptions(std::ios::badbit | std::ios::failbit);
+	file.write(reinterpret_cast<char const *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+	file.close();
+}
+
+void WriteDiagnosticPpm(
+	std::filesystem::path const& path,
+	int width,
+	int height,
+	std::span<std::uint8_t const> rgba,
+	bool bottom_up) {
+	std::ofstream file(path, std::ios::binary);
+	file.exceptions(std::ios::badbit | std::ios::failbit);
+	file.imbue(std::locale::classic());
+	file << "P6\n"
+		 << width << ' ' << height << "\n255\n";
+	std::vector<std::uint8_t> row(static_cast<std::size_t>(width) * 3);
+	for (int y = 0; y < height; ++y) {
+		auto const source_y = bottom_up ? height - y - 1 : y;
+		auto const source_row = static_cast<std::size_t>(source_y) * width * 4;
+		for (int x = 0; x < width; ++x)
+			std::copy_n(rgba.data() + source_row + static_cast<std::size_t>(x) * 4, 3, row.data() + static_cast<std::size_t>(x) * 3);
+		file.write(reinterpret_cast<char const *>(row.data()), static_cast<std::streamsize>(row.size()));
+	}
+	file.close();
+}
+
+void WriteDiagnosticSummary(std::ostream& stream, TileDataSummary const& summary) {
+	stream << FormatDiagnosticHash(summary.hash) << ',' << summary.element_count << ','
+		   << summary.nonzero_columns << ',' << summary.minimum << ',' << summary.maximum;
+}
 }
 
 struct Presenter::Impl {
@@ -739,6 +848,8 @@ struct Presenter::Impl {
 		sk_sp<SkImage> primary;
 		std::size_t bytes = 0;
 		std::uint64_t touch = 0;
+		TileDataSummary upload_summary;
+		void const *upload_native_context = nullptr;
 	};
 	struct GpuContentTouch {
 		std::uint64_t touch = 0;
@@ -837,6 +948,7 @@ struct Presenter::Impl {
 	sk_sp<SkPicture> retained_post_cursor;
 	PresenterMetrics metrics;
 	SkiaGlContextToken last_context;
+	void const *last_native_context = nullptr;
 	bool failure_logged = false;
 	bool gl_probed = false;
 	bool resource_budget_set = false;
@@ -959,6 +1071,10 @@ struct Presenter::Impl {
 		}
 		if (!device.BeginExternalFrame(context))
 			return false;
+#ifdef _WIN32
+		if (TileDiagnosticsEnabled())
+			last_native_context = wglGetCurrentContext();
+#endif
 		if (!resource_budget_set) {
 			device.Get()->setResourceCacheLimit(kGaneshResourceCacheBudget);
 			resource_budget_set = true;
@@ -1084,6 +1200,22 @@ struct Presenter::Impl {
 		event.outcome = "uploaded";
 		event.bytes = entry->second.bytes;
 		perf_trace::ObserveAudioContentTileEvent(event);
+		if (TileDiagnosticsEnabled() && payload.key.tile.kind == ContentKind::Spectrum) {
+			entry->second.upload_summary = SummarizeUploadPayload(payload);
+#ifdef _WIN32
+			entry->second.upload_native_context = wglGetCurrentContext();
+#endif
+			auto const& summary = entry->second.upload_summary;
+			event.stage = "gpu_upload_summary";
+			event.include_diagnostics = true;
+			event.diagnostic_hash = summary.hash;
+			event.diagnostic_elements = summary.element_count;
+			event.diagnostic_nonfinite = summary.nonfinite_count;
+			event.diagnostic_nonzero_columns = summary.nonzero_columns;
+			event.diagnostic_minimum = summary.minimum;
+			event.diagnostic_maximum = summary.maximum;
+			perf_trace::ObserveAudioContentTileEvent(event);
+		}
 		TouchContent(entry->first, entry->second);
 		TrimContentCache();
 		return entry->second;
@@ -1124,6 +1256,190 @@ Presenter::Presenter(FailureInjection failure_injection)
 }
 
 Presenter::~Presenter() = default;
+
+bool Presenter::CaptureTileDiagnostics(
+	SkiaGlContextToken context,
+	FrameTarget const& target,
+	ContentFrame const& frame,
+	std::filesystem::path const& capture_directory,
+	std::string& error) noexcept try {
+	error.clear();
+	if (!TileDiagnosticsEnabled()) {
+		error = "audio tile diagnostics are disabled";
+		return false;
+	}
+	auto const validation = ValidateFrameTarget(target, context.generation);
+	if (!validation.valid || target.framebuffer_id != 0) {
+		error = "capture requires a valid default-framebuffer target";
+		return false;
+	}
+	auto *gpu_context = impl->device.Get();
+	if (!gpu_context || gpu_context->abandoned() || context.identity != impl->last_context.identity || context.generation != impl->last_context.generation) {
+		error = "capture does not match the presenter's live context";
+		return false;
+	}
+#ifdef _WIN32
+	if (!wglGetCurrentContext() || wglGetCurrentContext() != impl->last_native_context) {
+		error = "the current native WGL context differs from the last rendered audio context";
+		return false;
+	}
+#endif
+	// This limit applies only to explicit diagnostic allocations, never rendering.
+	constexpr std::size_t max_capture_bytes = 256 * 1024 * 1024;
+	auto const frame_bytes = static_cast<std::uint64_t>(target.width) * target.height * 4;
+	if (frame_bytes > max_capture_bytes) {
+		error = "the diagnostic framebuffer exceeds the 256 MiB capture limit";
+		return false;
+	}
+	auto gl = GrGLMakeNativeInterface();
+	if (!gl || !gl->fFunctions.fBindFramebuffer || !gl->fFunctions.fBindBuffer) {
+		error = "the native GL readback interface is unavailable";
+		return false;
+	}
+	std::filesystem::create_directories(capture_directory);
+	std::ofstream metadata(capture_directory / "frame.txt", std::ios::binary);
+	metadata.exceptions(std::ios::badbit | std::ios::failbit);
+	metadata.imbue(std::locale::classic());
+	metadata << "format_version=1\n"
+			 << "capture_order=front_framebuffer,content_textures,retained_base\n"
+			 << "capture_synchronizes_gpu=true\n"
+			 << "context_generation=" << context.generation << '\n'
+			 << "context_logical_identity=" << context.identity << '\n'
+			 << "context_last_native_identity=" << impl->last_native_context << '\n'
+#ifdef _WIN32
+			 << "context_current_native_identity=" << static_cast<void const *>(wglGetCurrentContext()) << '\n'
+#endif
+			 << "gl_vendor=" << ReadGlString(GL_VENDOR) << '\n'
+			 << "gl_renderer=" << ReadGlString(GL_RENDERER) << '\n'
+			 << "gl_version=" << ReadGlString(GL_VERSION) << '\n'
+			 << "width=" << target.width << "\nheight=" << target.height << '\n'
+			 << "framebuffer_row_bytes=" << static_cast<std::size_t>(target.width) * 4 << '\n'
+			 << "framebuffer_rgba_orientation=bottom_up\nppm_orientation=top_down\n"
+			 << "tile_rgba_orientation=top_down\ntile_rgba_layout=R,G,B,A unsigned bytes\n"
+			 << "tile_power_encoding=RGB24 unsigned integer; power=RGB24*8/16777215; alpha=255\n"
+			 << "hash_algorithm=FNV-1a64 over all raw bytes\n"
+			 << "provider_generation=" << frame.generation.provider << '\n'
+			 << "analysis_generation=" << frame.generation.analysis << '\n'
+			 << "static_revision=" << frame.static_revision << '\n'
+			 << "retained_static_revision=" << impl->retained_static_revision << '\n'
+			 << "first_column=" << frame.first_column << '\n'
+			 << "first_column_offset=" << frame.first_column_offset << '\n'
+			 << "content_x=" << frame.x << "\ncontent_y=" << frame.y << '\n'
+			 << "content_width=" << frame.width << "\ncontent_height=" << frame.height << '\n'
+			 << "amplitude=" << frame.amplitude << '\n'
+			 << "frame_tile_count=" << frame.tiles.size() << '\n'
+			 << "gpu_cache_entries=" << impl->content_cache.size() << '\n'
+			 << "gpu_cache_bytes=" << impl->content_cache_bytes << '\n';
+	// Preserve pre-existing GL errors as evidence instead of confusing them with
+	// the following read. Reading GL errors is destructive and capture-only.
+	for (int i = 0; i < 16; ++i) {
+		auto const previous_error = glGetError();
+		if (previous_error == GL_NO_ERROR)
+			break;
+		metadata << "pre_capture_gl_error=" << previous_error << '\n';
+	}
+	DiagnosticReadbackState restore_state(*gl, *gpu_context, ReadGlString(GL_VERSION));
+	restore_state.PrepareFrontRead();
+	std::vector<std::uint8_t> front_pixels(static_cast<std::size_t>(frame_bytes));
+	glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, front_pixels.data());
+	auto const front_error = glGetError();
+	metadata << "front_read_gl_error=" << front_error << '\n';
+	if (front_error == GL_NO_ERROR) {
+		WriteDiagnosticBytes(capture_directory / "framebuffer-front.rgba", front_pixels);
+		WriteDiagnosticPpm(capture_directory / "framebuffer-front.ppm", target.width, target.height, front_pixels, true);
+		metadata << "front_hash=" << FormatDiagnosticHash(HashDiagnosticBytes(front_pixels)) << '\n';
+	}
+	else
+		error = "front framebuffer readback failed; remaining evidence was captured";
+	// The raw GL read changed bindings outside Ganesh; invalidate its state
+	// knowledge before readPixels, without rebuilding or drawing any image.
+	gpu_context->resetContext();
+
+	std::ofstream tiles(capture_directory / "tiles.csv");
+	tiles.exceptions(std::ios::badbit | std::ios::failbit);
+	tiles.imbue(std::locale::classic());
+	tiles << "tile_index,provider_generation,analysis_generation,variant_revision,width,height,row_bytes,"
+		  << "cpu_hash,cpu_elements,cpu_nonzero_columns,cpu_min,cpu_max,gpu_cache_present,"
+		  << "upload_hash,upload_elements,upload_nonzero_columns,upload_min,upload_max,"
+		  << "upload_native_context,gpu_read_ok,gpu_hash,gpu_elements,gpu_nonzero_columns,gpu_min,gpu_max,"
+		  << "cpu_equals_gpu\n";
+	for (auto const& tile : frame.tiles) {
+		if (!tile || tile->key.tile.kind != ContentKind::Spectrum)
+			continue;
+		auto const& key = tile->key;
+		auto const stem = "tile-" + std::to_string(key.tile.tile_index);
+		auto const current_summary = SummarizeUploadPayload(*tile);
+		tiles << key.tile.tile_index << ',' << key.tile.generation.provider << ','
+			  << key.tile.generation.analysis << ',' << key.variant_revision << ','
+			  << tile->width << ',' << tile->height << ',' << static_cast<std::size_t>(tile->width) * 4 << ',';
+		WriteDiagnosticSummary(tiles, current_summary);
+		WriteDiagnosticBytes(capture_directory / (stem + "-cpu.rgba"), tile->primary);
+		// Do not use AcquireContentTile or TouchContent: absent stays absent, and
+		// a capture must not change eviction order or replace suspect uploads.
+		auto const cached = impl->content_cache.find(key);
+		if (cached == impl->content_cache.end()) {
+			tiles << ",0,,,,,,,0,,,,,,\n";
+			continue;
+		}
+		auto const& entry = cached->second;
+		tiles << ",1,";
+		WriteDiagnosticSummary(tiles, entry.upload_summary);
+		tiles << ',' << entry.upload_native_context << ',';
+		if (!entry.primary || !tile->HasValidShape() || tile->primary.size() > max_capture_bytes || entry.primary->width() != static_cast<int>(tile->width) || entry.primary->height() != static_cast<int>(tile->height)) {
+			tiles << "0,,,,,,\n";
+			error = "one or more cached textures could not be captured";
+			continue;
+		}
+		ContentUploadPayload readback;
+		readback.key = key;
+		readback.width = tile->width;
+		readback.height = tile->height;
+		readback.primary.resize(tile->primary.size());
+		auto const info = SkImageInfo::Make(
+			static_cast<int>(tile->width), static_cast<int>(tile->height),
+			kRGBA_8888_SkColorType, kOpaque_SkAlphaType, nullptr);
+		bool const read_ok = entry.primary->readPixels(gpu_context, info, readback.primary.data(),
+													   static_cast<std::size_t>(tile->width) * 4, 0, 0, SkImage::kDisallow_CachingHint);
+		tiles << read_ok << ',';
+		if (!read_ok) {
+			tiles << ",,,,,\n";
+			error = "one or more cached textures could not be captured";
+			continue;
+		}
+		WriteDiagnosticBytes(capture_directory / (stem + "-gpu.rgba"), readback.primary);
+		WriteDiagnosticSummary(tiles, SummarizeUploadPayload(readback));
+		tiles << ',' << (tile->primary == readback.primary) << '\n';
+	}
+	tiles.close();
+	if (impl->retained_base_image) {
+		auto const& base = impl->retained_base_image;
+		auto const base_bytes = static_cast<std::uint64_t>(base->width()) * base->height() * 4;
+		if (base_bytes <= max_capture_bytes) {
+			std::vector<std::uint8_t> pixels(static_cast<std::size_t>(base_bytes));
+			auto const info = SkImageInfo::Make(base->width(), base->height(),
+												kRGBA_8888_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
+			bool const read_ok = base->readPixels(gpu_context, info, pixels.data(),
+												  static_cast<std::size_t>(base->width()) * 4, 0, 0, SkImage::kDisallow_CachingHint);
+			metadata << "retained_base_read_ok=" << read_ok << '\n'
+					 << "retained_base_width=" << base->width() << "\nretained_base_height=" << base->height() << '\n';
+			if (read_ok) {
+				WriteDiagnosticPpm(capture_directory / "retained-base.ppm", base->width(), base->height(), pixels, false);
+				metadata << "retained_base_hash=" << FormatDiagnosticHash(HashDiagnosticBytes(pixels)) << '\n';
+			}
+		}
+	}
+	metadata << "capture_complete=" << error.empty() << '\n';
+	metadata.close();
+	return error.empty();
+}
+catch (std::exception const& exception) {
+	error = std::string("audio tile capture failed: ") + exception.what();
+	return false;
+}
+catch (...) {
+	error = "audio tile capture failed with an unknown exception";
+	return false;
+}
 
 bool Presenter::RenderDiagnosticFrame(
 	SkiaGlContextToken context,

@@ -416,6 +416,7 @@ if(WIN32)
             src/skia/audio/skia_audio_frame_model.cpp
             src/skia/audio/skia_audio_upload_payload.cpp
             src/skia/audio/skia_audio_presenter.cpp
+            src/skia/audio/skia_audio_tile_diagnostics.cpp
             src/skia_runtime/platform_font_runtime.cpp
             src/skia_runtime/skia_surface_provider.cpp
         )

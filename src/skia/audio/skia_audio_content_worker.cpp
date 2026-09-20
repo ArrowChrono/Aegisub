@@ -1,5 +1,7 @@
 #include "skia_audio_content_worker.h"
 
+#include "skia_audio_tile_diagnostics.h"
+
 #include "../../audio_display_source.h"
 #include "../../perf_trace.h"
 
@@ -44,6 +46,23 @@ perf_trace::AudioContentTileEvent MakePayloadEvent(
 	auto event = MakeTileEvent(stage, key.tile);
 	event.variant_revision = key.variant_revision;
 	return event;
+}
+
+void ObserveTileSummary(
+	perf_trace::AudioContentTileEvent event,
+	TileDataSummary const& summary,
+	std::uint64_t request_serial,
+	bool visible) noexcept {
+	event.request_serial = request_serial;
+	event.visible = visible ? 1 : 0;
+	event.include_diagnostics = true;
+	event.diagnostic_hash = summary.hash;
+	event.diagnostic_elements = summary.element_count;
+	event.diagnostic_nonfinite = summary.nonfinite_count;
+	event.diagnostic_nonzero_columns = summary.nonzero_columns;
+	event.diagnostic_minimum = summary.minimum;
+	event.diagnostic_maximum = summary.maximum;
+	perf_trace::ObserveAudioContentTileEvent(event);
 }
 
 std::uint64_t CounterDelta(std::uint64_t after, std::uint64_t before) noexcept {
@@ -562,6 +581,10 @@ struct ContentWorker::Impl {
 						}
 
 						tile = built.tile;
+						if (trace_tile && key.kind == ContentKind::Spectrum && TileDiagnosticsEnabled()) {
+							ObserveTileSummary(MakeTileEvent("raw_summary", key),
+											   SummarizeSpectrumTile(*tile), plan->serial, visible);
+						}
 						auto const tile_bytes = tile->DataBytes();
 						auto const published = store.Publish(tile);
 						if (trace_tile) {
@@ -632,6 +655,10 @@ struct ContentWorker::Impl {
 						continue;
 					}
 
+					if (trace_tile && key.kind == ContentKind::Spectrum && TileDiagnosticsEnabled()) {
+						ObserveTileSummary(MakePayloadEvent("payload_summary", payload_key),
+										   SummarizeUploadPayload(*payload_built.payload), plan->serial, visible);
+					}
 					auto const payload_bytes = payload_built.payload->DataBytes();
 					auto const payload_published = payload_store.Publish(
 						std::move(payload_built.payload));

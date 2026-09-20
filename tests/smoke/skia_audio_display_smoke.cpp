@@ -1,4 +1,5 @@
 #include "../../src/skia/audio/skia_audio_presenter.h"
+#include "../../src/skia/audio/skia_audio_tile_diagnostics.h"
 
 #ifdef _WIN32
 
@@ -14,9 +15,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <locale>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -865,6 +870,146 @@ bool ValidateDenseMarkerCursorBenchmark(
 	return true;
 }
 
+void ValidateTileDiagnosticCapture(
+	aegisub::skia::audio::FrameTarget const& target,
+	SkiaGlContextToken context) {
+	using namespace aegisub::skia::audio;
+	ContentGeneration const generation{.provider = 61, .analysis = 67};
+	Presenter presenter(FailureInjection::None);
+	ContentFrame frame;
+	frame.generation = generation;
+	frame.static_revision = 1;
+	frame.kind = ContentKind::Spectrum;
+	frame.width = static_cast<float>(target.width);
+	frame.height = static_cast<float>(target.height);
+	frame.spectrum_palette = MakePalette(1, true);
+	frame.spectrum_band_plan = MakeBandPlan(32, target.height, SpectrumScaleMode::LegacyLinear);
+	for (std::uint64_t index = 0; index < 2; ++index) {
+		auto payload = BuildSpectrumUploadPayload(*MakeSpectrumTile(generation, index, 64, 32), *frame.spectrum_band_plan);
+		if (!payload.payload)
+			throw std::runtime_error("capture smoke could not build its known spectrum");
+		auto patterned = std::make_shared<ContentUploadPayload>(*payload.payload);
+		// Distinct RGB24 powers across rows and columns make byte comparison
+		// detect vertical flips and channel/layout errors, not just zero data.
+		for (std::uint32_t y = 0; y < patterned->height; ++y) {
+			for (std::uint32_t x = 0; x < patterned->width; ++x) {
+				auto const power = (y * patterned->width + x + 1U) * 257U;
+				auto const offset = (static_cast<std::size_t>(y) * patterned->width + x) * 4;
+				patterned->primary[offset] = static_cast<std::uint8_t>((power >> 16) & 0xFFU);
+				patterned->primary[offset + 1] = static_cast<std::uint8_t>((power >> 8) & 0xFFU);
+				patterned->primary[offset + 2] = static_cast<std::uint8_t>(power & 0xFFU);
+			}
+		}
+		frame.tiles.push_back(std::move(patterned));
+	}
+	if (!presenter.RenderContentFrame(context, target, frame))
+		throw std::runtime_error("capture smoke baseline render failed");
+	auto const baseline = presenter.Metrics();
+	auto const output = std::filesystem::temp_directory_path() / ("aegisub-audio-tile-smoke-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+	std::string error;
+	if (!TileDiagnosticsEnabled()) {
+		if (presenter.CaptureTileDiagnostics(context, target, frame, output, error) || error.empty() || std::filesystem::exists(output))
+			throw std::runtime_error("disabled capture wrote files or reported success");
+		presenter.Release(context);
+		std::cout << "tile_diagnostic_capture.disabled_no_files=passed\n";
+		return;
+	}
+	// A newer CPU object under the same key must not replace the actual cached
+	// GPU texture during capture. It also exposes upload-vs-current hash identity.
+	auto const original = frame.tiles.front();
+	auto changed = std::make_shared<ContentUploadPayload>(*original);
+	changed->primary[0] = 1;
+	ContentFrame capture_frame = frame;
+	capture_frame.tiles = {changed};
+	constexpr std::array<GLenum, 6> pack_names{
+		GL_PACK_ALIGNMENT, GL_PACK_ROW_LENGTH, GL_PACK_SKIP_ROWS,
+		GL_PACK_SKIP_PIXELS, GL_PACK_SWAP_BYTES, GL_PACK_LSB_FIRST};
+	constexpr std::array<GLint, 6> pack_values{8, 7, 2, 3, 1, 1};
+	for (std::size_t i = 0; i < pack_names.size(); ++i)
+		glPixelStorei(pack_names[i], pack_values[i]);
+	glReadBuffer(GL_BACK);
+	struct DiagnosticNumpunct final : std::numpunct<char> {
+		[[nodiscard]] char do_decimal_point() const override { return ','; }
+		[[nodiscard]] char do_thousands_sep() const override { return ','; }
+		[[nodiscard]] std::string do_grouping() const override { return "\1"; }
+	};
+	struct RestoreLocale final {
+		std::locale previous;
+		~RestoreLocale() { std::locale::global(previous); }
+	};
+	{
+		RestoreLocale const restore_locale;
+		std::locale::global(std::locale(std::locale::classic(), new DiagnosticNumpunct));
+		if (!presenter.CaptureTileDiagnostics(context, target, capture_frame, output, error))
+			throw std::runtime_error("capture smoke failed: " + error);
+	}
+	for (std::size_t i = 0; i < pack_names.size(); ++i) {
+		GLint actual = 0;
+		glGetIntegerv(pack_names[i], &actual);
+		if (actual != pack_values[i])
+			throw std::runtime_error("diagnostic capture changed GL pixel-pack state");
+		glPixelStorei(pack_names[i], pack_names[i] == GL_PACK_ALIGNMENT ? 4 : 0);
+	}
+	GLint read_buffer = 0;
+	glGetIntegerv(GL_READ_BUFFER, &read_buffer);
+	if (read_buffer != GL_BACK)
+		throw std::runtime_error("diagnostic capture did not restore GL_READ_BUFFER");
+	auto const after = presenter.Metrics();
+	if (after.frame_attempts != baseline.frame_attempts || after.submits != baseline.submits || after.content_uploads != baseline.content_uploads || after.content_cache_hits != baseline.content_cache_hits || after.content_cache_misses != baseline.content_cache_misses || after.content_evictions != baseline.content_evictions || after.content_cache_entries != baseline.content_cache_entries || after.content_cache_bytes != baseline.content_cache_bytes)
+		throw std::runtime_error("capture changed presenter rendering or cache metrics");
+	auto const read_bytes = [](std::filesystem::path const& file) {
+		std::ifstream stream(file, std::ios::binary);
+		if (!stream)
+			throw std::runtime_error("expected diagnostic file is missing");
+		return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(stream), {});
+	};
+	auto const read_csv_row = [](std::filesystem::path const& file) {
+		std::ifstream stream(file);
+		std::string line;
+		std::getline(stream, line);
+		std::getline(stream, line);
+		std::istringstream cells(line);
+		std::vector<std::string> row;
+		while (std::getline(cells, line, ','))
+			row.push_back(line);
+		return row;
+	};
+	if (read_bytes(output / "tile-0-cpu.rgba") != changed->primary || read_bytes(output / "tile-0-gpu.rgba") != original->primary)
+		throw std::runtime_error("capture did not retain the distinct CPU and actual GPU bytes");
+	auto const row = read_csv_row(output / "tiles.csv");
+	auto const original_hash = FormatDiagnosticHash(HashDiagnosticBytes(original->primary));
+	if (row.size() != 26 || row[0] != "0" || row[4] != "64" || row[5] != std::to_string(target.height) || row[6] != "256" || row[7] != FormatDiagnosticHash(HashDiagnosticBytes(changed->primary)) || row[12] != "1" || row[13] != original_hash || row[19] != "1" || row[20] != original_hash || row[25] != "0")
+		throw std::runtime_error("capture metadata lost dimensions or CPU/upload/GPU identity");
+	if (std::filesystem::file_size(output / "framebuffer-front.rgba") != static_cast<std::uint64_t>(target.width) * target.height * 4 || std::filesystem::file_size(output / "framebuffer-front.ppm") == 0)
+		throw std::runtime_error("front framebuffer capture has the wrong dimensions");
+	auto const ppm_bytes = read_bytes(output / "framebuffer-front.ppm");
+	auto const ppm_header = "P6\n" + std::to_string(target.width) + " " + std::to_string(target.height) + "\n255\n";
+	if (ppm_bytes.size() < ppm_header.size() || !std::equal(ppm_header.begin(), ppm_header.end(), ppm_bytes.begin()))
+		throw std::runtime_error("PPM capture header inherited the localized numeric format");
+	auto const metadata_bytes = read_bytes(output / "frame.txt");
+	std::string const metadata(metadata_bytes.begin(), metadata_bytes.end());
+	if (metadata.find("framebuffer_rgba_orientation=bottom_up\n") == std::string::npos || metadata.find("tile_rgba_orientation=top_down\n") == std::string::npos || metadata.find("capture_complete=1\n") == std::string::npos)
+		throw std::runtime_error("capture did not document orientation and successful completion");
+	if (presenter.CaptureTileDiagnostics(context, target, frame, output / "frame.txt" / "invalid", error) || error.empty() || presenter.Health() != SkiaGlDeviceHealth::Healthy || presenter.LastFailure() != SkiaGlDeviceFailure::None)
+		throw std::runtime_error("diagnostic file failure poisoned presenter health");
+	// Capturing old tile 0 must not refresh its LRU position: the next upload
+	// must evict tile 0, not the more recently drawn tile 1.
+	presenter.SetContentCacheBudget(baseline.content_cache_bytes);
+	auto third = BuildSpectrumUploadPayload(*MakeSpectrumTile(generation, 2, 64, 32), *frame.spectrum_band_plan);
+	frame.tiles = {third.payload};
+	frame.first_column = 128;
+	++frame.static_revision;
+	if (!presenter.RenderContentFrame(context, target, frame) || presenter.Metrics().content_evictions != baseline.content_evictions + 1)
+		throw std::runtime_error("normal rendering failed after diagnostic readback or I/O failure");
+	if (!presenter.CaptureTileDiagnostics(context, target, capture_frame, output / "after-eviction", error))
+		throw std::runtime_error("capture after eviction failed: " + error);
+	auto const missing = read_csv_row(output / "after-eviction" / "tiles.csv");
+	if (missing.size() < 13 || missing[12] != "0" || std::filesystem::exists(output / "after-eviction" / "tile-0-gpu.rgba"))
+		throw std::runtime_error("capture touched LRU state or recreated an evicted GPU entry");
+	presenter.Release(context);
+	std::cout << "tile_diagnostic_capture.identity_readback_pack_state_readonly_lru_failure_isolation=passed\n";
+}
+
 bool ValidateDeferredContentSubmitFailure(
 	aegisub::skia::audio::FrameTarget const& target,
 	SkiaGlContextToken context) {
@@ -969,6 +1114,7 @@ int main() try {
 	PresenterMetrics spectrum_metrics;
 	if (!ValidateSpectrumContent(target, context, spectrum_metrics))
 		throw std::runtime_error("spectrum retained content smoke failed");
+	ValidateTileDiagnosticCapture(target, context);
 	perf_trace::SetAudioCategoryEnabledForSmoke(true);
 	if (!ValidateFrameLayerComposition(target, context))
 		throw std::runtime_error("audio frame layer composition smoke failed");

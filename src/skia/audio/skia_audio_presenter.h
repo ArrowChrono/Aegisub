@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -197,6 +198,13 @@ public:
 		FrameTarget const& target,
 		ContentFrame const& frame,
 		Layer updated_layers);
+	// Explicit fault capture only: never renders, uploads, swaps, or touches LRU state.
+	bool CaptureTileDiagnostics(
+		SkiaGlContextToken context,
+		FrameTarget const& target,
+		ContentFrame const& frame,
+		std::filesystem::path const& capture_directory,
+		std::string& error) noexcept;
 	void SetFailureInjection(FailureInjection failure_injection) noexcept;
 	void SetContentCacheBudget(std::size_t budget_bytes);
 	void Fail(SkiaGlContextToken context, SkiaGlDeviceFailure failure, std::string detail) noexcept;

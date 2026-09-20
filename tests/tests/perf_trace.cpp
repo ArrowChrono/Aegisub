@@ -5,11 +5,19 @@
 #include <libaegisub/fs.h>
 #include <libaegisub/log.h>
 #include <libaegisub/path.h>
+#include <libaegisub/scope_exit.h>
 
 #include <fstream>
+#include <locale>
 #include <sstream>
 
 namespace {
+class DiagnosticTestNumpunct final : public std::numpunct<char> {
+	[[nodiscard]] char do_decimal_point() const override { return ','; }
+	[[nodiscard]] char do_thousands_sep() const override { return '_'; }
+	[[nodiscard]] std::string do_grouping() const override { return "\3"; }
+};
+
 std::string ReadAll(agi::fs::path const& path) {
 	std::ifstream in(path, std::ios::in | std::ios::binary);
 	std::ostringstream out;
@@ -20,6 +28,47 @@ std::string ReadAll(agi::fs::path const& path) {
 std::string Utf8PathSegment() {
 	return "\xE8\xB7\xAF\xE5\xBE\x84";
 }
+}
+
+TEST(PerfTrace, TileDiagnosticSummaryPreservesHashAndIsExplicitlyOptIn) {
+	auto const previous_locale = std::locale();
+	auto restore_locale = agi::make_scope_exit([&] { std::locale::global(previous_locale); });
+	std::locale::global(std::locale(previous_locale, new DiagnosticTestNumpunct));
+	agi::Path path_helper;
+	auto const directory = agi::fs::UniquePath(path_helper.Decode("?temp/tile_diagnostic_trace_%%%%%%%%"));
+	perf_trace::InitializeAt(directory, "test-build", "audio");
+	perf_trace::AudioContentTileEvent event;
+	event.stage = "raw_summary";
+	event.spectrum = true;
+	event.provider_generation = 1;
+	event.analysis_generation = 3;
+	event.tile_index = 267;
+	event.diagnostic_hash = 0xfedcba9876543210ULL;
+	event.diagnostic_elements = 262144;
+	event.diagnostic_nonfinite = 2;
+	event.diagnostic_nonzero_columns = 255;
+	event.diagnostic_minimum = -0.5;
+	event.diagnostic_maximum = 0.75;
+	perf_trace::ObserveAudioContentTileEvent(event);
+	event.include_diagnostics = true;
+	perf_trace::ObserveAudioContentTileEvent(event);
+	perf_trace::Shutdown();
+
+	std::istringstream lines(ReadAll(directory / "trace.ndjson"));
+	std::string ordinary;
+	std::string diagnostic;
+	ASSERT_TRUE(static_cast<bool>(std::getline(lines, ordinary)));
+	ASSERT_TRUE(static_cast<bool>(std::getline(lines, diagnostic)));
+	EXPECT_EQ(std::string::npos, ordinary.find("\"diagnostic_"));
+	EXPECT_NE(std::string::npos, diagnostic.find("\"diagnostic_hash\":\"fedcba9876543210\""));
+	EXPECT_NE(std::string::npos, diagnostic.find("\"tile_index\":267"));
+	EXPECT_NE(std::string::npos, diagnostic.find("\"diagnostic_elements\":262144"));
+	EXPECT_NE(std::string::npos, diagnostic.find("\"diagnostic_nonfinite\":2"));
+	EXPECT_NE(std::string::npos, diagnostic.find("\"diagnostic_nonzero_columns\":255"));
+	EXPECT_NE(std::string::npos, diagnostic.find("\"diagnostic_minimum\":-0.5"));
+	EXPECT_NE(std::string::npos, diagnostic.find("\"diagnostic_maximum\":0.75"));
+	std::string extra;
+	EXPECT_FALSE(static_cast<bool>(std::getline(lines, extra)));
 }
 
 TEST(PerfTrace, WritesExpectedSessionFiles) {

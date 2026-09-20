@@ -1748,6 +1748,17 @@ void ObserveAudioContentTileEvent(AudioContentTileEvent const& event) noexcept t
 		payload.AddUInt("fft_visible_builds_delta", event.fft_visible_builds_delta);
 		payload.AddUInt("fft_cache_evictions_delta", event.fft_cache_evictions_delta);
 	}
+	if (event.include_diagnostics) {
+		std::ostringstream hash;
+		hash.imbue(std::locale::classic());
+		hash << std::hex << std::setfill('0') << std::setw(16) << event.diagnostic_hash;
+		payload.AddString("diagnostic_hash", hash.str());
+		payload.AddUInt("diagnostic_elements", event.diagnostic_elements);
+		payload.AddUInt("diagnostic_nonfinite", event.diagnostic_nonfinite);
+		payload.AddUInt("diagnostic_nonzero_columns", event.diagnostic_nonzero_columns);
+		payload.AddDouble("diagnostic_minimum", event.diagnostic_minimum);
+		payload.AddDouble("diagnostic_maximum", event.diagnostic_maximum);
+	}
 	auto serialized_payload = payload.Finish();
 
 	auto& session = GetSession();
