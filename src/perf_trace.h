@@ -192,6 +192,15 @@ struct AudioContentTileEvent {
 	std::uint64_t diagnostic_nonzero_columns = 0;
 	double diagnostic_minimum = 0;
 	double diagnostic_maximum = 0;
+	bool diagnostic_gl = false;
+	bool diagnostic_gl_backend_available = false;
+	std::uint64_t diagnostic_gl_texture_id = 0;
+	std::uint64_t diagnostic_gl_texture_target = 0;
+	std::uint64_t diagnostic_gl_owner_context = 0;
+	std::uint64_t diagnostic_gl_current_context = 0;
+	bool diagnostic_gl_is_texture = false;
+	int diagnostic_gl_width = -1;
+	int diagnostic_gl_height = -1;
 };
 
 bool IsEnabled();

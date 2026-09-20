@@ -71,6 +71,61 @@ TEST(PerfTrace, TileDiagnosticSummaryPreservesHashAndIsExplicitlyOptIn) {
 	EXPECT_FALSE(static_cast<bool>(std::getline(lines, extra)));
 }
 
+TEST(PerfTrace, TileGlDiagnosticsAreOptInAndPreserveObjectIdentityAndStorage) {
+	auto const previous_locale = std::locale();
+	auto restore_locale = agi::make_scope_exit([&] { std::locale::global(previous_locale); });
+	std::locale::global(std::locale(previous_locale, new DiagnosticTestNumpunct));
+	agi::Path path_helper;
+	auto const directory = agi::fs::UniquePath(path_helper.Decode("?temp/tile_gl_trace_%%%%%%%%"));
+	perf_trace::InitializeAt(directory, "test-build", "audio");
+	perf_trace::AudioContentTileEvent event;
+	event.stage = "gpu_upload_summary";
+	event.tile_index = 449;
+	event.diagnostic_gl = true;
+	event.diagnostic_gl_backend_available = true;
+	event.diagnostic_gl_texture_id = 4275878552ULL;
+	event.diagnostic_gl_texture_target = 3553;
+	event.diagnostic_gl_owner_context = 0xfedcba9876543210ULL;
+	event.diagnostic_gl_current_context = 0x0123456789abcdefULL;
+	event.diagnostic_gl_is_texture = true;
+	event.diagnostic_gl_width = 256;
+	event.diagnostic_gl_height = 276;
+	perf_trace::ObserveAudioContentTileEvent(event);
+	event.include_diagnostics = true;
+	event.diagnostic_gl = false;
+	perf_trace::ObserveAudioContentTileEvent(event);
+	event.diagnostic_gl = true;
+	perf_trace::ObserveAudioContentTileEvent(event);
+	event.diagnostic_gl_is_texture = false;
+	event.diagnostic_gl_width = -1;
+	event.diagnostic_gl_height = -1;
+	perf_trace::ObserveAudioContentTileEvent(event);
+	perf_trace::Shutdown();
+
+	std::istringstream lines(ReadAll(directory / "trace.ndjson"));
+	std::string ordinary, summary_only, identity, missing;
+	ASSERT_TRUE(static_cast<bool>(std::getline(lines, ordinary)));
+	ASSERT_TRUE(static_cast<bool>(std::getline(lines, summary_only)));
+	ASSERT_TRUE(static_cast<bool>(std::getline(lines, identity)));
+	ASSERT_TRUE(static_cast<bool>(std::getline(lines, missing)));
+	EXPECT_EQ(std::string::npos, ordinary.find("\"diagnostic_"));
+	EXPECT_EQ(std::string::npos, summary_only.find("\"diagnostic_gl_"));
+	EXPECT_NE(std::string::npos, identity.find("\"tile_index\":449,"));
+	EXPECT_NE(std::string::npos, identity.find("\"diagnostic_gl_backend_available\":true,"));
+	EXPECT_NE(std::string::npos, identity.find("\"diagnostic_gl_texture_id\":4275878552,"));
+	EXPECT_NE(std::string::npos, identity.find("\"diagnostic_gl_texture_target\":3553,"));
+	EXPECT_NE(std::string::npos, identity.find("\"diagnostic_gl_owner_context\":18364758544493064720,"));
+	EXPECT_NE(std::string::npos, identity.find("\"diagnostic_gl_current_context\":81985529216486895,"));
+	EXPECT_NE(std::string::npos, identity.find("\"diagnostic_gl_is_texture\":true,"));
+	EXPECT_NE(std::string::npos, identity.find("\"diagnostic_gl_width\":256,"));
+	EXPECT_NE(std::string::npos, identity.find("\"diagnostic_gl_height\":276}"));
+	EXPECT_NE(std::string::npos, missing.find("\"diagnostic_gl_is_texture\":false,"));
+	EXPECT_NE(std::string::npos, missing.find("\"diagnostic_gl_width\":-1,"));
+	EXPECT_NE(std::string::npos, missing.find("\"diagnostic_gl_height\":-1}"));
+	std::string extra;
+	EXPECT_FALSE(static_cast<bool>(std::getline(lines, extra)));
+}
+
 TEST(PerfTrace, WritesExpectedSessionFiles) {
 	agi::Path path_helper;
 	auto const session_dir = agi::fs::UniquePath(path_helper.Decode("?temp/perf_trace_session_%%%%%%%%"));

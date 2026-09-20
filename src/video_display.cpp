@@ -37,6 +37,7 @@
 #include "ass_file.h"
 #include "ass_time_projection.h"
 #include "async_video_provider.h"
+#include "audio_tile_diagnostics_enabled.h"
 #include "command/command.h"
 #include "compat.h"
 #include "format.h"
@@ -82,7 +83,10 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <locale>
+#include <sstream>
 #include <wx/combobox.h>
 #include <wx/dcclient.h>
 #include <wx/image.h>
@@ -131,6 +135,29 @@ public:
 #define E(cmd) cmd; if (GLenum err = glGetError()) throw OpenGlException(#cmd, err)
 
 namespace {
+void TraceVideoGlLifecycle(char const *phase, VideoDisplay const *display, wxGLContext const *context,
+						   std::uintptr_t old_tool, std::uintptr_t new_tool, bool activated = false) noexcept try {
+	if (!aegisub::AudioTileDiagnosticsEnabled() || !agi::log::log)
+		return;
+	void const *current = nullptr;
+	void const *owner = nullptr;
+#ifdef _WIN32
+	current = wglGetCurrentContext();
+	if (context)
+		owner = context->GetGLRC();
+#endif
+	std::ostringstream message;
+	message.imbue(std::locale::classic());
+	message << "phase=" << phase << " source=video_display display=" << display
+			<< " context=" << context << " owner=" << owner << " current=" << current
+			<< " mismatch=" << (owner && owner != current) << " activated=" << activated
+			<< " old_tool=0x" << std::hex << old_tool << " new_tool=0x" << new_tool;
+	LOG_I("audio/tile-diagnostics/video-context") << message.str();
+}
+catch (...) {
+	// Diagnostic logging must not alter context activation or tool destruction.
+}
+
 template <typename Proc>
 Proc LoadOptionalProc(char const *name, char const *fallback_name = nullptr) {
 	if (auto *proc = opengl::GetProcAddress(name))
@@ -566,6 +593,8 @@ bool VideoDisplay::InitContext() {
 		made_current = SetCurrent(*glContext);
 		trace.SetDetails(made_current ? 1 : 0, created_context ? 1 : 0);
 	}
+	TraceVideoGlLifecycle("context_activate", this, glContext.get(),
+						  reinterpret_cast<std::uintptr_t>(tool.get()), reinterpret_cast<std::uintptr_t>(tool.get()), made_current);
 #ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
 	if (IsSkiaVideoRuntimeRequested() && (!glContext->IsOK() || !made_current)) {
 		if (auto *compositor = EnsureSkiaVideoCompositor())
@@ -2912,7 +2941,10 @@ void VideoDisplay::SetTool(std::unique_ptr<VisualToolBase> new_tool) {
 	skia_overlay_backing_release_requested = true;
 #endif
 	// Set the tool first to prevent repeated initialization from VideoDisplay::Render
+	auto const old_tool = reinterpret_cast<std::uintptr_t>(tool.get());
+	TraceVideoGlLifecycle("set_tool_before", this, glContext.get(), old_tool, reinterpret_cast<std::uintptr_t>(new_tool.get()));
 	tool = std::move(new_tool);
+	TraceVideoGlLifecycle("set_tool_after", this, glContext.get(), old_tool, reinterpret_cast<std::uintptr_t>(tool.get()));
 	// A session cursor outranks the tool's, so this is a no-op while one is armed.
 	RefreshCursor();
 

@@ -1758,6 +1758,16 @@ void ObserveAudioContentTileEvent(AudioContentTileEvent const& event) noexcept t
 		payload.AddUInt("diagnostic_nonzero_columns", event.diagnostic_nonzero_columns);
 		payload.AddDouble("diagnostic_minimum", event.diagnostic_minimum);
 		payload.AddDouble("diagnostic_maximum", event.diagnostic_maximum);
+		if (event.diagnostic_gl) {
+			payload.AddBool("diagnostic_gl_backend_available", event.diagnostic_gl_backend_available);
+			payload.AddUInt("diagnostic_gl_texture_id", event.diagnostic_gl_texture_id);
+			payload.AddUInt("diagnostic_gl_texture_target", event.diagnostic_gl_texture_target);
+			payload.AddUInt("diagnostic_gl_owner_context", event.diagnostic_gl_owner_context);
+			payload.AddUInt("diagnostic_gl_current_context", event.diagnostic_gl_current_context);
+			payload.AddBool("diagnostic_gl_is_texture", event.diagnostic_gl_is_texture);
+			payload.AddInt("diagnostic_gl_width", event.diagnostic_gl_width);
+			payload.AddInt("diagnostic_gl_height", event.diagnostic_gl_height);
+		}
 	}
 	auto serialized_payload = payload.Finish();
 

@@ -34,22 +34,54 @@
 
 #include "gl_text.h"
 
+#include "audio_tile_diagnostics_enabled.h"
 #include "compat.h"
 #include "utils.h"
 
 #include <libaegisub/color.h>
 #include <libaegisub/compiler.h>
 #include <libaegisub/exception.h>
+#include <libaegisub/log.h>
 
 #include <wx/bitmap.h>
 #include <wx/dcmemory.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <locale>
+#include <sstream>
+#ifdef _WIN32
+#include <wx/msw/wrapwin.h>
+#endif
 #ifdef HAVE_OPENGL_GL_H
 #include <OpenGL/gl.h>
 #else
 #include <GL/gl.h>
 #endif
+
+namespace {
+void const *CurrentTextNativeContext() noexcept {
+#ifdef _WIN32
+	return wglGetCurrentContext();
+#else
+	return nullptr;
+#endif
+}
+
+void TraceTextLifecycle(char const *phase, OpenGLText const *text, std::size_t texture_count) noexcept try {
+	if (!aegisub::AudioTileDiagnosticsEnabled() || !agi::log::log)
+		return;
+	std::ostringstream message;
+	message.imbue(std::locale::classic());
+	message << "phase=" << phase << " source=" << phase << " text=" << text
+			<< " current=" << CurrentTextNativeContext() << " texture_count=" << texture_count;
+	LOG_I("audio/tile-diagnostics/gl-text") << message.str();
+}
+catch (...) {
+	// Optional diagnostics must not change GL object lifetime on failure.
+}
+}
 
 /// @class OpenGLTextGlyph
 /// @brief Struct storing the information needed to draw a glyph
@@ -115,6 +147,28 @@ class OpenGLText::OpenGLTextTexture final {
 	int height;     ///< Height of the texture
 	GLuint tex = 0; ///< The texture
 
+	std::uint64_t diagnostic_serial = 0;
+	void const *diagnostic_owner = nullptr;
+	OpenGLText const *diagnostic_text = nullptr;
+	char const *diagnostic_delete_source = "text_destruction";
+
+	void TraceTexture(char const *phase, char const *source) const noexcept try {
+		if (!diagnostic_serial || !agi::log::log)
+			return;
+		auto const *current = CurrentTextNativeContext();
+		std::ostringstream message;
+		message.imbue(std::locale::classic());
+		message << "phase=" << phase << " source=" << source << " text=" << diagnostic_text
+				<< " serial=" << diagnostic_serial << " id=" << tex
+				<< " width=" << width << " height=" << height
+				<< " owner=" << diagnostic_owner << " current=" << current
+				<< " mismatch=" << (diagnostic_owner != current);
+		LOG_I("audio/tile-diagnostics/gl-text") << message.str();
+	}
+	catch (...) {
+		// Destruction must still execute the original GL call if tracing fails.
+	}
+
 	/// Insert the glyph into this texture at the current coordinates
 	void Insert(OpenGLTextGlyph &glyph) {
 		int w = glyph.w;
@@ -157,10 +211,8 @@ public:
 	OpenGLTextTexture(OpenGLTextTexture const&) = delete;
 	OpenGLTextTexture& operator=(OpenGLTextTexture const&) = delete;
 
-	OpenGLTextTexture(OpenGLTextGlyph &glyph)
-	: width(std::max(SmallestPowerOf2(glyph.w), 64))
-	, height(std::max(SmallestPowerOf2(glyph.h), 64))
-	{
+	OpenGLTextTexture(OpenGLTextGlyph& glyph, OpenGLText const *text)
+		: width(std::max(SmallestPowerOf2(glyph.w), 64)), height(std::max(SmallestPowerOf2(glyph.h), 64)) {
 		width = height = std::max(width, height);
 
 		// Generate and bind
@@ -177,23 +229,30 @@ public:
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_ALPHA, GL_UNSIGNED_BYTE, nullptr);
 		if (glGetError()) throw agi::EnvironmentError("Internal OpenGL text renderer error: Could not allocate text texture");
 
+		if (aegisub::AudioTileDiagnosticsEnabled()) {
+			static std::atomic<std::uint64_t> next_serial{0};
+			diagnostic_serial = next_serial.fetch_add(1, std::memory_order_relaxed) + 1;
+			diagnostic_owner = CurrentTextNativeContext();
+			diagnostic_text = text;
+			TraceTexture("texture_create", "glyph_atlas");
+		}
+
 		TryToInsert(glyph);
 	}
 
 	OpenGLTextTexture(OpenGLTextTexture&& rhs) noexcept
-	: x(rhs.x)
-	, y(rhs.y)
-	, nextY(rhs.nextY)
-	, width(rhs.width)
-	, height(rhs.height)
-	, tex(rhs.tex)
-	{
+		: x(rhs.x), y(rhs.y), nextY(rhs.nextY), width(rhs.width), height(rhs.height), tex(rhs.tex), diagnostic_serial(rhs.diagnostic_serial), diagnostic_owner(rhs.diagnostic_owner), diagnostic_text(rhs.diagnostic_text), diagnostic_delete_source(rhs.diagnostic_delete_source) {
 		rhs.tex = 0;
 	}
 
 	~OpenGLTextTexture() {
-		if (tex) glDeleteTextures(1, &tex);
+		if (tex) {
+			TraceTexture("texture_delete", diagnostic_delete_source);
+			glDeleteTextures(1, &tex);
+		}
 	}
+
+	void SetDiagnosticDeleteSource(char const *source) noexcept { diagnostic_delete_source = source; }
 
 	/// @brief Try to insert a glyph into this texture
 	/// @param[in][out] glyph Texture to insert
@@ -219,7 +278,9 @@ public:
 };
 
 OpenGLText::OpenGLText() { }
-OpenGLText::~OpenGLText() { }
+OpenGLText::~OpenGLText() {
+	TraceTextLifecycle("text_destruction", this, textures.size());
+}
 
 void OpenGLText::SetFont(std::string const& face, int size, bool bold, bool italics) {
 	// No change required
@@ -235,6 +296,11 @@ void OpenGLText::SetFont(std::string const& face, int size, bool bold, bool ital
 	font.SetWeight(bold ? wxFONTWEIGHT_BOLD : wxFONTWEIGHT_NORMAL);
 
 	// Delete all old data
+	if (aegisub::AudioTileDiagnosticsEnabled()) {
+		TraceTextLifecycle("font_reset", this, textures.size());
+		for (auto& texture : textures)
+			texture.SetDiagnosticDeleteSource("font_reset");
+	}
 	textures.clear();
 	glyphs.clear();
 }
@@ -300,6 +366,6 @@ OpenGLText::OpenGLTextGlyph const& OpenGLText::CreateGlyph(int n) {
 	}
 
 	// No texture could fit it, create a new one
-	textures.emplace_back(glyph);
+	textures.emplace_back(glyph, this);
 	return glyph;
 }

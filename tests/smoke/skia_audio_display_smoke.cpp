@@ -978,7 +978,7 @@ void ValidateTileDiagnosticCapture(
 		throw std::runtime_error("capture did not retain the distinct CPU and actual GPU bytes");
 	auto const row = read_csv_row(output / "tiles.csv");
 	auto const original_hash = FormatDiagnosticHash(HashDiagnosticBytes(original->primary));
-	if (row.size() != 26 || row[0] != "0" || row[4] != "64" || row[5] != std::to_string(target.height) || row[6] != "256" || row[7] != FormatDiagnosticHash(HashDiagnosticBytes(changed->primary)) || row[12] != "1" || row[13] != original_hash || row[19] != "1" || row[20] != original_hash || row[25] != "0")
+	if (row.size() != 39 || row[0] != "0" || row[4] != "64" || row[5] != std::to_string(target.height) || row[6] != "256" || row[7] != FormatDiagnosticHash(HashDiagnosticBytes(changed->primary)) || row[12] != "1" || row[13] != original_hash || row[19] != "1" || row[20] != original_hash || row[25] != "0" || row[26] != "1" || std::stoul(row[27]) == 0 || row[29] != "1" || row[30] != "64" || row[31] != std::to_string(target.height) || row[32] != "0" || row[33] != "1" || row[35] != "0" || row[36] != "0" || row[37] != "1" || row[38] != "1")
 		throw std::runtime_error("capture metadata lost dimensions or CPU/upload/GPU identity");
 	if (std::filesystem::file_size(output / "framebuffer-front.rgba") != static_cast<std::uint64_t>(target.width) * target.height * 4 || std::filesystem::file_size(output / "framebuffer-front.ppm") == 0)
 		throw std::runtime_error("front framebuffer capture has the wrong dimensions");
@@ -995,7 +995,9 @@ void ValidateTileDiagnosticCapture(
 	// Capturing old tile 0 must not refresh its LRU position: the next upload
 	// must evict tile 0, not the more recently drawn tile 1.
 	presenter.SetContentCacheBudget(baseline.content_cache_bytes);
-	auto third = BuildSpectrumUploadPayload(*MakeSpectrumTile(generation, 2, 64, 32), *frame.spectrum_band_plan);
+	auto silent_tile = std::make_shared<ContentTile>(*MakeSpectrumTile(generation, 2, 64, 32));
+	std::ranges::fill(silent_tile->spectrum_power, 0.f);
+	auto third = BuildSpectrumUploadPayload(*silent_tile, *frame.spectrum_band_plan);
 	frame.tiles = {third.payload};
 	frame.first_column = 128;
 	++frame.static_revision;
@@ -1006,6 +1008,53 @@ void ValidateTileDiagnosticCapture(
 	auto const missing = read_csv_row(output / "after-eviction" / "tiles.csv");
 	if (missing.size() < 13 || missing[12] != "0" || std::filesystem::exists(output / "after-eviction" / "tile-0-gpu.rgba"))
 		throw std::runtime_error("capture touched LRU state or recreated an evicted GPU entry");
+	// Warm a same-sized readback, then invalidate the actual GL object behind
+	// the cached SkImage. The diagnostic must neither rebind the dead name nor
+	// label an untouched initialized buffer as a successful black texture.
+	if (!presenter.CaptureTileDiagnostics(context, target, frame, output / "before-delete", error))
+		throw std::runtime_error("pre-injection texture capture failed: " + error);
+	auto const live_row = read_csv_row(output / "before-delete" / "tiles.csv");
+	if (live_row.size() != 39 || live_row[23] != "0" || live_row[24] != "0" || live_row[38] != "1" || read_bytes(output / "before-delete" / "tile-2-gpu.rgba") != third.payload->primary)
+		throw std::runtime_error("a valid all-zero RGB spectrum was confused with failed readback");
+	auto const texture_id = static_cast<GLuint>(std::stoul(live_row.at(27)));
+	if (!texture_id || glIsTexture(texture_id) != GL_TRUE)
+		throw std::runtime_error("capture did not identify a live backend texture for fault injection");
+	glDeleteTextures(1, &texture_id);
+	if (glIsTexture(texture_id) != GL_FALSE || glGetError() != GL_NO_ERROR)
+		throw std::runtime_error("texture deletion fault injection failed");
+	auto const before_invalid = presenter.Metrics();
+	if (presenter.CaptureTileDiagnostics(context, target, frame, output / "after-delete", error) || error.empty() || glIsTexture(texture_id) != GL_FALSE || presenter.Health() != SkiaGlDeviceHealth::Healthy || presenter.LastFailure() != SkiaGlDeviceFailure::None)
+		throw std::runtime_error("capture recreated an invalid texture or hid its failure");
+	auto const failed_row = read_csv_row(output / "after-delete" / "tiles.csv");
+	if (failed_row.size() != 39 || failed_row[19] != "0" || !failed_row[20].empty() || failed_row[27] != std::to_string(texture_id) || failed_row[29] != "0" || failed_row[30] != "-1" || failed_row[31] != "-1" || failed_row[33] != "0" || failed_row[36] != "1" || failed_row[37] != "0" || failed_row[38] != "0" || std::filesystem::exists(output / "after-delete" / "tile-2-gpu.rgba"))
+		throw std::runtime_error("invalid texture capture reported initialized bytes as valid pixels");
+	auto const sentinel_bytes = read_bytes(output / "after-delete" / "tile-2-gpu-failed.rgba");
+	if (sentinel_bytes.size() != third.payload->primary.size() || !std::ranges::all_of(sentinel_bytes, [](std::uint8_t value) { return value == 0xA7; }))
+		throw std::runtime_error("failed readback lost its explicit nonzero sentinel");
+	auto const after_invalid = presenter.Metrics();
+	if (after_invalid.content_uploads != before_invalid.content_uploads || after_invalid.content_evictions != before_invalid.content_evictions || after_invalid.submits != before_invalid.submits)
+		throw std::runtime_error("failed capture repaired or redrew the invalid texture");
+	// Simulate the externally recreated scratch-name boundary independently:
+	// the name exists, but no level-zero storage has ever been allocated.
+	GLint previous_texture = 0;
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+	glBindTexture(GL_TEXTURE_2D, texture_id);
+	glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous_texture));
+	if (glIsTexture(texture_id) != GL_TRUE || glGetError() != GL_NO_ERROR)
+		throw std::runtime_error("empty texture storage fault injection failed");
+	if (presenter.CaptureTileDiagnostics(context, target, frame, output / "empty-storage", error) || error.empty() || presenter.Health() != SkiaGlDeviceHealth::Healthy)
+		throw std::runtime_error("capture hid an existing texture with no allocated storage");
+	auto const empty_row = read_csv_row(output / "empty-storage" / "tiles.csv");
+	if (empty_row.size() != 39 || empty_row[19] != "0" || !empty_row[20].empty() || empty_row[29] != "1" || empty_row[30] != "0" || empty_row[31] != "0" || empty_row[33] != "0" || empty_row[36] != "1" || empty_row[37] != "0" || empty_row[38] != "0" || std::filesystem::exists(output / "empty-storage" / "tile-2-gpu.rgba"))
+		throw std::runtime_error("capture treated unallocated storage as valid black pixels");
+	GLint actual_width = -1;
+	GLint actual_height = -1;
+	glBindTexture(GL_TEXTURE_2D, texture_id);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &actual_width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &actual_height);
+	glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previous_texture));
+	if (actual_width != 0 || actual_height != 0 || glGetError() != GL_NO_ERROR || presenter.Metrics().content_uploads != before_invalid.content_uploads || presenter.Metrics().submits != before_invalid.submits)
+		throw std::runtime_error("capture allocated storage or redrew the invalid texture");
 	presenter.Release(context);
 	std::cout << "tile_diagnostic_capture.identity_readback_pack_state_readonly_lru_failure_isolation=passed\n";
 }

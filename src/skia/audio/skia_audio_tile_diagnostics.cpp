@@ -1,12 +1,12 @@
 #include "skia_audio_tile_diagnostics.h"
 
+#include "../../audio_tile_diagnostics_enabled.h"
+
 #include "skia_audio_content.h"
 #include "skia_audio_upload_payload.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <string_view>
 
 namespace aegisub::skia::audio {
 namespace {
@@ -34,14 +34,7 @@ void ObserveFinite(TileDataSummary& summary, double value, bool& has_finite) noe
 }
 
 bool TileDiagnosticsEnabled() noexcept {
-	static bool const enabled = [] {
-		auto const *value = std::getenv("AEGISUB_AUDIO_TILE_DIAGNOSTICS");
-		if (!value)
-			return false;
-		auto const setting = std::string_view(value);
-		return setting == "1" || setting == "true" || setting == "yes" || setting == "on";
-	}();
-	return enabled;
+	return aegisub::AudioTileDiagnosticsEnabled();
 }
 
 std::uint64_t HashDiagnosticBytes(std::span<std::uint8_t const> bytes) noexcept {
