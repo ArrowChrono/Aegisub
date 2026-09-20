@@ -136,6 +136,69 @@ struct OpenGLText::OpenGLTextGlyph {
 	}
 };
 
+// Allocate the retirement node with the atlas, not in a destructor. Moving it
+// onto the owning context's queue cannot allocate, throw or call OpenGL.
+struct OpenGLTextTextureDeleter::Texture {
+	GLuint tex = 0;
+	int width = 0;
+	int height = 0;
+	std::unique_ptr<Texture> next;
+	std::uint64_t serial = 0;
+	void const *owner = nullptr;
+	OpenGLText const *text = nullptr;
+	char const *delete_source = "text_destruction";
+
+	void Trace(char const *phase, char const *source) const noexcept try {
+		if (!serial || !agi::log::log)
+			return;
+		auto const *current = CurrentTextNativeContext();
+		std::ostringstream message;
+		message.imbue(std::locale::classic());
+		message << "phase=" << phase << " source=" << source << " text=" << text
+				<< " serial=" << serial << " id=" << tex
+				<< " width=" << width << " height=" << height
+				<< " owner=" << owner << " current=" << current
+				<< " mismatch=" << (owner != current);
+		LOG_I("audio/tile-diagnostics/gl-text") << message.str();
+	}
+	catch (...) {
+		// Optional diagnostics must not affect retirement or deletion.
+	}
+};
+
+OpenGLTextTextureDeleter::OpenGLTextTextureDeleter() = default;
+OpenGLTextTextureDeleter::~OpenGLTextTextureDeleter() { Abandon(); }
+
+void OpenGLTextTextureDeleter::Retire(std::unique_ptr<Texture> texture) noexcept {
+	if (!texture || !texture->tex)
+		return;
+	if (abandoned) {
+		texture->Trace("texture_abandon", texture->delete_source);
+		return;
+	}
+	texture->Trace("texture_retire", texture->delete_source);
+	texture->next = std::move(pending);
+	pending = std::move(texture);
+}
+
+void OpenGLTextTextureDeleter::Drain() noexcept {
+	while (pending) {
+		auto texture = std::move(pending);
+		pending = std::move(texture->next);
+		texture->Trace("texture_delete", texture->delete_source);
+		glDeleteTextures(1, &texture->tex);
+	}
+}
+
+void OpenGLTextTextureDeleter::Abandon() noexcept {
+	abandoned = true;
+	while (pending) {
+		auto texture = std::move(pending);
+		pending = std::move(texture->next);
+		texture->Trace("texture_abandon", texture->delete_source);
+	}
+}
+
 /// @class OpenGLTextTexture
 /// @brief OpenGL texture which stores one or more glyphs as sprites
 class OpenGLText::OpenGLTextTexture final {
@@ -145,29 +208,8 @@ class OpenGLText::OpenGLTextTexture final {
 	                ///< are only as tall as needed to fit the glyphs in them
 	int width;      ///< Width of the texture
 	int height;     ///< Height of the texture
-	GLuint tex = 0; ///< The texture
-
-	std::uint64_t diagnostic_serial = 0;
-	void const *diagnostic_owner = nullptr;
-	OpenGLText const *diagnostic_text = nullptr;
-	char const *diagnostic_delete_source = "text_destruction";
-
-	void TraceTexture(char const *phase, char const *source) const noexcept try {
-		if (!diagnostic_serial || !agi::log::log)
-			return;
-		auto const *current = CurrentTextNativeContext();
-		std::ostringstream message;
-		message.imbue(std::locale::classic());
-		message << "phase=" << phase << " source=" << source << " text=" << diagnostic_text
-				<< " serial=" << diagnostic_serial << " id=" << tex
-				<< " width=" << width << " height=" << height
-				<< " owner=" << diagnostic_owner << " current=" << current
-				<< " mismatch=" << (diagnostic_owner != current);
-		LOG_I("audio/tile-diagnostics/gl-text") << message.str();
-	}
-	catch (...) {
-		// Destruction must still execute the original GL call if tracing fails.
-	}
+	OpenGLTextTextureDeleter& deleter;
+	std::unique_ptr<OpenGLTextTextureDeleter::Texture> texture;
 
 	/// Insert the glyph into this texture at the current coordinates
 	void Insert(OpenGLTextGlyph &glyph) {
@@ -179,7 +221,6 @@ class OpenGLText::OpenGLTextTexture final {
 		glyph.y1 = float(y)/height;
 		glyph.x2 = float(x+w)/width;
 		glyph.y2 = float(y+h)/height;
-		glyph.tex = tex;
 
 		// Create bitmap and bind it to a DC
 		wxBitmap bmp(w + (w & 1), h + (h & 1), 24);
@@ -202,9 +243,10 @@ class OpenGLText::OpenGLTextTexture final {
 			alpha[write] = *read;
 
 		// Upload image to video memory
-		glBindTexture(GL_TEXTURE_2D, tex);
+		glBindTexture(GL_TEXTURE_2D, texture->tex);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, imgw, imgh, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, &alpha[0]);
 		if (glGetError()) throw agi::EnvironmentError("Internal OpenGL text renderer error: Error uploading glyph data to video memory.");
+		glyph.tex = texture->tex;
 	}
 
 public:
@@ -212,47 +254,49 @@ public:
 	OpenGLTextTexture& operator=(OpenGLTextTexture const&) = delete;
 
 	OpenGLTextTexture(OpenGLTextGlyph& glyph, OpenGLText const *text)
-		: width(std::max(SmallestPowerOf2(glyph.w), 64)), height(std::max(SmallestPowerOf2(glyph.h), 64)) {
-		width = height = std::max(width, height);
+		: width(std::max(SmallestPowerOf2(glyph.w), 64)), height(std::max(SmallestPowerOf2(glyph.h), 64)),
+		  deleter(*text->texture_deleter), texture(std::make_unique<OpenGLTextTextureDeleter::Texture>()) {
+		try {
+			width = height = std::max(width, height);
 
-		// Generate and bind
-		glGenTextures(1, &tex);
-		glBindTexture(GL_TEXTURE_2D, tex);
+			// Generate and bind
+			glGenTextures(1, &texture->tex);
+			glBindTexture(GL_TEXTURE_2D, texture->tex);
 
-		// Texture parameters
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+			// Texture parameters
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
 
-		// Allocate texture
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_ALPHA, GL_UNSIGNED_BYTE, nullptr);
-		if (glGetError()) throw agi::EnvironmentError("Internal OpenGL text renderer error: Could not allocate text texture");
+			// Allocate texture
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_ALPHA, GL_UNSIGNED_BYTE, nullptr);
+			if (glGetError())
+				throw agi::EnvironmentError("Internal OpenGL text renderer error: Could not allocate text texture");
 
-		if (aegisub::AudioTileDiagnosticsEnabled()) {
-			static std::atomic<std::uint64_t> next_serial{0};
-			diagnostic_serial = next_serial.fetch_add(1, std::memory_order_relaxed) + 1;
-			diagnostic_owner = CurrentTextNativeContext();
-			diagnostic_text = text;
-			TraceTexture("texture_create", "glyph_atlas");
+			if (aegisub::AudioTileDiagnosticsEnabled()) {
+				static std::atomic<std::uint64_t> next_serial{0};
+				texture->serial = next_serial.fetch_add(1, std::memory_order_relaxed) + 1;
+				texture->owner = CurrentTextNativeContext();
+				texture->text = text;
+				texture->width = width;
+				texture->height = height;
+				texture->Trace("texture_create", "glyph_atlas");
+			}
+
+			TryToInsert(glyph);
 		}
-
-		TryToInsert(glyph);
-	}
-
-	OpenGLTextTexture(OpenGLTextTexture&& rhs) noexcept
-		: x(rhs.x), y(rhs.y), nextY(rhs.nextY), width(rhs.width), height(rhs.height), tex(rhs.tex), diagnostic_serial(rhs.diagnostic_serial), diagnostic_owner(rhs.diagnostic_owner), diagnostic_text(rhs.diagnostic_text), diagnostic_delete_source(rhs.diagnostic_delete_source) {
-		rhs.tex = 0;
-	}
-
-	~OpenGLTextTexture() {
-		if (tex) {
-			TraceTexture("texture_delete", diagnostic_delete_source);
-			glDeleteTextures(1, &tex);
+		catch (...) {
+			deleter.Retire(std::move(texture));
+			throw;
 		}
 	}
 
-	void SetDiagnosticDeleteSource(char const *source) noexcept { diagnostic_delete_source = source; }
+	OpenGLTextTexture(OpenGLTextTexture&&) noexcept = default;
+
+	~OpenGLTextTexture() { deleter.Retire(std::move(texture)); }
+
+	void SetDiagnosticDeleteSource(char const *source) noexcept { texture->delete_source = source; }
 
 	/// @brief Try to insert a glyph into this texture
 	/// @param[in][out] glyph Texture to insert
@@ -277,7 +321,8 @@ public:
 	}
 };
 
-OpenGLText::OpenGLText() { }
+OpenGLText::OpenGLText(std::shared_ptr<OpenGLTextTextureDeleter> texture_deleter)
+	: texture_deleter(std::move(texture_deleter)) {}
 OpenGLText::~OpenGLText() {
 	TraceTextLifecycle("text_destruction", this, textures.size());
 }
@@ -295,7 +340,7 @@ void OpenGLText::SetFont(std::string const& face, int size, bool bold, bool ital
 	font.SetPointSize(size);
 	font.SetWeight(bold ? wxFONTWEIGHT_BOLD : wxFONTWEIGHT_NORMAL);
 
-	// Delete all old data
+	// Retire GPU handles without touching whichever context is current here.
 	if (aegisub::AudioTileDiagnosticsEnabled()) {
 		TraceTextLifecycle("font_reset", this, textures.size());
 		for (auto& texture : textures)
@@ -335,7 +380,9 @@ void OpenGLText::Print(const std::string &text, int x, int y) {
 
 void OpenGLText::DrawString(const std::string &text, int x, int y) {
 	for (char curChar : text) {
-		OpenGLTextGlyph const& glyph = GetGlyph(curChar);
+		OpenGLTextGlyph& glyph = GetGlyph(curChar);
+		if (!glyph.tex)
+			UploadGlyph(glyph);
 		glyph.Draw(x, y);
 		x += glyph.w;
 	}
@@ -351,21 +398,15 @@ void OpenGLText::GetExtent(std::string const& text, int &w, int &h) {
 	}
 }
 
-OpenGLText::OpenGLTextGlyph const& OpenGLText::GetGlyph(int i) {
+OpenGLText::OpenGLTextGlyph& OpenGLText::GetGlyph(int i) {
 	auto res = glyphs.find(i);
-	return res != glyphs.end() ? res->second : CreateGlyph(i);
+	return res != glyphs.end() ? res->second : glyphs.emplace(i, OpenGLTextGlyph(i, font)).first->second;
 }
 
-OpenGLText::OpenGLTextGlyph const& OpenGLText::CreateGlyph(int n) {
-	OpenGLTextGlyph &glyph = glyphs.emplace(n, OpenGLTextGlyph(n, font)).first->second;
-
-	// Insert into some texture
+void OpenGLText::UploadGlyph(OpenGLTextGlyph& glyph) {
 	for (auto& texture : textures) {
 		if (texture.TryToInsert(glyph))
-			return glyph;
+			return;
 	}
-
-	// No texture could fit it, create a new one
 	textures.emplace_back(glyph, this);
-	return glyph;
 }

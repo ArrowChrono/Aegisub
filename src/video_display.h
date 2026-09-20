@@ -63,6 +63,7 @@ class RetinaHelper;
 class AsyncVideoProvider;
 class VideoColorZoomPreview;
 class OpenGLText;
+class OpenGLTextTextureDeleter;
 #ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
 class SkiaSurfaceProvider;
 class SkiaTextLayoutCache;
@@ -172,6 +173,8 @@ class VideoDisplay final : public wxGLCanvas {
 	std::unique_ptr<VisualToolBase> tool;
 	/// Text cache shared by persistent visual-guide labels on the legacy path.
 	std::unique_ptr<OpenGLText> visualGuideText;
+	/// Only this display releases text textures, with its own GL context current.
+	std::shared_ptr<OpenGLTextTextureDeleter> text_texture_deleter;
 	/// The toolbar used by individual typesetting tools
 	wxToolBar* toolBar;
 
@@ -435,6 +438,8 @@ public:
 	std::optional<wxPoint> MapScreenToVideoPixel(wxPoint screen_pos) const;
 
 	void SetTool(std::unique_ptr<VisualToolBase> new_tool);
+	/// Bind legacy text resource lifetime to this display's GL context.
+	std::unique_ptr<OpenGLText> CreateTextRenderer();
 	bool IsVisualToolInteracting() const noexcept;
 
 	bool ToolIsType(std::type_info const& type) const;

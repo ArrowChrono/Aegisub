@@ -128,7 +128,7 @@ VisualToolMotionTrack::EditPose PoseFromAnchorRide(
 
 VisualToolMotionTrack::VisualToolMotionTrack(VideoDisplay *parent,
 											 agi::Context *context)
-	: VisualToolBase(parent, context), context(context), gl_text(agi::make_unique<OpenGLText>()) {}
+	: VisualToolBase(parent, context), context(context), gl_text(parent->CreateTextRenderer()) {}
 
 // Out of line: OpenGLText is only forward-declared in the header, so the
 // unique_ptr deleter needs the complete type here.

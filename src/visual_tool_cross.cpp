@@ -35,10 +35,7 @@
 #include <algorithm>
 
 VisualToolCross::VisualToolCross(VideoDisplay *parent, agi::Context *context)
-: VisualTool<VisualDraggableFeature>(parent, context)
-, gl_text(agi::make_unique<OpenGLText>())
-, coordinate_font_size_opt(OPT_GET("Tool/Visual/Coordinate Font Size"))
-{
+	: VisualTool<VisualDraggableFeature>(parent, context), gl_text(parent->CreateTextRenderer()), coordinate_font_size_opt(OPT_GET("Tool/Visual/Coordinate Font Size")) {
 	connections.push_back(OPT_SUB("Tool/Visual/Coordinate Font Size", [=](agi::OptionValue const&) { parent->Render(); }));
 }
 

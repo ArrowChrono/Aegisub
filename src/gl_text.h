@@ -29,12 +29,31 @@
 
 #include <boost/container/map.hpp>
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <wx/font.h>
 
 namespace agi { struct Color; }
+
+/// One retirement queue per GL context. Text objects never delete GL resources
+/// themselves; their display drains this queue with its context current.
+class OpenGLTextTextureDeleter {
+	struct Texture;
+	std::unique_ptr<Texture> pending;
+	bool abandoned = false;
+	void Retire(std::unique_ptr<Texture> texture) noexcept;
+	friend class OpenGLText;
+
+	public:
+	OpenGLTextTextureDeleter();
+	~OpenGLTextTextureDeleter();
+	/// Requires the owning context to be current; does not switch or query it.
+	void Drain() noexcept;
+	/// The context is going away. Never issue GL calls, even for later retirements.
+	void Abandon() noexcept;
+};
 
 class OpenGLText {
 	struct OpenGLTextGlyph;
@@ -49,6 +68,7 @@ class OpenGLText {
 	std::string fontFace;
 	wxFont font;
 
+	std::shared_ptr<OpenGLTextTextureDeleter> texture_deleter;
 	glyphMap glyphs;
 
 	std::vector<OpenGLTextTexture> textures;
@@ -56,12 +76,12 @@ class OpenGLText {
 	OpenGLText(OpenGLText const&) = delete;
 	OpenGLText& operator=(OpenGLText const&) = delete;
 
-	/// @brief Get the glyph for the character chr, creating it if necessary
+	/// @brief Get CPU glyph metrics, creating them if necessary
 	/// @param chr Character to get the glyph of
 	/// @return The appropriate OpenGLTextGlyph
-	OpenGLTextGlyph const& GetGlyph(int chr);
-	/// @brief Create a new glyph
-	OpenGLTextGlyph const& CreateGlyph(int chr);
+	OpenGLTextGlyph& GetGlyph(int chr);
+	/// Upload a measured glyph while the owning context is current.
+	void UploadGlyph(OpenGLTextGlyph& glyph);
 
 	void DrawString(const std::string &text,int x,int y);
 public:
@@ -77,7 +97,7 @@ public:
 	/// @brief Set the text color
 	/// @param col   Color
 	void SetColour(agi::Color col);
-	/// @brief Print a string on screen
+	/// @brief Print a string on screen with the owning GL context current
 	/// @param text String to print
 	/// @param x    x coordinate
 	/// @param y    y coordinate
@@ -88,6 +108,6 @@ public:
 	/// @param[out] h    Height
 	void GetExtent(const std::string &text,int &w,int &h);
 
-	OpenGLText();
+	explicit OpenGLText(std::shared_ptr<OpenGLTextTextureDeleter> texture_deleter);
 	~OpenGLText();
 };

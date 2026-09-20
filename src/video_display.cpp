@@ -590,21 +590,23 @@ bool VideoDisplay::InitContext() {
 	bool made_current = false;
 	{
 		perf_trace::VideoUiDurationScope trace("video_display.context_activate");
-		made_current = SetCurrent(*glContext);
+		made_current = glContext->IsOK() && SetCurrent(*glContext);
 		trace.SetDetails(made_current ? 1 : 0, created_context ? 1 : 0);
 	}
 	TraceVideoGlLifecycle("context_activate", this, glContext.get(),
 						  reinterpret_cast<std::uintptr_t>(tool.get()), reinterpret_cast<std::uintptr_t>(tool.get()), made_current);
+	if (!made_current) {
 #ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
-	if (IsSkiaVideoRuntimeRequested() && (!glContext->IsOK() || !made_current)) {
-		if (auto *compositor = EnsureSkiaVideoCompositor())
-			compositor->NotifyContextActivationFailure(CurrentSkiaGlContextToken());
-		LogSkiaVideoFailureOnce();
+		if (IsSkiaVideoRuntimeRequested()) {
+			if (auto *compositor = EnsureSkiaVideoCompositor())
+				compositor->NotifyContextActivationFailure(CurrentSkiaGlContextToken());
+			LogSkiaVideoFailureOnce();
+		}
+#endif
 		return false;
 	}
-#else
-	(void)made_current;
-#endif
+	if (text_texture_deleter)
+		text_texture_deleter->Drain();
 	return true;
 }
 
@@ -1316,7 +1318,7 @@ void VideoDisplay::DrawLegacyOverlayPass(wxSize const& client_size) {
 
 	if (con->GetUI().visualGuideController) {
 		if (!visualGuideText)
-			visualGuideText = agi::make_unique<OpenGLText>();
+			visualGuideText = CreateTextRenderer();
 		OpenGLWrapper guide_gl;
 		LegacyVideoOverlayDrawContext guide_context(guide_gl, *visualGuideText);
 		DrawVisualGuides(guide_context);
@@ -2933,6 +2935,12 @@ void VideoDisplay::SetZoomFromBoxText(wxCommandEvent &) {
 		SetZoom(value / 100.);
 }
 
+std::unique_ptr<OpenGLText> VideoDisplay::CreateTextRenderer() {
+	if (!text_texture_deleter)
+		text_texture_deleter = std::make_shared<OpenGLTextTextureDeleter>();
+	return std::make_unique<OpenGLText>(text_texture_deleter);
+}
+
 void VideoDisplay::SetTool(std::unique_ptr<VisualToolBase> new_tool) {
 	// Defer GL object destruction until the next render has made this canvas
 	// current. This releases a possibly full-window invert backing on tool
@@ -2941,6 +2949,8 @@ void VideoDisplay::SetTool(std::unique_ptr<VisualToolBase> new_tool) {
 	skia_overlay_backing_release_requested = true;
 #endif
 	// Set the tool first to prevent repeated initialization from VideoDisplay::Render
+	// Legacy text atlases retire into text_texture_deleter; the old tool and its
+	// subscriptions still die immediately without touching the current GL context.
 	auto const old_tool = reinterpret_cast<std::uintptr_t>(tool.get());
 	TraceVideoGlLifecycle("set_tool_before", this, glContext.get(), old_tool, reinterpret_cast<std::uintptr_t>(new_tool.get()));
 	tool = std::move(new_tool);
@@ -3102,8 +3112,7 @@ Vector2D VideoDisplay::GetMousePosition() const {
 
 void VideoDisplay::Unload() {
 	ResetRenderers();
-	if (glContext)
-		SetCurrent(*glContext);
+	bool const context_active = glContext && glContext->IsOK() && SetCurrent(*glContext);
 	DestroySceneCache();
 #ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
 	DestroySkiaOverlayBacking();
@@ -3115,6 +3124,12 @@ void VideoDisplay::Unload() {
 #endif
 	visualGuideText.reset();
 	tool.reset();
+	if (text_texture_deleter) {
+		if (context_active)
+			text_texture_deleter->Drain();
+		text_texture_deleter->Abandon();
+		text_texture_deleter.reset();
+	}
 	glContext.reset();
 	pending_packet = { };
 	has_pending_packet = false;

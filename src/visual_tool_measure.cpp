@@ -445,8 +445,8 @@ wxString FormatPx(double value) {
 }
 
 VisualToolMeasure::VisualToolMeasure(VideoDisplay *parent, agi::Context *context)
-	: VisualToolBase(parent, context), controller(context->GetUI().visualGuideController), text(agi::make_unique<OpenGLText>()), fit_text_to_target(OPT_GET(kPerspectiveFitTextOption)->GetBool()), fax_frz_only(OPT_GET(kPerspectiveFaxFrzOnlyOption)->GetBool()), perspective_decimal_places(perspective::ClampPerspectiveDecimalPlaces(
-																																																																		OPT_GET(kPerspectiveDecimalPlacesOption)->GetInt())),
+	: VisualToolBase(parent, context), controller(context->GetUI().visualGuideController), text(parent->CreateTextRenderer()), fit_text_to_target(OPT_GET(kPerspectiveFitTextOption)->GetBool()), fax_frz_only(OPT_GET(kPerspectiveFaxFrzOnlyOption)->GetBool()), perspective_decimal_places(perspective::ClampPerspectiveDecimalPlaces(
+																																																																	  OPT_GET(kPerspectiveDecimalPlacesOption)->GetInt())),
 	  perspective_shape_tolerance(OPT_GET(kPerspectiveShapeToleranceOption)->GetDouble()),
 	  invalid_line_color_opt(OPT_GET("Colour/Visual Tools/Perspective Invalid Line")), invalid_handle_color_opt(OPT_GET("Colour/Visual Tools/Perspective Invalid Handle")) {
 	auto core = c->GetCore();
