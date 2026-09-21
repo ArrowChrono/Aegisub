@@ -67,7 +67,11 @@ void Save::Close() {
 		fp.reset();
 		throw fs::WriteDenied(failed_tmp);
 	}
+	fp->close();
+	bool const close_failed = fp->fail();
 	fp.reset(); // Need to close before rename on Windows to unlock the file
+	if (close_failed)
+		throw fs::WriteDenied(tmp_name);
 	for (int i = 0; i < 10; ++i) {
 		try {
 			fs::Rename(tmp_name, file_name);
@@ -80,6 +84,12 @@ void Save::Close() {
 			util::sleep_for(100);
 		}
 	}
+}
+
+void Save::Cancel() noexcept {
+	fp.reset();
+	std::error_code error;
+	std::filesystem::remove(tmp_name, error);
 }
 
 Save::~Save() {

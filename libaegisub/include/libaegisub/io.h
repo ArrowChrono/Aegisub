@@ -60,7 +60,7 @@ inline std::ofstream OpenOutputFileStream(fs::path const& file, std::ios::openmo
 std::unique_ptr<std::istream> Open(fs::path const& file, bool binary = false);
 
 class Save {
-	std::unique_ptr<std::ostream> fp;
+	std::unique_ptr<std::ofstream> fp;
 	const fs::path file_name;
 	const fs::path tmp_name;
 
@@ -69,6 +69,8 @@ public:
 	~Save();
 	std::ostream& Get() { return *fp; }
 	void Close();
+	/// Discard an unfinished save without replacing the destination. Idempotent.
+	void Cancel() noexcept;
 };
 
 	} // namespace io

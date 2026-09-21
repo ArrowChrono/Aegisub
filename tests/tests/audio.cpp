@@ -27,10 +27,12 @@
 #include <libaegisub/fs.h>
 #include <libaegisub/make_unique.h>
 #include <libaegisub/path.h>
+#include <libaegisub/scope_exit.h>
 #include <libaegisub/util.h>
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -1891,4 +1893,125 @@ TEST(lagi_audio, hd_cache_instances_keep_independent_samples_when_opened_togethe
 #endif
 	for (size_t index = 1; index < caches.size(); ++index)
 		check_cache(index);
+}
+
+namespace {
+struct AudioExportDirectory {
+	std::filesystem::path path = agi::fs::UniquePath(std::filesystem::temp_directory_path() / "aegisub-audio-export-%%%%%%%%");
+	AudioExportDirectory() { std::filesystem::create_directory(path); }
+	~AudioExportDirectory() {
+		std::error_code error;
+		std::filesystem::remove_all(path, error);
+	}
+	[[nodiscard]] std::vector<std::string> TempFiles() const {
+		std::vector<std::string> files;
+		agi::fs::DirectoryIterator(path, "clip_tmp_*.wav").GetAll(files);
+		return files;
+	}
+};
+
+std::string ReadExportFile(std::filesystem::path const& path) {
+	std::ifstream input(path, std::ios::binary);
+	return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+class ExportAudioProvider final : public TestAudioProvider<int16_t> {
+	int fail_on_read;
+
+	public:
+	mutable int reads = 0;
+	explicit ExportAudioProvider(int failure = 0) : TestAudioProvider<int16_t>(1), fail_on_read(failure) {}
+	void FillBuffer(void *buffer, int64_t start, int64_t count) const override {
+		++reads;
+		TestAudioProvider<int16_t>::FillBuffer(buffer, start, count);
+		if (reads == fail_on_read) {
+			throw agi::AudioDecodeError("injected audio export failure");
+		}
+	}
+};
+}
+
+TEST(lagi_audio, save_audio_clip_commits_complete_multichunk_pcm_over_existing_file) {
+	AudioExportDirectory directory;
+	auto const target = directory.path / "clip.wav";
+	{
+		std::ofstream(target, std::ios::binary) << "old destination";
+	}
+	ExportAudioProvider source;
+	source.bias = 123;
+	ASSERT_NO_THROW(agi::SaveAudioClip(source, target, 0, 1000));
+	EXPECT_EQ(2, source.reads);
+	auto const bytes = ReadExportFile(target);
+	ASSERT_EQ(44U + 48000U * 2U, bytes.size());
+	EXPECT_EQ("RIFF", bytes.substr(0, 4));
+	EXPECT_EQ("WAVEfmt ", bytes.substr(8, 8));
+	EXPECT_EQ("data", bytes.substr(36, 4));
+	for (size_t i = 0; i < 48000; ++i) {
+		auto const expected = static_cast<uint16_t>(i + 123);
+		auto const actual = static_cast<unsigned char>(bytes[44 + i * 2]) | (static_cast<unsigned char>(bytes[45 + i * 2]) << 8);
+		ASSERT_EQ(expected, actual) << "sample " << i;
+	}
+	EXPECT_TRUE(directory.TempFiles().empty());
+}
+
+class AudioExportDecodeFailureTest : public ::testing::TestWithParam<std::pair<int, bool>> {};
+
+TEST_P(AudioExportDecodeFailureTest, abort_preserves_destination_and_removes_partial_wave) {
+	auto const [failed_read, destination_exists] = GetParam();
+	AudioExportDirectory directory;
+	auto const target = directory.path / "clip.wav";
+	if (destination_exists) {
+		std::ofstream(target, std::ios::binary) << "original destination bytes";
+	}
+	ExportAudioProvider source(failed_read);
+	EXPECT_THROW(agi::SaveAudioClip(source, target, 0, 1000), agi::AudioDecodeError);
+	EXPECT_EQ(failed_read, source.reads);
+	if (destination_exists) {
+		EXPECT_EQ("original destination bytes", ReadExportFile(target));
+	}
+	else {
+		EXPECT_FALSE(std::filesystem::exists(target));
+	}
+	EXPECT_TRUE(directory.TempFiles().empty());
+}
+
+INSTANTIATE_TEST_SUITE_P(FirstAndLateRead, AudioExportDecodeFailureTest,
+						 ::testing::Values(std::pair{1, false}, std::pair{1, true}, std::pair{2, false}, std::pair{2, true}),
+						 [](auto const& info) {
+							 return std::string(info.param.first == 1 ? "First" : "Late") + (info.param.second ? "Existing" : "Absent");
+						 });
+
+TEST(lagi_audio, save_audio_clip_reports_commit_failure_and_cleans_temporary_wave) {
+	AudioExportDirectory directory;
+	auto const target = directory.path / "clip.wav";
+	ASSERT_TRUE(std::filesystem::create_directory(target));
+	{
+		std::ofstream(target / "marker", std::ios::binary) << "preserved destination";
+	}
+	ExportAudioProvider source;
+	EXPECT_THROW(agi::SaveAudioClip(source, target, 0, 1000), agi::fs::FileSystemError);
+	EXPECT_EQ(2, source.reads);
+	EXPECT_TRUE(std::filesystem::is_directory(target));
+	EXPECT_EQ("preserved destination", ReadExportFile(target / "marker"));
+	EXPECT_TRUE(directory.TempFiles().empty());
+}
+
+TEST(lagi_audio, save_audio_clip_rejects_unready_ram_cache_without_replacing_destination) {
+	AudioExportDirectory directory;
+	auto const target = directory.path / "clip.wav";
+	{
+		std::ofstream(target, std::ios::binary) << "original destination";
+	}
+	auto source = std::make_unique<FrontierRamCacheAudioProvider>();
+	auto *raw = source.get();
+	auto cache = agi::CreateRAMAudioProvider(std::move(source));
+	auto release = agi::make_scope_exit([&] { raw->Release(); });
+	ASSERT_TRUE(raw->WaitUntilEntered());
+	ASSERT_EQ(FrontierRamCacheAudioProvider::BlockSamples, cache->GetDecodedSamples());
+	// This range begins in the ready first block and crosses the blocked second block.
+	int const start_ms = static_cast<int>(FrontierRamCacheAudioProvider::BlockSamples * 1000 / 48000);
+	EXPECT_THROW(agi::SaveAudioClip(*cache, target, start_ms, start_ms + 2), agi::AudioDecodeError);
+	EXPECT_EQ("original destination", ReadExportFile(target));
+	EXPECT_TRUE(directory.TempFiles().empty());
+	EXPECT_FALSE(raw->timed_out.load());
 }

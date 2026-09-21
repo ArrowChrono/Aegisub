@@ -274,6 +274,8 @@ class writer {
 
 public:
 	writer(agi::fs::path const& filename) : outfile(filename, true), out(outfile.Get()) { }
+	~writer() { outfile.Cancel(); }
+	void Close() { outfile.Close(); }
 
 	template<int N>
 	void write(const char(&str)[N]) {
@@ -322,8 +324,9 @@ void SaveAudioClip(AudioProvider const& provider, fs::path const& path, int star
 	for (int64_t i = start_sample; i < end_sample; i += spr) {
 		spr = std::min<size_t>(spr, end_sample - i);
 		buf.resize(spr * bytes_per_sample);
-		provider.GetAudio(&buf[0], i, spr);
+		provider.GetAudioChecked(buf.data(), i, spr);
 		out.write(buf);
 	}
+	out.Close();
 }
 }
