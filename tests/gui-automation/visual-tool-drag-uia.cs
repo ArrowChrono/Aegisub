@@ -48,7 +48,7 @@ static int Run(DriverOptions options)
     var fixture = Fixture.Build(eventCount, options.Selection == "multi");
     File.WriteAllText(fixturePath, fixture, new UTF8Encoding(false));
     File.Copy(fixturePath, originalPath, overwrite: true);
-    WriteProfileConfig(profilePath);
+    WriteProfileConfig(profilePath, options.SubtitleProvider);
     Directory.CreateDirectory(hostArtifactsPath);
 
     Process? process = null;
@@ -112,8 +112,13 @@ static int Run(DriverOptions options)
             throw new InvalidOperationException(
                 $"Expected {eventCount} loaded dialogue lines, found {initial.Dialogues.Count}");
 
+        var selectedLineCount = 1;
         SelectVisibleDialogueLines(mainWindow);
+        if (options.Selection == "multi")
+            selectedLineCount = ConfirmMultiSelection(mainWindow, process, options.TimeoutSeconds, "after_select_visible");
         SelectDragTool(mainWindow);
+        if (options.Selection == "multi")
+            selectedLineCount = ConfirmMultiSelection(mainWindow, process, options.TimeoutSeconds, "after_select_drag_tool");
         Thread.Sleep(250);
         videoCanvas = WaitForVideoCanvas(process, options.TimeoutSeconds);
         if (!GetClientRect(videoCanvas, out var videoClient)
@@ -134,6 +139,9 @@ static int Run(DriverOptions options)
             Math.Clamp(start.Y + options.DeltaY, 16, videoClient.Height - 16));
         var actualDeltaX = final.X - start.X;
         var actualDeltaY = final.Y - start.Y;
+        var queueMarker = options.InputMode == "paced-hold"
+            ? FindQueueMarkerButton(mainHwnd, videoCanvas)
+            : 0;
 
         long started;
         long posted;
@@ -172,12 +180,14 @@ static int Run(DriverOptions options)
                 if (options.MotionRepeat > 1 && pointIndex < points.Count - 1)
                     mouseKeys |= NativeConstants.MouseKeyShift;
                 PostMouseToWindow(videoCanvas, WindowMessage.MouseMove, points[pointIndex], mouseKeys);
+                if (options.MotionIntervalMilliseconds > 0 && pointIndex < points.Count - 1)
+                    Thread.Sleep(options.MotionIntervalMilliseconds);
             }
             posted = Stopwatch.GetTimestamp();
 
             if (options.InputMode == "paced-hold")
             {
-                SendWindowMessage(videoCanvas, WindowMessage.Null, 0, 0);
+                WaitForPostedMotions(queueMarker, process, options.TimeoutSeconds);
                 WaitForCapture(videoCanvas, captured: true, process, options.TimeoutSeconds);
                 motionBarrierReached = true;
 
@@ -189,6 +199,12 @@ static int Run(DriverOptions options)
                 captureRetainedDuringHold = true;
             }
 
+            var capture = GuiThreadInfo.Create();
+            var videoThread = GetWindowThreadProcessId(videoCanvas, out _);
+            if (videoThread == 0 || !GetGUIThreadInfo(videoThread, ref capture))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not inspect capture before release");
+            if (capture.Capture != videoCanvas)
+                throw new InvalidOperationException("Mouse capture was already lost before the driver posted its release");
             PostMouseToWindow(videoCanvas, WindowMessage.LeftButtonUp, final, 0);
             WaitForCapture(videoCanvas, captured: false, process, options.TimeoutSeconds);
             // Capture is released before the final synchronous render. A cross-process
@@ -218,6 +234,11 @@ static int Run(DriverOptions options)
         var trace = options.Trace == "on"
             ? TraceMetrics.Read(profilePath, options.MotionCount, options.TraceWindow)
             : null;
+        var actualProvider = trace?.Environment.SubtitleProvider
+            ?? ReadSelectedSubtitleProvider(profilePath);
+        if (!string.Equals(actualProvider, options.SubtitleProvider, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Requested subtitles provider '{options.SubtitleProvider}', observed '{actualProvider}'");
         if (options.InputMode == "paced-hold"
             && trace!.PresentedRendersAfterFinalCommitBeforeInteractionEnd < 1)
             throw new InvalidOperationException(
@@ -226,7 +247,7 @@ static int Run(DriverOptions options)
 
         var result = new
         {
-            version = 3,
+            version = 4,
             scenario = options.InputMode == "throughput"
                 ? $"{options.Size}-{options.Selection}"
                 : $"{options.Size}-{options.Selection}-{options.InputMode}",
@@ -236,16 +257,18 @@ static int Run(DriverOptions options)
             trace = options.Trace,
             trace_window_mode = options.TraceWindow,
             event_count = eventCount,
-            selected_line_count = options.Selection == "multi" ? 2 : 1,
+            selected_line_count = selectedLineCount,
             motion_count = options.MotionCount,
             motion_repeat = options.MotionRepeat,
+            motion_interval_requested_ms = options.MotionIntervalMilliseconds,
+            requested_subtitle_provider = options.SubtitleProvider,
             canvas = new { width = videoClient.Width, height = videoClient.Height },
             client_delta = new { x = actualDeltaX, y = actualDeltaY },
             expected_script_delta = new { x = expectedDelta.X, y = expectedDelta.Y },
             environment = trace?.Environment ?? new TraceEnvironment(
                 "unknown",
                 "opengl",
-                "libass",
+                actualProvider,
                 640,
                 480,
                 true),
@@ -324,7 +347,7 @@ static void PrepareArtifactsDirectory(string artifacts)
 static void AddArgument(ProcessStartInfo startInfo, string value) =>
     startInfo.ArgumentList.Add(value);
 
-static void WriteProfileConfig(string profilePath)
+static void WriteProfileConfig(string profilePath, string subtitleProvider)
 {
     var userPath = Path.Combine(profilePath, "user");
     Directory.CreateDirectory(userPath);
@@ -340,7 +363,7 @@ static void WriteProfileConfig(string profilePath)
         },
         ["Subtitle"] = new Dictionary<string, object>
         {
-            ["Provider"] = "libass",
+            ["Provider"] = subtitleProvider,
             ["Use STC"] = true,
         },
         ["Tool"] = new Dictionary<string, object>
@@ -357,6 +380,101 @@ static void WriteProfileConfig(string profilePath)
     };
     var json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
     File.WriteAllText(Path.Combine(userPath, "config.json"), json, new UTF8Encoding(false));
+}
+
+static string ReadSelectedSubtitleProvider(string profilePath)
+{
+    var logRoot = Path.Combine(profilePath, "user", "log");
+    if (!Directory.Exists(logRoot))
+        return "unknown";
+
+    const string prefix = "Selected subtitles provider: ";
+    var providers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var path in Directory.EnumerateFiles(logRoot, "*.ndjson"))
+    {
+        foreach (var line in File.ReadLines(path))
+        {
+            using var entry = JsonDocument.Parse(line);
+            if (entry.RootElement.TryGetProperty("section", out var section)
+                && section.GetString() == "subtitle/provider/select"
+                && entry.RootElement.TryGetProperty("message", out var message)
+                && message.GetString() is { } text
+                && text.StartsWith(prefix, StringComparison.Ordinal))
+                providers.Add(text[prefix.Length..]);
+        }
+    }
+    return providers.Count == 1 ? providers.Single() : "unknown";
+}
+
+static nint FindQueueMarkerButton(nint mainWindow, nint videoCanvas)
+{
+    var videoThread = GetWindowThreadProcessId(videoCanvas, out _);
+    foreach (var hwnd in EnumerateChildWindows(mainWindow).Where(IsWindowVisible))
+    {
+        if (!NativeClassName(hwnd).Equals("Button", StringComparison.OrdinalIgnoreCase))
+            continue;
+        var text = new char[256];
+        if (SendMessageTextTimeout(
+                hwnd, 0x000D, text.Length, text,
+                SendMessageTimeoutFlags.AbortIfHung | SendMessageTimeoutFlags.Block,
+                1000, out var length) == 0)
+            throw new TimeoutException("Could not read a queue-marker button label");
+        if (new string(text, 0, length.ToInt32()).Replace("&", "", StringComparison.Ordinal) != "Show Original")
+            continue;
+        if (videoThread == 0 || GetWindowThreadProcessId(hwnd, out _) != videoThread)
+            throw new InvalidOperationException("Queue-marker button is not on the video GUI thread");
+        return hwnd;
+    }
+    throw new InvalidOperationException("Could not locate the Show Original queue-marker button");
+}
+
+static void WaitForPostedMotions(nint marker, Process process, int timeoutSeconds)
+{
+    var initialCheck = SendWindowMessage(marker, WindowMessage.ButtonGetCheck, 0, 0);
+    if ((SendWindowMessage(marker, WindowMessage.ButtonGetState, 0, 0) & 4) != 0)
+        throw new InvalidOperationException("Queue-marker button was already visually pressed");
+    var deadline = Deadline(timeoutSeconds);
+    var reached = false;
+    try
+    {
+        // Unlike a sent WM_NULL, this marker follows the posted mouse moves on
+        // the same GUI thread. BM_SETSTATE changes only the button's visual
+        // pressed state: it neither checks the checkbox nor sends a click.
+        if (!PostMessage(marker, (uint)WindowMessage.ButtonSetState, 1, 0))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not post the motion queue marker");
+        WaitForButtonPushState(marker, true, process, deadline);
+        reached = true;
+    }
+    finally
+    {
+        // Keep reset behind the marker even if a timeout leaves it queued.
+        if (!PostMessage(marker, (uint)WindowMessage.ButtonSetState, 0, 0))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not post the queue-marker reset");
+        if (reached)
+        {
+            WaitForButtonPushState(marker, false, process, deadline);
+            if (SendWindowMessage(marker, WindowMessage.ButtonGetCheck, 0, 0) != initialCheck)
+                throw new InvalidOperationException("Queue marker changed the checkbox value");
+        }
+    }
+}
+
+static void WaitForButtonPushState(nint marker, bool pushed, Process process, long deadline)
+{
+    while (Stopwatch.GetTimestamp() < deadline)
+    {
+        ThrowIfProcessFailed(process);
+        var remainingMs = (deadline - Stopwatch.GetTimestamp()) * 1000.0 / Stopwatch.Frequency;
+        if (remainingMs <= 0)
+            break;
+        var state = SendWindowMessage(
+            marker, WindowMessage.ButtonGetState, 0, 0,
+            (uint)Math.Clamp(Math.Ceiling(remainingMs), 1, 2000));
+        if (Stopwatch.GetTimestamp() < deadline && ((state & 4) != 0) == pushed)
+            return;
+        Thread.Sleep(10);
+    }
+    throw new TimeoutException($"Posted queue marker did not reach pushed={pushed}");
 }
 
 static nint WaitForVideoCanvas(Process process, int timeoutSeconds)
@@ -392,6 +510,39 @@ static void SelectVisibleDialogueLines(AutomationElement mainWindow)
         ?? throw new InvalidOperationException("Select-visible-lines toolbar command was not found");
     UiaDriver.Invoke(button);
     Thread.Sleep(200);
+}
+
+static int ConfirmMultiSelection(AutomationElement mainWindow, Process process, int timeoutSeconds, string stage)
+{
+    var deadline = Deadline(timeoutSeconds);
+    var status = "<StatusBar unavailable>";
+    do
+    {
+        ThrowIfProcessFailed(process);
+        var names = new List<string>();
+        var descriptions = new List<string>();
+        var statusBars = mainWindow.FindAll(
+            TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.StatusBar));
+        foreach (AutomationElement statusBar in statusBars)
+        {
+            var fields = statusBar.FindAll(TreeScope.Descendants, Condition.TrueCondition);
+            foreach (var field in new[] { statusBar }.Concat(fields.Cast<AutomationElement>()))
+            {
+                names.Add(field.Current.Name ?? string.Empty);
+                descriptions.Add($"{field.Current.ControlType.ProgrammaticName}: {JsonSerializer.Serialize(field.Current.Name)}");
+            }
+        }
+        if (names.Any(name => Regex.IsMatch(name, @"(?<!\d)2 lines selected(?!\w)", RegexOptions.CultureInvariant)))
+        {
+            Console.WriteLine($"visual_tool_drag.selection_confirmed={stage}:2");
+            return 2;
+        }
+        status = statusBars.Count == 0 ? "<StatusBar unavailable>" : string.Join("; ", descriptions);
+        Thread.Sleep(50);
+    } while (Stopwatch.GetTimestamp() < deadline);
+    throw new InvalidOperationException(
+        $"Multi-selection was not confirmed at {stage}: expected '2 lines selected'; status={status}");
 }
 
 static void SelectDragTool(AutomationElement mainWindow)
@@ -650,7 +801,7 @@ static void PostMouseToWindow(nint hwnd, WindowMessage message, PointI point, in
         throw new Win32Exception(Marshal.GetLastWin32Error(), $"PostMessage failed for {message}");
 }
 
-static void SendWindowMessage(nint hwnd, WindowMessage message, nint wParam, nint lParam)
+static nint SendWindowMessage(nint hwnd, WindowMessage message, nint wParam, nint lParam, uint timeoutMilliseconds = 3000)
 {
     var sent = SendMessageTimeout(
         hwnd,
@@ -658,10 +809,11 @@ static void SendWindowMessage(nint hwnd, WindowMessage message, nint wParam, nin
         wParam,
         lParam,
         SendMessageTimeoutFlags.AbortIfHung | SendMessageTimeoutFlags.Block,
-        3000,
-        out _);
+        timeoutMilliseconds,
+        out var result);
     if (sent == 0)
         throw new Win32Exception(Marshal.GetLastWin32Error(), $"SendMessageTimeout failed for {message}");
+    return result;
 }
 
 static nint PackPoint(PointI point) =>
@@ -757,6 +909,16 @@ static extern nint SendMessageTimeout(
 [DllImport("user32.dll", SetLastError = true)]
 static extern bool PostMessage(nint hwnd, uint message, nint wParam, nint lParam);
 
+[DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+static extern nint SendMessageTextTimeout(
+    nint hwnd,
+    uint message,
+    nint wParam,
+    [Out] char[] text,
+    SendMessageTimeoutFlags flags,
+    uint timeoutMilliseconds,
+    out nint result);
+
 [DllImport("user32.dll", SetLastError = true)]
 static extern uint GetWindowThreadProcessId(nint hwnd, out uint processId);
 
@@ -785,8 +947,10 @@ sealed record DriverOptions(
     string Selection,
     string Trace,
     string TraceWindow,
+    string SubtitleProvider,
     int MotionCount,
     int MotionRepeat,
+    int MotionIntervalMilliseconds,
     int HoldMilliseconds,
     int SmallEventCount,
     int LargeEventCount,
@@ -807,8 +971,10 @@ sealed record DriverOptions(
         var selection = "single";
         var trace = "off";
         var traceWindow = "markers";
+        var subtitleProvider = "libass";
         var motions = 128;
         var motionRepeat = 1;
+        var motionIntervalMilliseconds = 0;
         var holdMilliseconds = 150;
         var smallEvents = 32;
         var largeEvents = 10000;
@@ -844,8 +1010,10 @@ sealed record DriverOptions(
                 case "--selection": selection = Choice(Value(), option, "single", "multi"); break;
                 case "--trace": trace = Choice(Value(), option, "off", "on"); break;
                 case "--trace-window": traceWindow = Choice(Value(), option, "markers", "legacy"); break;
+                case "--subtitle-provider": subtitleProvider = Value(); break;
                 case "--motions": motions = Positive(Value(), option); break;
                 case "--motion-repeat": motionRepeat = Positive(Value(), option); break;
+                case "--motion-interval-ms": motionIntervalMilliseconds = NonNegative(Value(), option); break;
                 case "--hold-ms": holdMilliseconds = NonNegative(Value(), option); break;
                 case "--small-events": smallEvents = Positive(Value(), option); break;
                 case "--large-events": largeEvents = Positive(Value(), option); break;
@@ -865,6 +1033,8 @@ sealed record DriverOptions(
             throw new ArgumentException("--video is required");
         if (string.IsNullOrWhiteSpace(artifacts))
             throw new ArgumentException("--artifacts is required");
+        if (string.IsNullOrWhiteSpace(subtitleProvider))
+            throw new ArgumentException("--subtitle-provider must name a provider");
         if (motions < 100)
             throw new ArgumentException("--motions must be at least 100");
         if (smallEvents < 2 || largeEvents < 2)
@@ -890,8 +1060,10 @@ sealed record DriverOptions(
             selection,
             trace,
             traceWindow,
+            subtitleProvider,
             motions,
             motionRepeat,
+            motionIntervalMilliseconds,
             holdMilliseconds,
             smallEvents,
             largeEvents,
@@ -929,9 +1101,14 @@ sealed record DriverOptions(
         Console.WriteLine("  [--input-mode throughput|paced-hold|double-click] [--hold-ms N]");
         Console.WriteLine("  [--size small|large] [--selection single|multi] [--trace off|on]");
         Console.WriteLine("  [--trace-window markers|legacy]");
+        Console.WriteLine("  [--subtitle-provider NAME] requires the exact runtime provider (default: libass)");
         Console.WriteLine("  [--motions N>=100] [--small-events N] [--large-events N]");
         Console.WriteLine("  [--motion-repeat N] repeats each effective position with suppressed-axis jitter");
+        Console.WriteLine("  [--motion-interval-ms N] requested spacing for synthetic PostMessage motions (default: 0)");
         Console.WriteLine("  [--timeout-seconds N] [--settle-ms N] [--width N --height N]");
+        Console.WriteLine("  Synthetic PostMessage input does not hold the OS left mouse button down.");
+        Console.WriteLine("  Real/system mouse events can interrupt capture and fail a run.");
+        Console.WriteLine("  Early capture loss alone does not establish a product regression.");
     }
 }
 
@@ -1336,6 +1513,9 @@ enum WindowMessage : uint
 {
     Null = 0x0000,
     Close = 0x0010,
+    ButtonGetCheck = 0x00F0,
+    ButtonGetState = 0x00F2,
+    ButtonSetState = 0x00F3,
     MouseMove = 0x0200,
     LeftButtonDown = 0x0201,
     LeftButtonUp = 0x0202,

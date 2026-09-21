@@ -11,6 +11,13 @@ param(
     [int]$Motions = 128,
     [ValidateRange(1, 16)]
     [int]$MotionRepeat = 1,
+    # Requested pacing for synthetic PostMessage input, not physical-button state.
+    # Real/system mouse events can interrupt capture; early loss fails the run
+    # and cannot by itself establish a product regression.
+    [ValidateRange(0, 1000)]
+    [int]$MotionIntervalMilliseconds = 0,
+    [ValidateNotNullOrEmpty()]
+    [string]$SubtitleProvider = "libass",
     [ValidateRange(100, 250)]
     [int]$HoldMilliseconds = 150,
     [ValidateRange(2, 1000000)]
@@ -134,12 +141,15 @@ function New-FailureRow {
         git_dirty = $script:GitDirty
         renderer = $null
         subtitle_provider = $null
+        requested_subtitle_provider = $SubtitleProvider
         video_width = $null
         video_height = $null
         subtitle_use_stc = $null
         event_count = $null
         motion_count = $null
         motion_repeat = $MotionRepeat
+        motion_interval_requested_ms = $MotionIntervalMilliseconds
+        post_ms = $null
         drain_ms = $null
         motions_per_second = $null
         capture_released = $null
@@ -223,6 +233,8 @@ function Invoke-DriverRun {
         "--trace-window", $TraceWindow,
         "--motions", $Motions.ToString([System.Globalization.CultureInfo]::InvariantCulture),
         "--motion-repeat", $MotionRepeat.ToString([System.Globalization.CultureInfo]::InvariantCulture),
+        "--motion-interval-ms", $MotionIntervalMilliseconds.ToString([System.Globalization.CultureInfo]::InvariantCulture),
+        "--subtitle-provider", $SubtitleProvider,
         "--hold-ms", $HoldMilliseconds.ToString([System.Globalization.CultureInfo]::InvariantCulture),
         "--small-events", $SmallEvents.ToString([System.Globalization.CultureInfo]::InvariantCulture),
         "--large-events", $LargeEvents.ToString([System.Globalization.CultureInfo]::InvariantCulture),
@@ -299,10 +311,18 @@ function Invoke-DriverRun {
     if ($result.input_mode -ne $InputMode -or
         $result.motion_count -ne $Motions -or
         $result.motion_repeat -ne $MotionRepeat -or
+        $result.motion_interval_requested_ms -ne $MotionIntervalMilliseconds -or
+        $result.requested_subtitle_provider -ne $SubtitleProvider -or
         $result.input.capture_released -ne $true -or
         $result.correctness.drag_valid -ne $true -or
         $result.correctness.undo_restored -ne $true) {
         throw "Driver result failed matrix correctness validation."
+    }
+    if (-not [string]::Equals(
+        [string]$result.environment.SubtitleProvider,
+        $SubtitleProvider,
+        [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Driver did not verify the requested subtitles provider '$SubtitleProvider'."
     }
     if ($Trace -eq "on") {
         $commitCount = [int]$result.trace_metrics.Commit.Count
@@ -325,7 +345,6 @@ function Invoke-DriverRun {
         if ([string]::IsNullOrWhiteSpace([string]$environment.BuildLabel) -or
             $environment.BuildLabel -eq "unknown" -or
             -not [string]::Equals([string]$environment.Renderer, "OpenGL", [System.StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([string]$environment.SubtitleProvider, "libass", [System.StringComparison]::OrdinalIgnoreCase) -or
             [int]$environment.VideoWidth -ne 640 -or
             [int]$environment.VideoHeight -ne 480 -or
             $environment.SubtitleUseStc -ne $true) {
@@ -512,12 +531,15 @@ for ($runIndex = 1; $runIndex -le $Repetitions; ++$runIndex) {
                     git_dirty = $script:GitDirty
                     renderer = Get-OptionalProperty $environment "Renderer"
                     subtitle_provider = Get-OptionalProperty $environment "SubtitleProvider"
+                    requested_subtitle_provider = $result.requested_subtitle_provider
                     video_width = Get-OptionalProperty $environment "VideoWidth"
                     video_height = Get-OptionalProperty $environment "VideoHeight"
                     subtitle_use_stc = Get-OptionalProperty $environment "SubtitleUseStc"
                     event_count = $result.event_count
                     motion_count = $result.motion_count
                     motion_repeat = $result.motion_repeat
+                    motion_interval_requested_ms = $result.motion_interval_requested_ms
+                    post_ms = [double]$result.input.post_ms
                     drain_ms = [double]$result.input.drain_ms
                     motions_per_second = [double]$result.input.motions_per_second
                     capture_released = [bool]$result.input.capture_released
@@ -588,7 +610,7 @@ for ($runIndex = 1; $runIndex -le $Repetitions; ++$runIndex) {
 $matrixTimer.Stop()
 
 $summary = [ordered]@{
-    version = 5
+    version = 6
     label = $Label
     run_mode = $RunMode
     git_revision = $script:GitRevision
@@ -603,6 +625,8 @@ $summary = [ordered]@{
     runner_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
     motions = $Motions
     motion_repeat = $MotionRepeat
+    motion_interval_requested_ms = $MotionIntervalMilliseconds
+    requested_subtitle_provider = $SubtitleProvider
     hold_milliseconds = if ($RunMode -eq "paced-hold") { $HoldMilliseconds } else { 0 }
     small_events = $SmallEvents
     large_events = $LargeEvents
