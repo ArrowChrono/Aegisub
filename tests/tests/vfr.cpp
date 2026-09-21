@@ -84,6 +84,52 @@ TEST(lagi_vfr, unloaded_time_at_frame_is_zero_for_all_time_modes) {
 	}
 }
 
+TEST(lagi_vfr, diagnostic_state_preserves_cfr_vfr_and_v1_extrapolation) {
+	for (auto const& original : {
+			 Framerate(), Framerate(23.976), Framerate(30000, 1001),
+			 Framerate({0, 41, 83, 130, 165, 208}), Framerate({0, 0, 1}),
+			 Framerate("data/vfr/in/v1_out_of_order.txt"),
+			 Framerate("data/vfr/in/v1_assume_int.txt")}) {
+		auto restored = Framerate::FromState(original.GetState());
+		EXPECT_EQ(original.IsLoaded(), restored.IsLoaded());
+		EXPECT_EQ(original.IsVFR(), restored.IsVFR());
+		EXPECT_EQ(original.FPSFraction(), restored.FPSFraction());
+		EXPECT_EQ(original.NeedsDropFrames(), restored.NeedsDropFrames());
+		EXPECT_EQ(original.GetState().timecodes, restored.GetState().timecodes);
+		for (int frame : {-100, -1, 0, 1, 5, 99, 3000, 10000}) {
+			for (auto mode : {EXACT, START, END}) {
+				int const time = original.TimeAtFrame(frame, mode);
+				EXPECT_EQ(time, restored.TimeAtFrame(frame, mode));
+				if (original.IsLoaded())
+					EXPECT_EQ(original.FrameAtTime(time, mode), restored.FrameAtTime(time, mode));
+			}
+		}
+	}
+}
+
+TEST(lagi_vfr, diagnostic_state_rejects_invalid_rate_and_timecode_table) {
+	auto state = Framerate({0, 41, 83}).GetState();
+	state.denominator = 0;
+	EXPECT_THROW(Framerate::FromState(state), InvalidFramerate);
+	state.denominator = int64_t{1} << 61;
+	EXPECT_THROW(Framerate::FromState(state), InvalidFramerate);
+	state = Framerate({0, 41, 83}).GetState();
+	state.numerator = -1;
+	EXPECT_THROW(Framerate::FromState(state), InvalidFramerate);
+	state = Framerate({0, 41, 83}).GetState();
+	state.timecodes.clear();
+	EXPECT_THROW(Framerate::FromState(state), InvalidFramerate);
+	state.timecodes = {0, 83, 41};
+	EXPECT_THROW(Framerate::FromState(state), InvalidFramerate);
+	state.timecodes = {1, 41, 83};
+	EXPECT_THROW(Framerate::FromState(state), InvalidFramerate);
+	state.timecodes = {0, 0};
+	EXPECT_THROW(Framerate::FromState(state), InvalidFramerate);
+	state = Framerate().GetState();
+	state.last = 1;
+	EXPECT_THROW(Framerate::FromState(state), InvalidFramerate);
+}
+
 TEST(lagi_vfr, constructors_bad_v1) {
 	EXPECT_THROW(Framerate("data/vfr/in/v1_bad_seperators.txt"), MalformedLine);
 	EXPECT_THROW(Framerate("data/vfr/in/v1_too_few_parts.txt"), MalformedLine);

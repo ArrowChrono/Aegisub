@@ -94,6 +94,33 @@ Manual changes to the tracked subtitle lines, their styles, script settings or
 timecodes require Analyze again; undoing an Apply also requires a fresh analysis.
 An explicit Analyze after Apply starts from the currently selected subtitle lines.
 
+## Debug data
+
+After Analyze, **Export debug data...** saves a single versioned JSON file without
+changing the subtitles. Export before or after Apply: it retains the original
+Analyze-time selected lines, not the generated replacement events, and includes
+the current apply settings and newly computed plan. Changing the model/direction
+or editing the source requires a matching valid analysis, just as for Apply.
+
+The file contains the selected subtitle text, referenced styles and font names,
+rendering script settings, every tracking sample and transform, reference/domain
+metadata, exact CFR/VFR frame mapping, and plan output or failure diagnostics.
+Video/audio, project file paths, unrelated dialogue, attachments and unrelated
+script metadata are not collected. This is **not anonymized subtitle content**:
+review the JSON before sharing it. The save location is chosen explicitly.
+
+For offline debugging, `ReadMotionTrackDebugBundle` reconstructs an owned ASS
+source plus `ApplyPlanInput`; passing its `file`, `targets` and `input` to
+`BuildApplyPlan` replays planning without decoding video. Its `exported_plan`
+provides the original output for comparison. Geometry-aware Similarity Compact
+and full-geometry replay need equivalent fonts and the same text-extents provider
+when the capture used platform font measurement. Without a provider, Similarity
+keeps the strict scalar fit and may emit more transforms. The package does not
+embed fonts or measurements. Bounds residuals describe projected geometry, not a
+pixel-by-pixel comparison of rendered alpha masks.
+
+## Geometry and source effects
+
 Affine and Perspective compose the tracked map with the subtitle's existing
 geometry. They can write position, scale, shear and all three rotation tags. The
 existing perspective solver evaluates PlayRes, LayoutRes, alignment and the source

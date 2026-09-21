@@ -49,6 +49,17 @@ DEFINE_EXCEPTION(UnknownFormat, Error);
 /// Invalid line encountered in a timecode file
 DEFINE_EXCEPTION(MalformedLine, Error);
 
+/// Exact frame mapping for offline diagnostic replay, including v1's
+/// extrapolation phase. Reconstructing just the visible frame timestamps can
+/// change START at frame zero and times beyond the stored table.
+struct FramerateState {
+	int64_t numerator = 0;
+	int64_t denominator = 1000000000;
+	int64_t last = 0;
+	std::vector<int> timecodes{0};
+	bool drop = false;
+};
+
 /// @class Framerate
 /// @brief Class for managing everything related to converting frames to times
 ///        or vice versa
@@ -109,6 +120,9 @@ public:
 	/// @param timecodes Vector of frame start times in milliseconds
 	Framerate(std::vector<int> timecodes);
 	Framerate(std::initializer_list<int> timecodes);
+
+	[[nodiscard]] FramerateState GetState() const;
+	static Framerate FromState(FramerateState state);
 
 	/// @brief Get the frame visible at a given time
 	/// @param ms Time in milliseconds

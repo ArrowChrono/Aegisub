@@ -22,6 +22,7 @@
 #include "include/aegisub/context_ui.h"
 #include "libresrc/libresrc.h"
 #include "motion_track/dialog_option_events.h"
+#include "motion_track/debug_bundle.h"
 #include "motion_track/raw_batch_motion_frame_reader.h"
 #include "motion_track/similarity_backend.h"
 #include "options.h"
@@ -32,12 +33,16 @@
 #include "selection_controller.h"
 #include "video_controller.h"
 #include "video_display.h"
+#include "version.h"
 
 #include <libaegisub/ass/time.h>
+#include <libaegisub/fs.h>
+#include <libaegisub/io.h>
 #include <libaegisub/vfr.h>
 
 #include <wx/button.h>
 #include <wx/combobox.h>
+#include <wx/filedlg.h>
 #include <wx/msgdlg.h>
 #include <wx/sizer.h>
 #include <wx/spinctrl.h>
@@ -51,6 +56,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <sstream>
 
 using namespace aegisub::motion_track;
 
@@ -257,15 +263,19 @@ DialogMotionTrack::DialogMotionTrack(agi::Context *c)
 	auto *buttons = new wxBoxSizer(wxHORIZONTAL);
 	analyze_btn = new wxButton(this, -1, _("Analyze"));
 	apply_btn = new wxButton(this, -1, _("Apply"));
+	export_btn = new wxButton(this, -1, _("Export debug data..."));
+	export_btn->SetToolTip(_("Save original selected subtitles, tracking samples and the current apply plan as JSON; no video or project file paths"));
 	close_btn = new wxButton(this, wxID_CANCEL, _("Close"));
 	buttons->Add(analyze_btn, 0, wxRIGHT, 5);
 	buttons->Add(apply_btn, 0, wxRIGHT, 5);
 	buttons->AddStretchSpacer();
+	buttons->Add(export_btn, 0, wxRIGHT, 5);
 	buttons->Add(close_btn, 0);
 	root->Add(buttons, 0, wxALL | wxEXPAND, 5);
 
 	analyze_btn->Bind(wxEVT_BUTTON, &DialogMotionTrack::OnAnalyze, this);
 	apply_btn->Bind(wxEVT_BUTTON, &DialogMotionTrack::OnApply, this);
+	export_btn->Bind(wxEVT_BUTTON, &DialogMotionTrack::OnExportDebug, this);
 	preview->Bind(wxEVT_CHECKBOX, &DialogMotionTrack::OnPreviewToggle, this);
 	for (wxComboBox *choice : {model, direction})
 		BindDialogOptionChanges(*choice, DialogOptionControl::Choice,
@@ -607,6 +617,7 @@ void DialogMotionTrack::OnAnalyze(wxCommandEvent&) {
 
 	analyze_btn->Disable();
 	apply_btn->Disable();
+	export_btn->Disable();
 
 	// Range caps are decided from the request so a No / TooLong / lease
 	// failure cannot SetBackendSeed over a completed session.
@@ -817,6 +828,43 @@ void DialogMotionTrack::OnApply(wxCommandEvent&) {
 	RefreshVideoDisplay();
 }
 
+void DialogMotionTrack::OnExportDebug(wxCommandEvent&) {
+	ApplyPlanInput input;
+	std::vector<AssDialogue *> targets;
+	if (!BuildApplyInput(input, targets))
+		return;
+	try {
+		// Materialize before a modal can pump video/source change events and
+		// invalidate the Analyze-time targets. Export never commits subtitles.
+		auto const& ass = *context->GetCore().ass;
+		auto plan = BuildApplyPlan(ass, targets, input);
+		auto snapshot = session->Capture();
+		std::ostringstream buffer;
+		WriteMotionTrackDebugBundle(buffer, ass, targets, input, plan,
+									snapshot.get(), GetAegisubShortVersionString());
+		auto answer = wxMessageBox(
+			_("The debug file contains the original selected subtitle text, font names, tracking samples and current apply settings.\n"
+			  "It does not include video, audio, unrelated subtitles or project file paths.\n\n"
+			  "Review subtitle content before sharing this file. Continue?"),
+			_("Export Motion Track debug data"), wxYES_NO | wxICON_INFORMATION, this);
+		if (answer != wxYES)
+			return;
+		wxFileDialog dialog(this, _("Export Motion Track debug data"), wxEmptyString,
+							to_wx("motion-track-debug.json"), _("JSON files (*.json)|*.json"), wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+		if (dialog.ShowModal() != wxID_OK)
+			return;
+		agi::io::Save file(agi::fs::PathFromString(from_wx(dialog.GetPath())));
+		file.Get() << buffer.str();
+		file.Close();
+	}
+	catch (agi::Exception const& error) {
+		wxMessageBox(to_wx(error.GetMessage()), _("Motion Track"), wxOK | wxICON_ERROR, this);
+	}
+	catch (std::exception const& error) {
+		wxMessageBox(to_wx(error.what()), _("Motion Track"), wxOK | wxICON_ERROR, this);
+	}
+}
+
 void DialogMotionTrack::OnPreviewToggle(wxCommandEvent&) {
 	plan_preview_.reset();
 	if (preview->GetValue()) {
@@ -950,6 +998,8 @@ void DialogMotionTrack::RefreshButtons() {
 	bool const can_apply = !analyze_running_ && snap && snap->success_count > 0 &&
 						   MotionTrackSettingsMatch(*snap, SelectedDirection(), SelectedModel());
 	apply_btn->Enable(can_apply);
+	export_btn->Enable(!analyze_running_ && snap && !snap->samples.empty() &&
+					   MotionTrackSettingsMatch(*snap, SelectedDirection(), SelectedModel()));
 	preview->Enable(can_apply);
 }
 

@@ -82,10 +82,12 @@ class DialogMotionTrack final : public wxDialog {
 	wxTextCtrl *stats = nullptr;
 	wxButton *analyze_btn = nullptr;
 	wxButton *apply_btn = nullptr;
+	wxButton *export_btn = nullptr;
 	wxButton *close_btn = nullptr;
 
 	void OnAnalyze(wxCommandEvent&);
 	void OnApply(wxCommandEvent&);
+	void OnExportDebug(wxCommandEvent&);
 	void OnPreviewToggle(wxCommandEvent&);
 	void OnTrackingSettingsChanged();
 	void OnApplyOptionsChanged();

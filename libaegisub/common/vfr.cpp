@@ -28,6 +28,7 @@
 #include <cmath>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <numeric>
 #include <utility>
 
@@ -171,6 +172,29 @@ Framerate::Framerate(std::initializer_list<int> timecodes)
 : timecodes(timecodes)
 {
 	SetFromTimecodes();
+}
+
+FramerateState Framerate::GetState() const {
+	return {.numerator = numerator, .denominator = denominator, .last = last, .timecodes = timecodes, .drop = drop};
+}
+
+Framerate Framerate::FromState(FramerateState state) {
+	if (state.numerator < 0 || state.denominator <= 0 ||
+		state.denominator > std::numeric_limits<int64_t>::max() / 1000 ||
+		state.last > std::numeric_limits<int64_t>::max() - state.numerator / 2 ||
+		state.last < 0 || state.timecodes.empty() || state.timecodes.front() != 0 ||
+		!std::ranges::is_sorted(state.timecodes) ||
+		(state.timecodes.size() == 1 && state.last != 0) ||
+		(state.timecodes.size() > 1 && state.timecodes.back() == 0) ||
+		(state.numerator == 0 && (state.last != 0 || state.timecodes.size() != 1)))
+		throw InvalidFramerate("Invalid serialized frame mapping");
+	Framerate result;
+	result.numerator = state.numerator;
+	result.denominator = state.denominator;
+	result.last = state.last;
+	result.timecodes = std::move(state.timecodes);
+	result.drop = state.drop;
+	return result;
 }
 
 Framerate::Framerate(fs::path const& filename)

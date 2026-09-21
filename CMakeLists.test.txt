@@ -226,6 +226,7 @@ if(GTEST_FOUND)
         tests/tests/motion_track_raw_batch.cpp
         tests/tests/motion_track_apply_plan.cpp
         tests/tests/motion_track_apply_source.cpp
+        tests/tests/motion_track_debug_bundle.cpp
         tests/tests/motion_track_compact.cpp
         tests/tests/motion_track_compact_pixel.cpp
         tests/tests/motion_track_dialog_options.cpp
