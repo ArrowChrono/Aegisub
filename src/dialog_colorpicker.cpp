@@ -506,6 +506,7 @@ class DialogColorPicker final : public wxDialog {
 	wxTextCtrl *ass_input;
 	wxTextCtrl *html_input;
 	wxSpinCtrl *alpha_input;
+	wxTextCtrl *alpha_hex_input;
 
 	/// The eyedropper is set to a blank icon when it's clicked, so store its normal bitmap
 	wxBitmapBundle eyedropper_bitmap;
@@ -538,6 +539,7 @@ class DialogColorPicker final : public wxDialog {
 	/// Update all other controls as a result of modifying the HTML format control
 	void UpdateFromHTML();
 	void UpdateFromAlpha();
+	void UpdateFromAlphaHex();
 
 	void SetRGB(agi::Color new_color);
 	void SetHSL(unsigned char r, unsigned char g, unsigned char b);
@@ -643,7 +645,11 @@ DialogColorPicker::DialogColorPicker(wxWindow *parent, agi::Color initial_color,
 
 	// ass_input = new wxTextCtrl(this, -1, wxEmptyString, wxDefaultPosition, colorinput_size);
 	html_input = new wxTextCtrl(this, -1, wxEmptyString, wxDefaultPosition, colorinput_size);
-	alpha_input = new wxSpinCtrl(this, -1, wxEmptyString, wxDefaultPosition, colorinput_size, wxSP_ARROW_KEYS, 0, 255);
+	alpha_hex_input = new wxTextCtrl(this, -1);
+	alpha_input = new wxSpinCtrl(this, -1, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, 255);
+	alpha_input->SetInitialSize(alpha_input->GetSizeFromTextSize(GetTextExtent(wxS("255"))));
+	alpha_hex_input->SetInitialSize(alpha_hex_input->GetSizeFromTextSize(GetTextExtent(wxS("&HFF&"))));
+	alpha_hex_input->SetToolTip(_("ASS alpha: &H00& (opaque) to &HFF& (transparent)"));
 
 	for (auto& elem : hsl_input)
 		elem = new wxSpinCtrl(this, -1, wxEmptyString, wxDefaultPosition, colorinput_size, wxSP_ARROW_KEYS, 0, 255);
@@ -684,11 +690,22 @@ DialogColorPicker::DialogColorPicker(wxWindow *parent, agi::Color initial_color,
 	wxString rgb_labels[] = { _("Red:"), _("Green:"), _("Blue:") };
 	rgb_box->Add(MakeColorInputSizer(rgb_labels, rgb_input), 1, wxALL|wxEXPAND, border);
 
-	wxString ass_labels[] = { wxS("ASS:"), wxS("HTML:"), _("Alpha:") };
-	wxControl *ass_ctrls[] = { ass_input, html_input, alpha_input };
-	auto ass_colors_sizer = MakeColorInputSizer(ass_labels, ass_ctrls);
-	if (!alpha)
-		ass_colors_sizer->Hide(alpha_input);
+	auto *ass_colors_sizer = new wxFlexGridSizer(2, gap, gap);
+	ass_colors_sizer->Add(new wxStaticText(this, -1, wxS("ASS:")), 0, wxALIGN_CENTER_VERTICAL);
+	ass_colors_sizer->Add(ass_input, 0, wxEXPAND);
+	ass_colors_sizer->Add(new wxStaticText(this, -1, wxS("HTML:")), 0, wxALIGN_CENTER_VERTICAL);
+	ass_colors_sizer->Add(html_input, 0, wxEXPAND);
+	alpha_input->Show(alpha);
+	alpha_hex_input->Show(alpha);
+	if (alpha) {
+		auto *alpha_sizer = new wxBoxSizer(wxHORIZONTAL);
+		alpha_sizer->Add(alpha_hex_input, 1, wxEXPAND);
+		alpha_sizer->AddSpacer(gap);
+		alpha_sizer->Add(alpha_input, 1, wxEXPAND);
+		ass_colors_sizer->Add(new wxStaticText(this, -1, _("Alpha:")), 0, wxALIGN_CENTER_VERTICAL);
+		ass_colors_sizer->Add(alpha_sizer, 0, wxEXPAND);
+	}
+	ass_colors_sizer->AddGrowableCol(1);
 	rgb_box->Add(ass_colors_sizer, 0, wxALL|wxCENTER|wxEXPAND, border);
 
 	wxString hsl_labels[] = { _("Hue:"), _("Sat.:"), _("Lum.:") };
@@ -749,6 +766,11 @@ DialogColorPicker::DialogColorPicker(wxWindow *parent, agi::Color initial_color,
 	html_input->Bind(wxEVT_TEXT, bind(&DialogColorPicker::UpdateFromHTML, this));
 	alpha_input->Bind(wxEVT_SPINCTRL, bind(&DialogColorPicker::UpdateFromAlpha, this));
 	alpha_input->Bind(wxEVT_TEXT, bind(&DialogColorPicker::UpdateFromAlpha, this));
+	alpha_hex_input->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { UpdateFromAlphaHex(); });
+	alpha_hex_input->Bind(wxEVT_KILL_FOCUS, [this](wxFocusEvent& evt) {
+		alpha_hex_input->ChangeValue(wxString::Format(wxS("&H%02X&"), cur_color.a));
+		evt.Skip();
+	});
 
 	screen_dropper_icon->Bind(wxEVT_MOTION, &DialogColorPicker::OnDropperMouse, this);
 	screen_dropper_icon->Bind(wxEVT_LEFT_DOWN, &DialogColorPicker::OnDropperMouse, this);
@@ -791,6 +813,7 @@ static void change_value(wxSpinCtrl *ctrl, int value) {
 
 void DialogColorPicker::SetColor(agi::Color new_color) {
 	change_value(alpha_input, new_color.a);
+	alpha_hex_input->ChangeValue(wxString::Format(wxS("&H%02X&"), new_color.a));
 	alpha_slider->SetXY(0, new_color.a);
 	cur_color.a = new_color.a;
 
@@ -900,6 +923,30 @@ void DialogColorPicker::UpdateFromHTML() {
 
 void DialogColorPicker::UpdateFromAlpha() {
 	cur_color.a = alpha_input->GetValue();
+	alpha_hex_input->ChangeValue(wxString::Format(wxS("&H%02X&"), cur_color.a));
+	alpha_slider->SetXY(0, cur_color.a);
+	callback(cur_color);
+}
+
+void DialogColorPicker::UpdateFromAlphaHex() {
+	wxString value = alpha_hex_input->GetValue().Upper();
+	if (value.StartsWith(wxS("&H"))) {
+		value = value.Mid(2);
+		if (value.EndsWith(wxS("&"))) {
+			value.RemoveLast();
+		}
+	}
+	if (value.empty() || value.size() > 2 || value.find_first_not_of(wxS("0123456789ABCDEF")) != wxString::npos) {
+		return;
+	}
+
+	unsigned long alpha;
+	if (!value.ToULong(&alpha, 16)) {
+		return;
+	}
+
+	cur_color.a = static_cast<unsigned char>(alpha);
+	change_value(alpha_input, cur_color.a);
 	alpha_slider->SetXY(0, cur_color.a);
 	callback(cur_color);
 }
@@ -1114,8 +1161,7 @@ void DialogColorPicker::OnSliderChange(wxCommandEvent &) {
 
 void DialogColorPicker::OnAlphaSliderChange(wxCommandEvent &) {
 	change_value(alpha_input, alpha_slider->GetY());
-	cur_color.a = alpha_slider->GetY();
-	callback(cur_color);
+	UpdateFromAlpha();
 }
 
 void DialogColorPicker::OnRecentSelect(ValueEvent<agi::Color> &evt) {
