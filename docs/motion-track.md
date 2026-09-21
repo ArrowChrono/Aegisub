@@ -44,10 +44,13 @@ fade detection/recovery. These options do not apply to the other backends.
 
 Exact writes a static pose for each frame and merges adjacent identical output.
 Compact fits motion in actual video time, including variable-frame-rate timecodes.
-Its error setting is measured in video pixels, independent of PlayRes. Position
-and pose interpolation are checked separately for Translation/Similarity. Full
-geometry interpolation is checked by evaluating the generated ASS at every tracked
-frame and measuring the projected geometry in video pixels.
+Its error setting is measured in video pixels, independent of PlayRes. The default
+is **1 video pixel** (`100` in the dialog's 1/100-pixel control). Existing saved
+Compact error values are retained; upgrading does not reset them to the new
+default. Position and pose interpolation are checked separately for
+Translation/Similarity. Full geometry interpolation is checked by evaluating the
+generated ASS at every tracked frame and measuring the projected geometry in video
+pixels.
 Compact animation windows use ASS's serialized centisecond event times. If the
 selected position precision cannot meet the error budget, Apply rejects the plan
 and requests more position decimals or a larger Compact error.
@@ -55,6 +58,33 @@ Position decimals also controls full geometry position tags and Compact move
 endpoints. Other pose channels keep the precision needed by the geometry solver.
 Exact merges positions only when they serialize identically at the selected
 precision. Changing any apply option clears the old Plan preview immediately.
+
+Position fitting first tries a least-squares single `\move`. If that candidate
+exceeds the maximum per-frame error, a bounded feasibility search tries other
+endpoints before splitting the run. A feasible single segment takes priority
+over a smaller least-squares loss that would still require multiple events.
+Candidates must meet the same video-pixel error budget with coordinate-rounding
+reserve, and the output still passes the final serialized ASS position check.
+The search never crosses tracking-gap hold boundaries or relaxes the budget;
+it does not guarantee a global minimax solution or find every feasible segment.
+
+For Similarity, position fitting determines event boundaries. The initial pose
+fit uses a 0.05-degree rotation tolerance and 0.05 ASS percentage-point scale
+tolerance. If that fit needs multiple `\t` ramps, Compact also tries a single
+linear or accelerated transform against the subtitle's measured geometry. Nearly
+constant channels can remain static. This simplification is accepted only when
+the **combined** position, rotation and scale error stays within Compact error
+in video pixels at every visible tracked frame, using the serialized ASS values
+and event clock. It does not independently give each channel the full budget.
+
+Text simplification requires a font measurement provider; drawings can use their
+intrinsic bounds. Mixed font/size runs, unavailable measurements, and layouts
+which could wrap during the tracked zoom retain the initial strict pose fit.
+That fallback keeps its separate position and pose tolerances; it is not a new
+combined-pixel guarantee. If a single transform cannot meet the geometry budget,
+multiple `\t` ramps stay in the same event rather than splitting the subtitle
+for pose curvature alone. Nonlinear position paths and coverage boundaries can
+still require multiple events; full geometry output retains its separate rules.
 
 Compact, Exact and the other output options reuse the same Analyze data, including
 after Apply. Switching an output option lets you preview or apply again without

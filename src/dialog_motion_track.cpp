@@ -181,7 +181,7 @@ DialogMotionTrack::DialogMotionTrack(agi::Context *c)
 					0, wxALIGN_CENTRE_VERTICAL);
 	epsilon = new wxSpinCtrl(apply_box);
 	epsilon->SetRange(1, 1000);
-	// The option is in storage (video) pixels (0.75); the control is in
+	// The option is in storage (video) pixels (default 1.0); the control is in
 	// 1/100 px, so the threshold means the same on-screen error at every
 	// script resolution.
 	epsilon->SetValue(std::clamp(

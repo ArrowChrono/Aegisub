@@ -72,6 +72,26 @@ struct CompactFixture {
 		result.error = perspective::AssStateError::InvalidCaptureTime;
 		return result;
 	}
+
+	void ExpectStorageError(MotionTrackApplyPlan const& plan, double tolerance) const {
+		ASSERT_EQ(1U, plan.lines.size());
+		TrackSample const *expected = nullptr;
+		for (auto const& sample : input.samples) {
+			SCOPED_TRACE(sample.frame);
+			if (sample.status == TrackStatus::Ok)
+				expected = &sample;
+			ASSERT_NE(nullptr, expected);
+			auto const state = AtFrame(plan, sample.frame);
+			ASSERT_TRUE(state) << perspective::DescribeAssStateError(state.error);
+			double const dx = state.value.transform.position.x * input.storage_width /
+								  input.script_width -
+							  expected->center_x;
+			double const dy = state.value.transform.position.y * input.storage_height /
+								  input.script_height -
+							  expected->center_y;
+			EXPECT_LE(std::hypot(dx, dy), tolerance);
+		}
+	}
 };
 }
 
@@ -101,6 +121,99 @@ TEST(motion_track_compact, vfr_constant_velocity_emits_one_time_linear_move) {
 	}
 }
 
+TEST(motion_track_compact, feasible_single_segment_respects_coordinate_precision) {
+	for (int const decimals : {2, 0}) {
+		SCOPED_TRACE(decimals);
+		CompactFixture fx({0, 100, 200});
+		fx.input.options.compact_epsilon = 0.75;
+		fx.input.options.position_decimals = decimals;
+		fx.input.samples[1].center_y = 1.4;
+		// Least squares picks y=1.4/3, whose middle residual is 0.933...
+		// A constant y=0.7 satisfies the actual 0.75 maximum-error budget.
+		// With knot-aligned move windows, integer coordinates cannot
+		// serialize a feasible single segment.
+		auto const plan = fx.Build();
+		ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+		EXPECT_EQ(decimals == 2 ? 1U : 2U, plan.event_count);
+		fx.ExpectStorageError(plan, 0.75);
+	}
+}
+
+TEST(motion_track_compact, feasible_vfr_2d_move_uses_nonuniform_storage_mapping) {
+	CompactFixture fx({0, 73, 300});
+	fx.input.script_width = 960;
+	fx.input.script_height = 270;
+	fx.input.options.compact_epsilon = 0.75;
+	for (auto& sample : fx.input.samples) {
+		double const time = fx.input.timecodes.TimeAtFrame(sample.frame);
+		double const deviation = sample.frame == 1 ? 1.4 : 0.0;
+		sample.center_x = 3.0 + 0.07 * time + 0.6 * deviation;
+		sample.center_y = 5.0 - 0.035 * time + 0.8 * deviation;
+	}
+	// A +0.7*(0.6,0.8) offset from the underlying time-linear motion is
+	// feasible in storage pixels. The VFR least-squares peak is about 0.858,
+	// so accepting only that fit would unnecessarily split this motion.
+	auto const plan = fx.Build();
+	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+	ASSERT_EQ(1U, plan.event_count);
+	ASSERT_EQ(1U, plan.lines.size());
+	ASSERT_EQ(1U, plan.lines.front().parts.size());
+	EXPECT_NE(std::string::npos, plan.lines.front().parts.front().text.find(R"(\move()"));
+	fx.ExpectStorageError(plan, 0.75);
+}
+
+TEST(motion_track_compact, infeasible_single_segment_keeps_required_split) {
+	CompactFixture fx({0, 100, 200});
+	fx.input.options.compact_epsilon = 0.75;
+	fx.input.samples[1].center_y = 1.6;
+	// A line's midpoint is the mean of its endpoints; these observations
+	// require at least 0.8 px maximum error for every single-segment fit.
+	auto const plan = fx.Build();
+	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+	EXPECT_EQ(2U, plan.event_count);
+	fx.ExpectStorageError(plan, 0.75);
+}
+
+TEST(motion_track_compact, feasible_runs_do_not_replace_failed_hold_with_fitted_endpoint) {
+	CompactFixture fx({0, 100, 200, 300, 400, 500, 600});
+	fx.input.options.compact_epsilon = 0.75;
+	fx.input.samples[1].center_y = 1.4;
+	fx.input.samples[3].status = TrackStatus::Failed;
+	fx.input.samples[3].center_y = 999.0;
+	fx.input.samples[4].center_y = 0.2;
+	fx.input.samples[5].center_y = 1.6;
+	fx.input.samples[6].center_y = 0.2;
+	auto const plan = fx.Build();
+	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+	ASSERT_EQ(3U, plan.event_count);
+	ASSERT_EQ(1U, plan.lines.size());
+	ASSERT_EQ(3U, plan.lines.front().parts.size());
+	EXPECT_EQ(250, plan.lines.front().parts[1].start_ms);
+	EXPECT_EQ(350, plan.lines.front().parts[1].end_ms);
+	auto const held = fx.AtFrame(plan, 3);
+	ASSERT_TRUE(held) << perspective::DescribeAssStateError(held.error);
+	EXPECT_DOUBLE_EQ(0.0, held.value.transform.position.x);
+	EXPECT_DOUBLE_EQ(0.0, held.value.transform.position.y);
+	fx.ExpectStorageError(plan, 0.75);
+}
+
+TEST(motion_track_compact, default_one_pixel_budget_accepts_motion_rejected_at_three_quarters) {
+	CompactFixture fx({0, 100, 200});
+	fx.input.options = ApplyPlanOptions{};
+	ASSERT_DOUBLE_EQ(1.0, fx.input.options.compact_epsilon);
+	fx.input.samples[1].center_y = 1.8;
+	auto const default_plan = fx.Build();
+	ASSERT_EQ(ApplyPlanStatus::Ok, default_plan.status) << default_plan.message;
+	EXPECT_EQ(1U, default_plan.event_count);
+	fx.ExpectStorageError(default_plan, 1.0);
+
+	fx.input.options.compact_epsilon = 0.75;
+	auto const explicit_plan = fx.Build();
+	ASSERT_EQ(ApplyPlanStatus::Ok, explicit_plan.status) << explicit_plan.message;
+	EXPECT_EQ(2U, explicit_plan.event_count);
+	fx.ExpectStorageError(explicit_plan, 0.75);
+}
+
 TEST(motion_track_compact, vfr_pose_subdivision_preserves_fitted_position) {
 	CompactFixture fx({0, 100, 300, 350, 650, 700});
 	fx.input.model = TrackModel::Similarity;
@@ -120,8 +233,9 @@ TEST(motion_track_compact, vfr_pose_subdivision_preserves_fitted_position) {
 	auto const plan = fx.Build();
 	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status);
 	ASSERT_EQ(1u, plan.lines.size());
-	// Every interior alternating-angle point lies outside the pose tolerance.
-	ASSERT_EQ(5u, plan.event_count);
+	// Alternating angles still need pose knots, not separate subtitle events.
+	ASSERT_EQ(1u, plan.event_count);
+	ASSERT_EQ(1u, plan.lines.front().parts.size());
 	for (auto const& sample : fx.input.samples) {
 		auto const state = fx.AtFrame(plan, sample.frame);
 		ASSERT_TRUE(state) << perspective::DescribeAssStateError(state.error);
@@ -135,9 +249,8 @@ TEST(motion_track_compact, vfr_pose_subdivision_preserves_fitted_position) {
 		EXPECT_NEAR(scale, state.value.transform.scale_x, 0.01);
 		EXPECT_NEAR(scale, state.value.transform.scale_y, 0.01);
 	}
-	auto const& parts = plan.lines.front().parts;
-	for (size_t i = 1; i < parts.size(); ++i)
-		EXPECT_EQ(parts[i - 1].end_ms, parts[i].start_ms);
+	EXPECT_EQ(0, plan.lines.front().parts.front().start_ms);
+	EXPECT_EQ(710, plan.lines.front().parts.front().end_ms);
 }
 
 TEST(motion_track_compact, subpixel_motion_survives_position_serialization) {

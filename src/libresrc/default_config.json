@@ -724,7 +724,7 @@
 			"Direction" : 2,
 			"Model" : 0,
 			"Apply Mode" : 0,
-			"Compact Error" : 0.75,
+			"Compact Error" : 1.0,
 			"Position Decimals" : 2,
 			"Search Radius" : 0,
 			"Smooth Frames" : 0,

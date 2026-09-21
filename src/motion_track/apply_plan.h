@@ -8,8 +8,12 @@
 // out-of-domain prefixes/suffixes preserve the source behavior (event-relative
 // animation clocks are rebased), Comment lines are
 // skipped. All four models support Exact and Compact. Similarity
-// Compact uses \move for the fitted position and \t for the fitted
-// \frz/\fscx/\fscy channels; Exact writes one static pose per part. In Exact
+// Compact uses \move for the fitted position and prefers one linear or
+// accelerated \t for the \frz/\fscx/\fscy channels. Additional pose ramps
+// stay in the same event; only position/coverage boundaries split events.
+// When reliable bounds are available, multi-ramp poses can simplify to one
+// transform if the combined position/pose geometry meets compact_epsilon.
+// Exact writes one static pose per part. In Exact
 // mode, adjacent covered parts whose
 // emitted text is identical (e.g. a pose held through a Failed gap that
 // matches the tracked pose) merge into one event that renders the same at
@@ -68,7 +72,7 @@ struct ApplyPlanOptions {
 	/// Max trajectory deviation, in storage (video) pixels. Deviations are
 	/// measured in storage space, so the on-screen error means the same thing
 	/// at every PlayRes/LayoutRes combination.
-	double compact_epsilon = 0.75; // storage px
+	double compact_epsilon = 1.0; // storage px
 	int position_decimals = 2;
 	/// Half-window (frames) for local-linear trajectory smoothing before
 	/// planning; 0 disables. Constant-velocity input passes through exactly.

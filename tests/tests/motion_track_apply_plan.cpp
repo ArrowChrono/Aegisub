@@ -566,6 +566,62 @@ void FillPose(TrackSample& s, double cx, double cy, double theta_cw,
 	s.transform.matrix[3] = scale * std::sin(theta_cw);
 	s.transform.matrix[4] = scale * std::cos(theta_cw);
 }
+
+PlannedLinePart const *RenderedPart(MotionTrackApplyPlan const& plan, int time);
+
+void ExpectRenderedSimilarity(Fixture const& fx, MotionTrackApplyPlan const& plan,
+							  int time, double x, double y, double rotation,
+							  double scale_x, double scale_y) {
+	SCOPED_TRACE("time=" + std::to_string(time));
+	auto const *part = RenderedPart(plan, time);
+	ASSERT_NE(nullptr, part);
+	ASSERT_TRUE(part->covered);
+	AssDialogue emitted;
+	// Render the serialized ASS event clock, not the plan's raw VFR bounds.
+	emitted.Start = static_cast<int>(agi::Time(part->start_ms));
+	emitted.End = static_cast<int>(agi::Time(part->end_ms));
+	emitted.Text = part->text;
+	auto const state = perspective::EvaluateEffectiveAssState({.file = &fx.file,
+															   .line = &emitted,
+															   .play_resolution = {.width = 1920.0, .height = 1080.0},
+															   .capture_time_ms = time});
+	ASSERT_TRUE(state) << perspective::DescribeAssStateError(state.error) << ' ' << part->text;
+	EXPECT_NEAR(x, state.value.transform.position.x, 0.01) << part->text;
+	EXPECT_NEAR(y, state.value.transform.position.y, 0.01) << part->text;
+	EXPECT_NEAR(rotation, state.value.transform.rotation_z, 0.05) << part->text;
+	EXPECT_NEAR(scale_x, state.value.transform.scale_x, 0.05) << part->text;
+	EXPECT_NEAR(scale_y, state.value.transform.scale_y, 0.05) << part->text;
+}
+
+struct WrittenPoseTransform {
+	int first = 0;
+	int last = 0;
+	double acceleration = 1.0;
+};
+
+std::vector<WrittenPoseTransform> ReadPoseTransforms(std::string const& text) {
+	std::vector<WrittenPoseTransform> transforms;
+	AssDialogue line;
+	line.Text = text;
+	for (auto const& block : line.ParseTags()) {
+		if (block->GetType() != AssBlockType::OVERRIDE)
+			continue;
+		aegisub::ass_tag_scanner::ScanRawTags(block->GetRawText(), [&](auto const& raw) {
+			if (raw.name != "t" ||
+				(raw.args.find("\\frz") == std::string_view::npos &&
+				 raw.args.find("\\fsc") == std::string_view::npos))
+				return;
+			auto const args = aegisub::ass_tag_scanner::SplitLibassArgs(raw.args);
+			EXPECT_TRUE(args.size() == 3 || args.size() == 4) << raw.bytes;
+			if (args.size() != 3 && args.size() != 4)
+				return;
+			transforms.push_back({aegisub::ass_tag_scanner::ArgToInt(args[0]),
+								  aegisub::ass_tag_scanner::ArgToInt(args[1]),
+								  args.size() == 4 ? aegisub::ass_tag_scanner::ArgToDouble(args[2]) : 1.0});
+		});
+	}
+	return transforms;
+}
 }
 
 TEST(motion_track_apply_plan, similarity_compact_emits_move_and_transform) {
@@ -729,8 +785,218 @@ TEST(motion_track_apply_plan, similarity_compact_refines_pose_in_timecode_space)
 
 	auto plan = BuildApplyPlan(fx.file, {line}, input);
 	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status);
+	ASSERT_EQ(1u, plan.event_count);
+	ASSERT_EQ(1u, plan.lines[0].parts.size());
+	for (int frame = 0; frame <= 2; ++frame)
+		ExpectRenderedSimilarity(fx, plan, input.timecodes.TimeAtFrame(frame),
+								 0.0, 0.0, -10.0 * frame, 100.0, 100.0);
+}
+
+TEST(motion_track_apply_plan, similarity_compact_keeps_nonmonotonic_pose_in_one_event) {
+	Fixture fx;
+	auto *line = fx.AddLine(0, 1050,
+							R"({\pos(0,0)\c&HFFFFFF&\alpha&HFF&\t(150,650,2,\c&H0000FF&)\t(300,800,\alpha&H00&)}curve)");
+	auto const original = line->Text.get();
+	auto input = BaseInput();
+	input.model = TrackModel::Similarity;
+	input.direction_domain = input.decode_interval = {.first = 0, .last = 10};
+	input.video_frame_count = 11;
+	for (int frame = 0; frame <= 10; ++frame) {
+		TrackSample sample;
+		sample.frame = frame;
+		double const phase = std::numbers::pi * frame / 10.0;
+		FillPose(sample, 2.0 * frame, -1.0 * frame,
+				 12.0 * std::sin(2.0 * phase) * std::numbers::pi / 180.0,
+				 1.0 + 0.12 * std::sin(phase));
+		input.samples.push_back(sample);
+	}
+
+	auto const plan = BuildApplyPlan(fx.file, {line}, input);
+	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+	ASSERT_EQ(1u, plan.event_count);
+	ASSERT_EQ(1u, plan.lines.size());
+	ASSERT_EQ(1u, plan.lines[0].parts.size());
+	auto const& part = plan.lines[0].parts[0];
+	auto const transforms = ReadPoseTransforms(part.text);
+	ASSERT_GT(transforms.size(), 1u) << part.text;
+	EXPECT_EQ(0, transforms.front().first);
+	EXPECT_EQ(1000, transforms.back().last);
+	for (size_t i = 1; i < transforms.size(); ++i)
+		EXPECT_EQ(transforms[i - 1].last, transforms[i].first) << part.text;
+	EXPECT_NE(std::string::npos, part.text.find(R"(\t(150,650,2,\c&H0000FF&))"));
+	EXPECT_NE(std::string::npos, part.text.find(R"(\t(300,800,1,\alpha&H00&))"));
+	EXPECT_EQ(original, line->Text.get());
+	for (int frame = 0; frame <= 10; ++frame) {
+		double const phase = std::numbers::pi * frame / 10.0;
+		double const scale = 100.0 + 12.0 * std::sin(phase);
+		ExpectRenderedSimilarity(fx, plan, input.timecodes.TimeAtFrame(frame),
+								 2.0 * frame, -1.0 * frame, -12.0 * std::sin(2.0 * phase), scale, scale);
+	}
+}
+
+TEST(motion_track_apply_plan, similarity_compact_fits_one_accelerated_transform) {
+	Fixture fx;
+	auto *line = fx.AddLine(0, 1050, R"({\pos(0,0)\frz15\fscx120\fscy80}accelerate)");
+	auto input = BaseInput();
+	input.model = TrackModel::Similarity;
+	input.direction_domain = input.decode_interval = {.first = 0, .last = 10};
+	input.video_frame_count = 11;
+	for (int frame = 0; frame <= 10; ++frame) {
+		TrackSample sample;
+		sample.frame = frame;
+		double const progress = std::pow(frame / 10.0, 2.0);
+		FillPose(sample, 2.0 * frame, 0.0,
+				 20.0 * progress * std::numbers::pi / 180.0, 1.0 + 0.2 * progress);
+		input.samples.push_back(sample);
+	}
+
+	auto const plan = BuildApplyPlan(fx.file, {line}, input);
+	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+	ASSERT_EQ(1u, plan.event_count);
+	ASSERT_EQ(1u, plan.lines.size());
+	ASSERT_EQ(1u, plan.lines[0].parts.size());
+	auto const& text = plan.lines[0].parts[0].text;
+	auto const transforms = ReadPoseTransforms(text);
+	ASSERT_EQ(1u, transforms.size()) << text;
+	EXPECT_GT(transforms[0].acceleration, 1.2) << text;
+	EXPECT_EQ(0, transforms[0].first);
+	EXPECT_EQ(1000, transforms[0].last);
+	for (int frame = 0; frame <= 10; ++frame) {
+		double const progress = std::pow(frame / 10.0, 2.0);
+		ExpectRenderedSimilarity(fx, plan, input.timecodes.TimeAtFrame(frame),
+								 2.0 * frame, 0.0, 15.0 - 20.0 * progress,
+								 120.0 * (1.0 + 0.2 * progress), 80.0 * (1.0 + 0.2 * progress));
+	}
+}
+
+TEST(motion_track_apply_plan, similarity_compact_serializes_fractional_style_baseline) {
+	Fixture fx;
+	fx.file.Styles.front().scalex = 100.004;
+	fx.file.Styles.front().scaley = 100.004;
+	auto *line = fx.AddLine(0, 250, R"({\pos(0,0)}rounding)");
+	auto input = BaseInput();
+	input.model = TrackModel::Similarity;
+	input.direction_domain = input.decode_interval = {.first = 0, .last = 2};
+	input.video_frame_count = 3;
+	std::vector<double> const scales{100.004, 100.4505, 101.0};
+	for (int frame = 0; frame <= 2; ++frame) {
+		TrackSample sample;
+		sample.frame = frame;
+		FillPose(sample, 0.0, 0.0, 0.0, scales[frame] / 100.004);
+		input.samples.push_back(sample);
+	}
+
+	auto const plan = BuildApplyPlan(fx.file, {line}, input);
+	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+	ASSERT_EQ(1u, plan.event_count);
+	ASSERT_EQ(1u, plan.lines.size());
+	ASSERT_EQ(1u, plan.lines[0].parts.size());
+	auto const& text = plan.lines[0].parts[0].text;
+	EXPECT_NE(std::string::npos, text.find(R"(\fscx100.00\fscy100.00)")) << text;
+	auto const transforms = ReadPoseTransforms(text);
+	ASSERT_EQ(1u, transforms.size()) << text;
+	EXPECT_DOUBLE_EQ(1.0, transforms.front().acceleration);
+	// A rounded 100 -> 101 interpolant meets the 0.05 budget. Leaving the
+	// unrounded style baseline active instead would render 100.502 at the
+	// middle frame, exceeding the same budget without any tracker error.
+	for (int frame = 0; frame <= 2; ++frame)
+		ExpectRenderedSimilarity(fx, plan, input.timecodes.TimeAtFrame(frame),
+								 0.0, 0.0, 0.0, scales[frame], scales[frame]);
+}
+
+TEST(motion_track_apply_plan, similarity_compact_rebases_acceleration_after_position_split_in_vfr) {
+	Fixture fx;
+	auto *line = fx.AddLine(0, 580, R"({\pos(0,0)}piecewise)");
+	auto input = BaseInput();
+	input.model = TrackModel::Similarity;
+	input.options.compact_epsilon = 0.03;
+	input.options.position_decimals = 3;
+	input.direction_domain = input.decode_interval = {.first = 0, .last = 10};
+	input.video_frame_count = 11;
+	input.timecodes = agi::vfr::Framerate({0, 43, 89, 151, 209, 267, 311, 367, 443, 499, 557, 601});
+	auto const pose_progress = [](int time) {
+		return time <= 267 ? std::pow(time / 267.0, 2.0)
+						   : 1.0 + 2.0 * std::pow((time - 267) / 290.0, 2.0);
+	};
+	auto const position = [](int time) {
+		return time <= 267 ? 0.2 * time : 53.4 + 0.5 * (time - 267);
+	};
+	for (int frame = 0; frame <= 10; ++frame) {
+		TrackSample sample;
+		sample.frame = frame;
+		int const time = input.timecodes.TimeAtFrame(frame);
+		double const progress = pose_progress(time);
+		FillPose(sample, position(time), 0.0,
+				 10.0 * progress * std::numbers::pi / 180.0, 1.0 + 0.1 * progress);
+		input.samples.push_back(sample);
+	}
+
+	auto const plan = BuildApplyPlan(fx.file, {line}, input);
+	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
 	ASSERT_EQ(2u, plan.event_count);
+	ASSERT_EQ(1u, plan.lines.size());
 	ASSERT_EQ(2u, plan.lines[0].parts.size());
+	auto const& first = plan.lines[0].parts[0];
+	auto const& second = plan.lines[0].parts[1];
+	EXPECT_EQ(static_cast<int>(agi::Time(first.end_ms)), static_cast<int>(agi::Time(second.start_ms)));
+	auto const transforms = ReadPoseTransforms(second.text);
+	ASSERT_EQ(1u, transforms.size()) << second.text;
+	EXPECT_LT(transforms[0].first, 0);
+	EXPECT_EQ(267 - static_cast<int>(agi::Time(second.start_ms)), transforms[0].first);
+	EXPECT_EQ(557 - static_cast<int>(agi::Time(second.start_ms)), transforms[0].last);
+	EXPECT_GT(transforms[0].acceleration, 1.2) << second.text;
+	for (int frame = 0; frame <= 10; ++frame) {
+		int const time = input.timecodes.TimeAtFrame(frame);
+		double const progress = pose_progress(time);
+		ExpectRenderedSimilarity(fx, plan, time, position(time), 0.0,
+								 -10.0 * progress, 100.0 + 10.0 * progress, 100.0 + 10.0 * progress);
+	}
+	// The preceding event owns the shared knot's frame and holds its last
+	// pose until the event boundary; the next event must resume the original
+	// power curve, not restart it or linearly rebase its first value.
+	int const boundary = agi::Time(second.start_ms);
+	ExpectRenderedSimilarity(fx, plan, boundary - 1, 53.4, 0.0, -10.0, 110.0, 110.0);
+	for (int time : {boundary, boundary + 1}) {
+		double const progress = pose_progress(time);
+		ExpectRenderedSimilarity(fx, plan, time, position(time), 0.0,
+								 -10.0 * progress, 100.0 + 10.0 * progress, 100.0 + 10.0 * progress);
+	}
+}
+
+TEST(motion_track_apply_plan, similarity_compact_does_not_interpolate_pose_across_failed_hold) {
+	Fixture fx;
+	auto *line = fx.AddLine(0, 1050, R"({\pos(0,0)}hold)");
+	auto input = BaseInput();
+	input.model = TrackModel::Similarity;
+	input.direction_domain = input.decode_interval = {.first = 0, .last = 10};
+	input.video_frame_count = 11;
+	for (int frame = 0; frame <= 10; ++frame) {
+		TrackSample sample;
+		sample.frame = frame;
+		double const progress = std::pow(frame / 10.0, 2.0);
+		FillPose(sample, 2.0 * frame, 0.0,
+				 20.0 * progress * std::numbers::pi / 180.0, 1.0 + 0.2 * progress);
+		input.samples.push_back(sample);
+	}
+	MarkFailed(input.samples, 4, 6);
+
+	auto const plan = BuildApplyPlan(fx.file, {line}, input);
+	ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+	ASSERT_EQ(3u, plan.event_count);
+	auto const *held = RenderedPart(plan, 400);
+	ASSERT_NE(nullptr, held);
+	EXPECT_NE(RenderedPart(plan, 300), held);
+	EXPECT_EQ(held, RenderedPart(plan, 500));
+	EXPECT_EQ(held, RenderedPart(plan, 600));
+	EXPECT_NE(held, RenderedPart(plan, 700));
+	EXPECT_TRUE(ReadPoseTransforms(held->text).empty()) << held->text;
+	for (int frame = 0; frame <= 10; ++frame) {
+		int const source_frame = frame >= 4 && frame <= 6 ? 3 : frame;
+		double const progress = std::pow(source_frame / 10.0, 2.0);
+		ExpectRenderedSimilarity(fx, plan, input.timecodes.TimeAtFrame(frame),
+								 2.0 * source_frame, 0.0, -20.0 * progress,
+								 100.0 + 20.0 * progress, 100.0 + 20.0 * progress);
+	}
 }
 
 TEST(motion_track_apply_plan, similarity_exact_emits_full_transform_tags) {
@@ -1666,11 +1932,13 @@ TEST(motion_track_apply_plan, smoothing_never_crosses_hold_boundaries) {
 }
 
 TEST(motion_track_apply_plan, compact_epsilon_measured_in_storage_pixels) {
-	// Identical script-space geometry (one-frame 1 script px bump on a linear
-	// slide); only the script/storage ratio changes. A storage-space threshold
-	// must keep the bump when the video is bigger than the script grid and
-	// drop it when the video is smaller.
-	auto run_case = [&](int script_w, int script_h, double bump_storage) {
+	// A single-frame bump on a linear slide has a minimax residual of half
+	// its height: shifting the whole line by that amount balances the bump
+	// against its unperturbed neighbours. Measure that bound in video pixels,
+	// not script pixels, including after the emitted ASS is serialized.
+	auto const run_case = [](int script_w, int script_h, double bump_storage, bool must_split) {
+		SCOPED_TRACE(std::to_string(script_w) + "x" + std::to_string(script_h) +
+					 " bump=" + std::to_string(bump_storage));
 		Fixture fx;
 		auto *line = fx.AddLine(0, 2000, R"({\pos(100,100)}bump)");
 		auto input = BaseInput();
@@ -1689,13 +1957,49 @@ TEST(motion_track_apply_plan, compact_epsilon_measured_in_storage_pixels) {
 		input.origin_center_x = 0;
 		input.origin_center_y = 0;
 		input.options.compact_epsilon = 0.75;
-		auto plan = BuildApplyPlan(fx.file, {line}, input);
-		return plan.has_mutations() ? plan.event_count : 0u;
+		auto const plan = BuildApplyPlan(fx.file, {line}, input);
+		ASSERT_EQ(ApplyPlanStatus::Ok, plan.status) << plan.message;
+		ASSERT_EQ(1U, plan.lines.size());
+		if (must_split)
+			EXPECT_GE(plan.event_count, 2U);
+		else
+			EXPECT_EQ(1U, plan.event_count);
+		for (auto const& sample : input.samples) {
+			int const time = input.timecodes.TimeAtFrame(sample.frame);
+			if (time < line->Start.GetMillisecond() || time >= line->End.GetMillisecond())
+				continue;
+			SCOPED_TRACE(sample.frame);
+			auto const *part = RenderedPart(plan, time);
+			ASSERT_NE(nullptr, part);
+			ASSERT_TRUE(part->covered);
+			AssDialogue event(*line);
+			event.Start = static_cast<int>(agi::Time(part->start_ms));
+			event.End = static_cast<int>(agi::Time(part->end_ms));
+			event.Text = part->text;
+			auto const state = perspective::EvaluateEffectiveAssState({.file = &fx.file, .line = &event, .play_resolution = {.width = static_cast<double>(script_w), .height = static_cast<double>(script_h)}, .capture_time_ms = time});
+			ASSERT_TRUE(state) << perspective::DescribeAssStateError(state.error);
+			// The subtitle anchor starts at (100,100) in script space; the
+			// tracked centre is a storage-space displacement from that anchor.
+			double const dx = (state.value.transform.position.x - 100.0) * input.storage_width /
+								  input.script_width -
+							  sample.center_x;
+			double const dy = (state.value.transform.position.y - 100.0) * input.storage_height /
+								  input.script_height -
+							  sample.center_y;
+			EXPECT_LE(std::hypot(dx, dy), 0.75) << part->text;
+		}
 	};
 
-	EXPECT_GE(run_case(1920, 1080, 1.0), 2u); // 1 script px = 1 storage px
-	EXPECT_GE(run_case(960, 540, 2.0), 2u);   // 1 script px = 2 storage px
-	EXPECT_EQ(1u, run_case(3840, 2160, 0.5)); // 1 script px = 0.5 storage px
+	// Preserve the original 1-script-pixel cases: the 1-video-pixel bump
+	// admits a 0.5 px balanced offset, while the 2-video-pixel bump does not.
+	run_case(1920, 1080, 1.0, false);
+	run_case(960, 540, 2.0, true);
+	run_case(3840, 2160, 0.5, false);
+	// The same 1.6-script-pixel bump requires minimum storage errors of
+	// 0.8, 1.6 and 0.4 px respectively; only the last can remain one segment.
+	run_case(1920, 1080, 1.6, true);
+	run_case(960, 540, 3.2, true);
+	run_case(3840, 2160, 0.8, false);
 }
 
 TEST(motion_track_apply_plan, source_snapshot_rejects_stale_text_and_timecodes) {

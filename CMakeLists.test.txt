@@ -227,6 +227,7 @@ if(GTEST_FOUND)
         tests/tests/motion_track_apply_plan.cpp
         tests/tests/motion_track_apply_source.cpp
         tests/tests/motion_track_compact.cpp
+        tests/tests/motion_track_compact_pixel.cpp
         tests/tests/motion_track_dialog_options.cpp
         tests/tests/motion_track_geometry_apply.cpp
         tests/tests/motion_track_geometry_tags.cpp

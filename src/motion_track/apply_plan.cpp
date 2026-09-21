@@ -1,4 +1,5 @@
 #include "apply_plan.h"
+#include "compact_geometry.h"
 #include "geometry_apply.h"
 
 #include "../align_video_fade.h"
@@ -18,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iterator>
+#include <limits>
 #include <numbers>
 #include <optional>
 #include <string_view>
@@ -1196,12 +1198,9 @@ struct FitPiece {
 	double x0 = 0.0, y0 = 0.0, x1 = 0.0, y1 = 0.0;
 };
 
-// ASS transforms interpolate scalar tag values, so a Compact similarity
-// segment needs the pose channels to be close to their own linear
-// interpolation as well as the position channels fitted by FitRunPieces.
-// The tolerances are intentionally tied to the two-decimal values emitted
-// below: they suppress tracker noise without making a visibly curved pose
-// look linear.
+// Keep the existing pose accuracy independently of the position pixel budget.
+// Pose curvature can require more transforms, but does not require more events:
+// ASS supports a sequence of transforms alongside a single move.
 constexpr double kCompactPoseAngleEpsilon = 0.05;
 constexpr double kCompactPoseScaleEpsilon = 0.05;
 
@@ -1215,17 +1214,6 @@ double InterpolateByTime(double a, double b, int time_a, int time_b,
 			static_cast<double>(time_b - time_a),
 		0.0, 1.0);
 	return a + ((b - a) * u);
-}
-
-double AngleDistance(double a, double b) {
-	double d = std::fmod(a - b, 360.0);
-	if (d > 180.0) {
-		d -= 360.0;
-	}
-	else if (d < -180.0) {
-		d += 360.0;
-	}
-	return std::abs(d);
 }
 
 // Unwrap the emitted angle sequence before Compact fitting. ASS renders
@@ -1248,80 +1236,380 @@ void UnwrapCompactAngles(std::vector<ResolvedPoint>& points) {
 	}
 }
 
-// Refine the position-derived Compact pieces at pose curvature points. The
-// split preserves the already-fitted position line, while the transform
-// endpoints come from the actual tracked samples at the new knot.
-std::vector<FitPiece> RefineSimilarityPieces(
-	std::vector<ResolvedPoint> const& points,
-	std::vector<FitPiece> const& source,
-	agi::vfr::Framerate const& timecodes) {
-	std::vector<FitPiece> refined;
-	for (auto const& initial : source) {
-		std::vector<FitPiece> pending{initial};
-		while (!pending.empty()) {
-			FitPiece piece = pending.back();
-			pending.pop_back();
-			if (piece.i1 <= piece.i0 + 1) {
-				refined.push_back(piece);
+struct PosePiece {
+	size_t i0 = 0, i1 = 0;
+	double acceleration = 1.0;
+};
+
+constexpr std::array<double ResolvedPoint::*, 3> pose_channels{
+	&ResolvedPoint::rot_deg, &ResolvedPoint::scale_pct_x, &ResolvedPoint::scale_pct_y};
+constexpr std::array<double, 3> pose_tolerances{
+	kCompactPoseAngleEpsilon, kCompactPoseScaleEpsilon, kCompactPoseScaleEpsilon};
+
+double RoundedPose(double value) {
+	auto const text = FormatCoord(value, 2);
+	double rounded = 0.0;
+	std::from_chars(text.data(), text.data() + text.size(), rounded);
+	return rounded;
+}
+
+// Fixed, serialized endpoints make each frame's error constraint an interval
+// of permitted accelerations. Intersect those intervals across every channel;
+// prefer linear interpolation whenever possible. No search grid or relaxed
+// pose tolerance is needed to recognize an accelerated ASS transform.
+std::optional<double> FitPoseAcceleration(std::vector<ResolvedPoint> const& points,
+										  size_t first, size_t last, agi::vfr::Framerate const& timecodes) {
+	int const ta = timecodes.TimeAtFrame(points[first].frame);
+	int const tb = timecodes.TimeAtFrame(points[last].frame);
+	if (last <= first + 1 || tb <= ta)
+		return 1.0;
+	std::array<double, 3> starts{}, ends{};
+	for (size_t channel = 0; channel < pose_channels.size(); ++channel) {
+		starts[channel] = RoundedPose(points[first].*pose_channels[channel]);
+		ends[channel] = RoundedPose(points[last].*pose_channels[channel]);
+	}
+	double lower = 0.0, upper = std::numeric_limits<double>::infinity();
+	for (size_t i = first + 1; i < last; ++i) {
+		double const u = static_cast<double>(timecodes.TimeAtFrame(points[i].frame) - ta) / (tb - ta);
+		for (size_t channel = 0; channel < pose_channels.size(); ++channel) {
+			auto const field = pose_channels[channel];
+			double const a = starts[channel];
+			double const b = ends[channel];
+			double const value = points[i].*field;
+			double const tolerance = pose_tolerances[channel];
+			if (a == b || u <= 0.0 || u >= 1.0) {
+				if (std::abs(value - (u >= 1.0 ? b : a)) > tolerance)
+					return std::nullopt;
 				continue;
 			}
-
-			ResolvedPoint const& first = points[piece.i0];
-			ResolvedPoint const& last = points[piece.i1];
-			int const first_time = timecodes.TimeAtFrame(first.frame);
-			int const last_time = timecodes.TimeAtFrame(last.frame);
-			size_t worst = piece.i0;
-			double worst_error = 0.0;
-			for (size_t i = piece.i0 + 1; i < piece.i1; ++i) {
-				ResolvedPoint const& sample = points[i];
-				int const sample_time = timecodes.TimeAtFrame(sample.frame);
-				double const expected_angle = InterpolateByTime(
-					first.rot_deg, last.rot_deg, first_time, last_time,
-					sample_time);
-				double const expected_x = InterpolateByTime(
-					first.scale_pct_x, last.scale_pct_x, first_time,
-					last_time, sample_time);
-				double const expected_y = InterpolateByTime(
-					first.scale_pct_y, last.scale_pct_y, first_time,
-					last_time, sample_time);
-				double const angle_error =
-					AngleDistance(sample.rot_deg, expected_angle) /
-					kCompactPoseAngleEpsilon;
-				double const scale_x_error =
-					std::abs(sample.scale_pct_x - expected_x) /
-					kCompactPoseScaleEpsilon;
-				double const scale_y_error =
-					std::abs(sample.scale_pct_y - expected_y) /
-					kCompactPoseScaleEpsilon;
-				double const error =
-					std::max({angle_error, scale_x_error, scale_y_error});
-				if (error > worst_error) {
-					worst_error = error;
-					worst = i;
-				}
-			}
-			if (worst_error <= 1.0) {
-				refined.push_back(piece);
-				continue;
-			}
-
-			FitPiece left{piece};
-			left.i1 = worst;
-			int const split_time = timecodes.TimeAtFrame(points[worst].frame);
-			left.x1 = InterpolateByTime(piece.x0, piece.x1, first_time,
-										last_time, split_time);
-			left.y1 = InterpolateByTime(piece.y0, piece.y1, first_time,
-										last_time, split_time);
-			FitPiece right{piece};
-			right.i0 = worst;
-			right.x0 = left.x1;
-			right.y0 = left.y1;
-			// LIFO keeps the final vector in ascending time order.
-			pending.push_back(right);
-			pending.push_back(left);
+			double lo = (value - tolerance - a) / (b - a);
+			double hi = (value + tolerance - a) / (b - a);
+			if (lo > hi)
+				std::swap(lo, hi);
+			if (hi <= 0.0 || lo >= 1.0)
+				return std::nullopt;
+			double const log_u = std::log(u);
+			if (hi < 1.0)
+				lower = std::max(lower, std::log(hi) / log_u);
+			if (lo > 0.0)
+				upper = std::min(upper, std::log(lo) / log_u);
+			if (lower > upper)
+				return std::nullopt;
 		}
 	}
-	return refined;
+	double const candidate = lower <= 1.0 && upper >= 1.0
+								 ? 1.0
+							 : std::isfinite(upper) ? lower + (upper - lower) * 0.5
+													: lower + 1.0;
+	double const acceleration = std::round(candidate * 1e6) / 1e6;
+	if (!std::isfinite(acceleration) || acceleration <= 0.0)
+		return std::nullopt;
+	// Rounding the exponent must not push a candidate outside the error budget.
+	for (size_t i = first + 1; i < last; ++i) {
+		double const u = std::clamp(static_cast<double>(timecodes.TimeAtFrame(points[i].frame) - ta) / (tb - ta), 0.0, 1.0);
+		double const power = std::pow(u, acceleration);
+		for (size_t channel = 0; channel < pose_channels.size(); ++channel) {
+			auto const field = pose_channels[channel];
+			double const a = starts[channel];
+			double const b = ends[channel];
+			if (std::abs(a + (b - a) * power - points[i].*field) > pose_tolerances[channel])
+				return std::nullopt;
+		}
+	}
+	return acceleration;
+}
+
+std::vector<PosePiece> FitPosePieces(std::vector<ResolvedPoint> const& points,
+									 FitPiece const& position, agi::vfr::Framerate const& timecodes) {
+	std::vector<PosePiece> fitted;
+	std::vector<PosePiece> pending{{.i0 = position.i0, .i1 = position.i1}};
+	while (!pending.empty()) {
+		auto piece = pending.back();
+		pending.pop_back();
+		if (auto acceleration = FitPoseAcceleration(points, piece.i0, piece.i1, timecodes)) {
+			piece.acceleration = *acceleration;
+			fitted.push_back(piece);
+			continue;
+		}
+		int const ta = timecodes.TimeAtFrame(points[piece.i0].frame);
+		int const tb = timecodes.TimeAtFrame(points[piece.i1].frame);
+		size_t worst = piece.i0 + 1;
+		double worst_error = -1.0;
+		for (size_t i = piece.i0 + 1; i < piece.i1; ++i) {
+			int const time = timecodes.TimeAtFrame(points[i].frame);
+			for (size_t channel = 0; channel < pose_channels.size(); ++channel) {
+				auto const field = pose_channels[channel];
+				double const expected = InterpolateByTime(RoundedPose(points[piece.i0].*field),
+														  RoundedPose(points[piece.i1].*field), ta, tb, time);
+				double const error = std::abs(points[i].*field - expected) / pose_tolerances[channel];
+				if (error > worst_error) {
+					worst = i;
+					worst_error = error;
+				}
+			}
+		}
+		pending.push_back({.i0 = worst, .i1 = piece.i1});
+		pending.push_back({.i0 = piece.i0, .i1 = worst});
+	}
+	// A split chosen for the whole interval need not remain necessary after its
+	// neighbours have been fitted. Prune transforms, never position boundaries.
+	for (size_t i = 0; i + 1 < fitted.size();) {
+		if (auto acceleration = FitPoseAcceleration(points, fitted[i].i0, fitted[i + 1].i1, timecodes)) {
+			fitted[i].i1 = fitted[i + 1].i1;
+			fitted[i].acceleration = *acceleration;
+			fitted.erase(fitted.begin() + i + 1);
+			if (i > 0)
+				--i;
+		}
+		else
+			++i;
+	}
+	return fitted;
+}
+
+struct SinglePoseFit {
+	std::array<double, 3> first{}, last{};
+	double acceleration = 1.0;
+};
+
+// This is an optional simplification of an already feasible scalar plan. A
+// font/layout we cannot measure keeps the old plan, as does a curve which no
+// tested single transform represents within the combined video-pixel budget.
+std::optional<SinglePoseFit> FitSinglePoseByGeometry(
+	AssFile const& file, std::vector<ResolvedPoint> const& points,
+	FitPiece const& piece, ApplyPlanInput const& input,
+	perspective::ForwardInput const& geometry, std::string const& position_tag,
+	int event_start, int event_end) {
+	int const first_time = input.timecodes.TimeAtFrame(points[piece.i0].frame);
+	int const last_time = input.timecodes.TimeAtFrame(points[piece.i1].frame);
+	if (last_time <= first_time || last_time <= event_start)
+		return std::nullopt;
+	struct Frame {
+		double progress;
+		perspective::Vec2 position;
+		perspective::Quad target;
+	};
+	std::vector<Frame> frames;
+	frames.reserve(piece.i1 - piece.i0 + 1);
+	AssDialogue emitted;
+	emitted.Start = event_start;
+	emitted.End = event_end;
+	emitted.Text = "{" + position_tag + "}x";
+	auto const position_info = ExtractPositionInfo(emitted);
+	auto sample_time = [&](ResolvedPoint const& point) {
+		return input.timecodes.TimeAtFrame(point.frame);
+	};
+	auto const visible_begin = std::ranges::lower_bound(points, event_start, {}, sample_time);
+	auto const visible_end = std::ranges::lower_bound(points, event_end, {}, sample_time);
+	// At high frame rates, centisecond event rounding can give this event
+	// samples outside its original knot indices. Validate all visible frames.
+	for (auto it = visible_begin; it != visible_end; ++it) {
+		auto const& point = *it;
+		int const time = input.timecodes.TimeAtFrame(point.frame);
+		auto state = geometry.state;
+		state.position = {.x = point.x, .y = point.y};
+		state.rotation_z = point.rot_deg;
+		state.scale_x = point.scale_pct_x;
+		state.scale_y = point.scale_pct_y;
+		auto const target = perspective::ForwardQuad(geometry, state);
+		if (!target)
+			return std::nullopt;
+		double x = 0.0, y = 0.0;
+		if (!ResolveDialogueOriginInfo(file, position_info, emitted, time,
+									   input.script_width, input.script_height, x, y))
+			return std::nullopt;
+		frames.push_back({.progress = std::clamp(static_cast<double>(time - first_time) / (last_time - first_time), 0.0, 1.0),
+						  .position = {.x = x, .y = y},
+						  .target = target.quad});
+	}
+	if (frames.empty())
+		return std::nullopt;
+
+	perspective::ForwardInput candidate_geometry = geometry;
+	perspective::OutputCoordinateMapping const mapping{
+		.scale_x = static_cast<double>(input.storage_width) / input.script_width,
+		.scale_y = static_cast<double>(input.storage_height) / input.script_height};
+	auto error = [&](SinglePoseFit const& fit) {
+		double worst = 0.0;
+		for (auto const& frame : frames) {
+			double const u = std::pow(frame.progress, fit.acceleration);
+			auto& state = candidate_geometry.state;
+			state.position = frame.position;
+			state.rotation_z = fit.first[0] + (fit.last[0] - fit.first[0]) * u;
+			state.scale_x = fit.first[1] + (fit.last[1] - fit.first[1]) * u;
+			state.scale_y = fit.first[2] + (fit.last[2] - fit.first[2]) * u;
+			auto const residual = perspective::MeasurePerspectiveResidual(candidate_geometry, frame.target, mapping);
+			if (!residual)
+				return std::numeric_limits<double>::infinity();
+			worst = std::max(worst, residual.max_error);
+		}
+		return worst;
+	};
+	SinglePoseFit endpoints;
+	for (size_t c = 0; c < pose_channels.size(); ++c) {
+		endpoints.first[c] = RoundedPose(points[piece.i0].*pose_channels[c]);
+		endpoints.last[c] = RoundedPose(points[piece.i1].*pose_channels[c]);
+	}
+	auto constant = endpoints;
+	constant.last = constant.first;
+	if (error(constant) <= input.options.compact_epsilon)
+		return constant;
+
+	// Keep nearly constant channels at the reference pose instead of animating
+	// tiny measured rotations alongside a real zoom. The geometry check, not
+	// this scalar proposal, decides whether that omission is actually safe.
+	auto simplified = endpoints;
+	for (size_t c = 0; c < pose_channels.size(); ++c) {
+		bool flat = true;
+		for (size_t i = piece.i0; i <= piece.i1; ++i)
+			flat = flat && std::abs(points[i].*pose_channels[c] - endpoints.first[c]) <= pose_tolerances[c];
+		if (flat)
+			simplified.last[c] = simplified.first[c];
+	}
+	if (error(simplified) <= input.options.compact_epsilon)
+		return simplified;
+	if (simplified.last != endpoints.last && error(endpoints) <= input.options.compact_epsilon)
+		return endpoints;
+
+	for (int attempt = 0; attempt < 2; ++attempt) {
+		if (attempt == 1 && simplified.last == endpoints.last)
+			break;
+		auto fit = attempt == 0 ? simplified : endpoints;
+		// A log-space regression proposes the common exponent. Weight by each
+		// channel's excursion so a near-zero angle cannot dominate a real zoom.
+		double numerator = 0.0, denominator = 0.0;
+		for (size_t i = piece.i0 + 1; i < piece.i1; ++i) {
+			double const u = static_cast<double>(input.timecodes.TimeAtFrame(points[i].frame) - first_time) / (last_time - first_time);
+			if (u <= 0.0 || u >= 1.0)
+				continue;
+			double const log_u = std::log(u);
+			for (size_t c = 0; c < pose_channels.size(); ++c) {
+				double const delta = fit.last[c] - fit.first[c];
+				if (delta == 0.0)
+					continue;
+				double const v = (points[i].*pose_channels[c] - fit.first[c]) / delta;
+				if (v <= 0.0 || v >= 1.0)
+					continue;
+				numerator += delta * delta * log_u * std::log(v);
+				denominator += delta * delta * log_u * log_u;
+			}
+		}
+		if (denominator == 0.0)
+			continue;
+		double const estimate = numerator / denominator;
+		if (!std::isfinite(estimate) || estimate <= 0.0)
+			continue;
+		auto trial = [&](double log_acceleration) {
+			fit.acceleration = std::round(std::exp(log_acceleration) * 1e6) / 1e6;
+			return fit.acceleration > 0.0 && std::isfinite(fit.acceleration)
+					   ? error(fit)
+					   : std::numeric_limits<double>::infinity();
+		};
+		double const center = std::log(estimate);
+		if (trial(center) <= input.options.compact_epsilon)
+			return fit;
+		// Bounded local minimax refinement; failure simply keeps the proven
+		// multi-transform plan. No accuracy contract depends on convergence.
+		double lo = center - std::numbers::ln2, hi = center + std::numbers::ln2;
+		constexpr double ratio = 0.6180339887498949;
+		double left = hi - ratio * (hi - lo), right = lo + ratio * (hi - lo);
+		double left_error = trial(left);
+		if (left_error <= input.options.compact_epsilon)
+			return fit;
+		double right_error = trial(right);
+		if (right_error <= input.options.compact_epsilon)
+			return fit;
+		for (int iteration = 0; iteration < 24; ++iteration) {
+			if (left_error < right_error) {
+				hi = right;
+				right = left;
+				right_error = left_error;
+				left = hi - ratio * (hi - lo);
+				left_error = trial(left);
+			}
+			else {
+				lo = left;
+				left = right;
+				left_error = right_error;
+				right = lo + ratio * (hi - lo);
+				right_error = trial(right);
+			}
+			if (std::min(left_error, right_error) <= input.options.compact_epsilon)
+				return fit;
+		}
+	}
+	return std::nullopt;
+}
+
+std::string SinglePoseTags(SinglePoseFit const& fit, int first_time, int last_time,
+						   std::array<double, 3> const& style, bool inline_rotation, bool inline_scale) {
+	constexpr std::array<std::string_view, 3> names{"\\frz", "\\fscx", "\\fscy"};
+	std::string tags, animated;
+	for (size_t c = 0; c < names.size(); ++c) {
+		bool const explicit_base = c == 0 ? inline_rotation : inline_scale;
+		if (explicit_base || fit.first[c] != style[c])
+			tags += std::string(names[c]) + FormatCoord(fit.first[c], 2);
+		if (fit.last[c] != fit.first[c])
+			animated += std::string(names[c]) + FormatCoord(fit.last[c], 2);
+	}
+	if (!animated.empty()) {
+		tags += "\\t(" + std::to_string(first_time) + "," + std::to_string(last_time) + ",";
+		if (fit.acceleration != 1.0)
+			tags += FormatCoord(fit.acceleration, 6) + ",";
+		tags += animated + ")";
+	}
+	return tags;
+}
+
+std::string CompactPoseTags(std::vector<ResolvedPoint> const& points,
+							FitPiece const& position, agi::vfr::Framerate const& timecodes,
+							int event_start, int event_end, std::array<double, 3> const& style, bool inline_rotation, bool inline_scale,
+							AssFile const& file, ApplyPlanInput const& input, std::optional<perspective::ForwardInput> const& geometry,
+							std::string const& position_tag) {
+	auto const pieces = FitPosePieces(points, position, timecodes);
+	if (pieces.size() > 1 && geometry) {
+		if (auto const fit = FitSinglePoseByGeometry(file, points, position, input, *geometry,
+													 position_tag, event_start, event_end))
+			return SinglePoseTags(*fit, timecodes.TimeAtFrame(points[position.i0].frame) - event_start,
+								  timecodes.TimeAtFrame(points[position.i1].frame) - event_start, style, inline_rotation, inline_scale);
+	}
+	size_t initial = position.i0;
+	for (auto const& piece : pieces) {
+		if (timecodes.TimeAtFrame(points[piece.i1].frame) > event_start)
+			break;
+		initial = piece.i1;
+	}
+	constexpr std::array<std::string_view, 3> names{"\\frz", "\\fscx", "\\fscy"};
+	std::array<double, 3> current{};
+	std::string tags;
+	for (size_t channel = 0; channel < pose_channels.size(); ++channel) {
+		current[channel] = RoundedPose(points[initial].*pose_channels[channel]);
+		bool const explicit_base = channel == 0 ? inline_rotation : inline_scale;
+		if (explicit_base || current[channel] != style[channel])
+			tags += std::string(names[channel]) + FormatCoord(current[channel], 2);
+	}
+	for (auto const& piece : pieces) {
+		int const t2 = timecodes.TimeAtFrame(points[piece.i1].frame) - event_start;
+		if (t2 <= 0 || piece.i0 == piece.i1)
+			continue; // t2=0 means the full ASS event, not an already completed ramp.
+		std::string targets;
+		for (size_t channel = 0; channel < pose_channels.size(); ++channel) {
+			double const target = RoundedPose(points[piece.i1].*pose_channels[channel]);
+			if (target != current[channel])
+				targets += std::string(names[channel]) + FormatCoord(target, 2);
+			current[channel] = target;
+		}
+		if (targets.empty())
+			continue;
+		// Keep the original clock even when this event starts after the knot.
+		// Rebasing a power curve to a new value at t=0 changes its acceleration.
+		int const t1 = timecodes.TimeAtFrame(points[piece.i0].frame) - event_start;
+		tags += "\\t(" + std::to_string(t1) + "," + std::to_string(t2) + ",";
+		if (piece.acceleration != 1.0)
+			tags += FormatCoord(piece.acceleration, 6) + ",";
+		tags += targets + ")";
+	}
+	return tags;
 }
 
 struct FittedKnots {
@@ -1410,6 +1698,53 @@ double MaxDeviation(std::vector<ResolvedPoint> const& points,
 	return worst_d;
 }
 
+// Least squares can fail a maximum-error budget even when another single
+// segment fits. Project its endpoints onto each sample's storage-pixel error
+// disk before adding knots. This bounded search only proposes a candidate;
+// failure to converge leaves the existing partitioner unchanged.
+std::optional<FittedKnots> FitSinglePositionCandidate(
+	std::vector<ResolvedPoint> const& points, std::vector<size_t> const& knots,
+	FittedKnots const& least_squares, std::vector<int> const& times,
+	double eps_storage, double inv_scale_x, double inv_scale_y) {
+	double const duration = static_cast<double>(times.back()) - times.front();
+	if (eps_storage <= 0.0 || duration <= 0.0)
+		return std::nullopt;
+	// Any feasible line differs from the chord through the observed endpoints
+	// by at most epsilon. A sample more than 2*epsilon from that chord therefore
+	// proves this run needs more than one segment, avoiding futile iterations.
+	for (size_t s = knots.front() + 1; s < knots.back(); ++s) {
+		double const u = (times[s - knots.front()] - times.front()) / duration;
+		double const dx = (points[s].x - (1.0 - u) * points[knots.front()].x - u * points[knots.back()].x) * inv_scale_x;
+		double const dy = (points[s].y - (1.0 - u) * points[knots.front()].y - u * points[knots.back()].y) * inv_scale_y;
+		if (std::hypot(dx, dy) > 2.0 * eps_storage)
+			return std::nullopt;
+	}
+	auto candidate = least_squares;
+	// Project just inside the budget so convergence at a disk boundary does
+	// not depend on floating-point equality. Acceptance still uses the exact
+	// original budget, including the caller's coordinate-rounding reserve.
+	double const radius = eps_storage * (1.0 - 1e-6);
+	for (int iteration = 0; iteration < 128; ++iteration) {
+		for (size_t s = knots.front(); s <= knots.back(); ++s) {
+			double const wb = (times[s - knots.front()] - times.front()) / duration;
+			double const wa = 1.0 - wb;
+			double const dx = (wa * candidate.x[0] + wb * candidate.x[1] - points[s].x) * inv_scale_x;
+			double const dy = (wa * candidate.y[0] + wb * candidate.y[1] - points[s].y) * inv_scale_y;
+			double const distance = std::hypot(dx, dy);
+			if (distance <= radius)
+				continue;
+			double const correction = (1.0 - radius / distance) / (wa * wa + wb * wb);
+			candidate.x[0] -= wa * correction * dx / inv_scale_x;
+			candidate.x[1] -= wb * correction * dx / inv_scale_x;
+			candidate.y[0] -= wa * correction * dy / inv_scale_y;
+			candidate.y[1] -= wb * correction * dy / inv_scale_y;
+		}
+		if (MaxDeviation(points, knots, candidate, times, inv_scale_x, inv_scale_y) <= eps_storage)
+			return candidate;
+	}
+	return std::nullopt;
+}
+
 // An endpoint interpolant supplies a feasible starting partition. Splitting
 // all curved pieces before the first spline refit avoids repeatedly solving
 // the whole run as one knot at a time is added to a long curved trajectory.
@@ -1458,7 +1793,8 @@ std::vector<size_t> InitialCompactKnots(
 // least-squares residuals peak at knots, and only added freedom next to them
 // can shrink those.
 //
-// If the single line fails, seed the refinement with a feasible interpolant
+// If both the least-squares line and a bounded single-segment feasibility
+// search fail, seed the refinement with a feasible interpolant
 // instead of growing every curved region serially. Keep that interpolant as
 // a fallback: least-squares minimizes total error, not the maximum, so fitting
 // and pruning must never leave more events than that already feasible fit.
@@ -1502,6 +1838,11 @@ std::vector<FitPiece> FitRunPieces(std::vector<ResolvedPoint> const& points,
 		if (worst_d <= eps_storage || knots.size() >= n)
 			break;
 		if (initial_knots.empty()) {
+			if (auto single = FitSinglePositionCandidate(points, knots, fit, times,
+														 eps_storage, inv_scale_x, inv_scale_y)) {
+				fit = std::move(*single);
+				break;
+			}
 			initial_knots = InitialCompactKnots(points, run, times,
 												eps_storage, inv_scale_x, inv_scale_y);
 			if (initial_knots.size() > knots.size()) {
@@ -1954,8 +2295,14 @@ MotionTrackApplyPlan BuildPositionApplyPlan(
 							  std::make_move_iterator(run_pieces.begin()),
 							  std::make_move_iterator(run_pieces.end()));
 			}
-			if (input.model == TrackModel::Similarity)
-				pieces = RefineSimilarityPieces(points, pieces, input.timecodes);
+		}
+
+		std::optional<perspective::ForwardInput> compact_geometry;
+		if (input.model == TrackModel::Similarity && input.options.mode == ApplyMode::Compact && !frame_parts) {
+			double max_scale_x = 0.0;
+			for (auto const& point : points)
+				max_scale_x = std::max({max_scale_x, point.scale_pct_x, RoundedPose(point.scale_pct_x)});
+			compact_geometry = PrepareCompactGeometry(file, *line, input, max_scale_x);
 		}
 
 		// Assemble parts: optional preserved prefix, covered pieces, optional
@@ -1994,11 +2341,8 @@ MotionTrackApplyPlan BuildPositionApplyPlan(
 
 			if (input.model == TrackModel::Similarity &&
 				input.options.mode == ApplyMode::Compact) {
-				// Compact similarity keeps the fitted position in one event and
-				// uses ASS's transform interpolation for the pose channels. The
-				// static values establish the pose at the event start; the
-				// transform then reaches the next knot at the same time as the
-				// \move window.
+				// Position curvature alone determines event boundaries. Pose may
+				// use one accelerated transform or a sequence within this event.
 				ResolvedPoint const& first = points[piece.i0];
 				ResolvedPoint const& last = points[piece.i1];
 				int const ta = input.timecodes.TimeAtFrame(first.frame);
@@ -2008,28 +2352,6 @@ MotionTrackApplyPlan BuildPositionApplyPlan(
 					ta - event_start_ms, 0, std::max(0, dur - 1));
 				int const t2 = std::clamp(
 					tb - event_start_ms, t1 + 1, std::max(t1 + 1, dur));
-				auto const rounded2 = [](double v) {
-					return std::round(v * 100.0) / 100.0;
-				};
-				// The preceding part owns the knot's frame, so this event can
-				// start after ta. Rebase every channel onto its actual start.
-				double const start_rot = InterpolateByTime(
-					first.rot_deg, last.rot_deg, ta, tb, event_start_ms);
-				double const start_scale_x = InterpolateByTime(
-					first.scale_pct_x, last.scale_pct_x, ta, tb, event_start_ms);
-				double const start_scale_y = InterpolateByTime(
-					first.scale_pct_y, last.scale_pct_y, ta, tb, event_start_ms);
-				bool const rotation_changed =
-					rounded2(start_rot) != rounded2(last.rot_deg);
-				bool const scale_changed =
-					rounded2(start_scale_x) != rounded2(last.scale_pct_x) ||
-					rounded2(start_scale_y) != rounded2(last.scale_pct_y);
-				bool const emit_rotation =
-					inline_frz || rounded2(start_rot) != rounded2(style_angle);
-				bool const emit_scale =
-					inline_scale ||
-					rounded2(start_scale_x) != rounded2(style_scale_x) ||
-					rounded2(start_scale_y) != rounded2(style_scale_y);
 
 				int const dec = input.options.position_decimals;
 				double const ex0 = InterpolateByTime(
@@ -2051,35 +2373,12 @@ MotionTrackApplyPlan BuildPositionApplyPlan(
 								   "," + std::to_string(t2) + ")";
 				}
 
-				std::string static_transforms;
-				if (emit_rotation)
-					static_transforms += "\\frz" + FormatCoord(start_rot, 2);
-				if (emit_scale)
-					static_transforms += "\\fscx" +
-										 FormatCoord(start_scale_x, 2) + "\\fscy" +
-										 FormatCoord(start_scale_y, 2);
-
-				std::string animated_transforms;
-				if ((rotation_changed || scale_changed) && t2 > t1) {
-					// libass ends the transform at the first ')', so nested
-					// scalar tags must use their unparenthesized spelling.
-					animated_transforms = "\\t(" + std::to_string(t1) + "," +
-										  std::to_string(t2) + ",";
-					if (rotation_changed)
-						animated_transforms += "\\frz" +
-											   FormatCoord(last.rot_deg, 2);
-					if (scale_changed)
-						animated_transforms += "\\fscx" +
-											   FormatCoord(last.scale_pct_x, 2) + "\\fscy" +
-											   FormatCoord(last.scale_pct_y, 2);
-					animated_transforms += ")";
-				}
-
-				part.text = ReplaceTagsDropping(line->Text, position_tag, true,
-												true);
-				if (!static_transforms.empty() || !animated_transforms.empty())
-					part.text = AppendTagToFirstBlock(
-						part.text, static_transforms + animated_transforms, true);
+				part.text = ReplaceTagsDropping(line->Text, position_tag, true, true);
+				auto const pose_tags = CompactPoseTags(points, piece, input.timecodes,
+													   event_start_ms, event_end_ms, {style_angle, style_scale_x, style_scale_y}, inline_frz, inline_scale,
+													   file, input, compact_geometry, position_tag);
+				if (!pose_tags.empty())
+					part.text = AppendTagToFirstBlock(part.text, pose_tags, true);
 				part.covered = true;
 				part.x0 = ex0;
 				part.y0 = ey0;
