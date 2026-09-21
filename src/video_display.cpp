@@ -2116,6 +2116,7 @@ void VideoDisplay::DoRender() try {
 			canvas_height);
 	}
 
+	int const overlay_frame_number = con->videoController->GetPresentedFrameN();
 	DrawOverlayPass(client_size);
 
 	bool swapped = false;
@@ -2131,14 +2132,10 @@ void VideoDisplay::DoRender() try {
 			zoom_preview->OnFramePresented(presented_frame_number);
 		FramePresented(presented_frame_number);
 		con->videoController->NotifyFramePresented(presented_frame_number);
-		// The overlay pass above ran while GetPresentedFrameN() still
-		// reported the previous frame, so tools that key off it (motion
-		// track trajectory range, riding box, per-frame readout) drew one
-		// frame stale. One follow-up render while paused re-syncs the
-		// overlay; during playback the next presented frame does it for
-		// free. presented_new_frame is only set when a new packet was
-		// uploaded, so this cannot loop.
-		if (tool && !con->videoController->IsPlaying()) {
+		// Frame-dependent tools need a paused follow-up only if the overlay
+		// was drawn against a different presented frame. A subtitle-only
+		// packet for the same frame already has current tool feedback.
+		if (tool && !con->videoController->IsPlaying() && overlay_frame_number != presented_frame_number) {
 			render_requested = true;
 			ScheduleRender();
 		}
