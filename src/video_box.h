@@ -77,6 +77,7 @@ class VideoBox final : public wxPanel {
 	int GetSecondarySubtitleLayoutMinHeight() const;
 	void RelayoutAfterSecondarySubtitleStripChange(int preserved_video_height, int preferred_client_height_delta);
 	void OnCurrentFrameChanged(int frame_number);
+	void OnSubtitlesCommit(int type);
 	void OnVideoProviderChanged(AsyncVideoProvider *provider);
 	void OnDetachedVideoChanged(agi::OptionValue const&);
 	void OnSecondarySubtitleStripEnabledChanged(agi::OptionValue const&);

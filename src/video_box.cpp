@@ -164,7 +164,7 @@ VideoBox::VideoBox(
 
 	auto core = context->GetCore();
 	connections = agi::signal::make_vector({
-		core.ass->AddCommitListener(&VideoBox::UpdateTimeBoxes, this),
+		core.ass->AddCommitListener(&VideoBox::OnSubtitlesCommit, this),
 		core.project->AddKeyframesListener(&VideoBox::UpdateTimeBoxes, this),
 		core.project->AddTimecodesListener(&VideoBox::UpdateTimeBoxes, this),
 		core.project->AddVideoProviderListener(&VideoBox::OnVideoProviderChanged, this),
@@ -231,6 +231,12 @@ void VideoBox::JumpToInputFrame() {
 bool VideoBox::OpenSecondarySubtitlesFromPath(agi::fs::path const& path, bool show_errors) {
 	return !closing && secondarySubtitleStrip
 		&& secondarySubtitleStrip->OpenExternalSubtitlesFromPath(path, show_errors);
+}
+
+void VideoBox::OnSubtitlesCommit(int type) {
+	if (type != AssFile::COMMIT_DIAG_TEXT) {
+		UpdateTimeBoxes();
+	}
 }
 
 void VideoBox::UpdateTimeBoxes() {
