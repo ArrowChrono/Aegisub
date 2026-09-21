@@ -32,6 +32,7 @@ if(GTEST_FOUND)
         tests/tests/audio_timeline.cpp
         tests/tests/audio_playback_section.cpp
         tests/tests/audio_player_xaudio2_buffer_slots.cpp
+        tests/tests/audio_player_xaudio2_playback.cpp
         tests/tests/app_launch_plan.cpp
         tests/tests/fontcollector_cli_encoding.cpp
         tests/tests/headless_service_output.cpp

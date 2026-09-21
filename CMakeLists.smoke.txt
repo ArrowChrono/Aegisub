@@ -1,5 +1,34 @@
 # Smoke / process tests. Included when WITH_SMOKE=ON.
 
+if(WIN32 AND WITH_XAUDIO2)
+    add_executable(xaudio2-playback-smoke EXCLUDE_FROM_ALL
+        tests/smoke/xaudio2_playback_smoke.cpp
+        tests/support/src_config_stubs.cpp
+        src/audio_player_xaudio2.cpp
+        src/perf_trace.cpp
+    )
+    target_compile_features(xaudio2-playback-smoke PRIVATE cxx_std_20)
+    target_compile_definitions(xaudio2-playback-smoke PRIVATE CMAKE_BUILD WITH_XAUDIO2)
+    target_link_libraries(xaudio2-playback-smoke PRIVATE aegisub_core libaegisub luajit ${wxWidgets_LIBRARIES})
+    aegisub_enable_wx_utf8_guard(xaudio2-playback-smoke)
+    if(XAUDIO2_REDIST)
+        target_compile_definitions(xaudio2-playback-smoke PRIVATE XAUDIO2_REDIST)
+        target_include_directories(xaudio2-playback-smoke PRIVATE ${XAudio2redist_INCLUDE_DIRS})
+        target_link_libraries(xaudio2-playback-smoke PRIVATE ${XAudio2redist_LIBRARIES})
+    else()
+        target_link_libraries(xaudio2-playback-smoke PRIVATE xaudio2)
+    endif()
+    if(BUILD_TESTING)
+        add_test(NAME xaudio2_playback_smoke COMMAND "$<TARGET_FILE:xaudio2-playback-smoke>")
+        set_tests_properties(xaudio2_playback_smoke PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            LABELS "smoke;audio;device"
+            RUN_SERIAL TRUE
+            TIMEOUT 20
+        )
+    endif()
+endif()
+
 if(WITH_FFMS2 AND WITH_LSMASNATIVE AND AEGISUB_MATROSKA_PARSING)
     add_executable(audio-timeline-smoke EXCLUDE_FROM_ALL
         tests/smoke/audio_timeline_smoke.cpp
