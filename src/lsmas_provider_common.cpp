@@ -234,18 +234,24 @@ std::vector<TrackChoice> ProbeTracks(agi::fs::path const& filename, TrackType ty
 }
 
 int SelectTrack(agi::fs::path const& filename,
-                TrackType type,
-                std::shared_ptr<agi::SingleChoiceInteractionSink> const& choice_sink) {
-    auto tracks = ProbeTracks(filename, type);
-    if (tracks.empty())
+				TrackType type,
+				std::shared_ptr<agi::SingleChoiceInteractionSink> const& choice_sink,
+				int *type_ordinal, int *type_count) {
+	if (type_ordinal)
+		*type_ordinal = -1;
+	auto tracks = ProbeTracks(filename, type);
+	if (type_count)
+		*type_count = static_cast<int>(tracks.size());
+	if (tracks.empty())
         return -1;
-    if (tracks.size() == 1)
-        return tracks.front().stream_index;
-    if (!choice_sink)
-        return tracks.front().stream_index;
+	if (tracks.size() == 1 || !choice_sink) {
+		if (type_ordinal)
+			*type_ordinal = 0;
+		return tracks.front().stream_index;
+	}
 
-    std::vector<std::string> choices;
-    choices.reserve(tracks.size());
+	std::vector<std::string> choices;
+	choices.reserve(tracks.size());
     for (auto const& track : tracks)
         choices.push_back(track.display_name);
 
@@ -255,7 +261,9 @@ int SelectTrack(agi::fs::path const& filename,
     auto resolved = aegisub::track_choice::ResolveSelection(tracks.size(), choice);
     if (!resolved)
         throw agi::UserCancelException(type == TrackType::Video ? "video loading canceled by user" : "audio loading canceled by user");
-    return tracks[*resolved].stream_index;
+	if (type_ordinal)
+		*type_ordinal = static_cast<int>(*resolved);
+	return tracks[*resolved].stream_index;
 }
 
 agi::fs::path GetIndexCacheFilename(agi::fs::path const& filename) {

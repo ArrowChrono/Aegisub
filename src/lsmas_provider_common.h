@@ -57,8 +57,9 @@ struct ErrorString {
 std::vector<TrackChoice> ParseTrackChoicesJson(std::string_view json_text, TrackType type);
 std::vector<TrackChoice> ProbeTracks(agi::fs::path const& filename, TrackType type);
 int SelectTrack(agi::fs::path const& filename,
-                TrackType type,
-                std::shared_ptr<agi::SingleChoiceInteractionSink> const& choice_sink);
+				TrackType type,
+				std::shared_ptr<agi::SingleChoiceInteractionSink> const& choice_sink,
+				int *type_ordinal = nullptr, int *type_count = nullptr);
 
 agi::fs::path GetIndexCacheFilename(agi::fs::path const& filename);
 void CleanIndexCache();

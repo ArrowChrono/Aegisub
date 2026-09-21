@@ -1,5 +1,29 @@
 # Smoke / process tests. Included when WITH_SMOKE=ON.
 
+if(WITH_FFMS2 AND WITH_LSMASNATIVE AND AEGISUB_MATROSKA_PARSING)
+    add_executable(audio-timeline-smoke EXCLUDE_FROM_ALL
+        tests/smoke/audio_timeline_smoke.cpp
+        tests/support/src_config_stubs.cpp
+    )
+    target_compile_features(audio-timeline-smoke PRIVATE cxx_std_20)
+    target_compile_definitions(audio-timeline-smoke PRIVATE CMAKE_BUILD)
+    target_include_directories(audio-timeline-smoke PRIVATE "${FFMS2_INCLUDE_DIR}")
+    target_link_libraries(audio-timeline-smoke PRIVATE aegisub_core libaegisub luajit)
+    if(BUILD_TESTING)
+        add_test(NAME audio_timeline_smoke
+            COMMAND "$<TARGET_FILE:audio-timeline-smoke>"
+                "${PROJECT_SOURCE_DIR}/tests/fixtures/media-seek"
+                "${PROJECT_BINARY_DIR}/artifacts/audio-timeline"
+        )
+        set_tests_properties(audio_timeline_smoke PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            LABELS "smoke;audio;providers"
+            RUN_SERIAL TRUE
+            TIMEOUT 90
+        )
+    endif()
+endif()
+
 # Developer entry points for process smokes (moved from root CMakeLists.txt).
 add_custom_target(run-aegisub-gui-test-command-smoke
     COMMAND "${CMAKE_COMMAND}"

@@ -29,6 +29,7 @@ if(GTEST_FOUND)
         tests/tests/ass_style_resolution.cpp
         tests/tests/ass_style_parse.cpp
         tests/tests/audio.cpp
+        tests/tests/audio_timeline.cpp
         tests/tests/audio_playback_section.cpp
         tests/tests/audio_player_xaudio2_buffer_slots.cpp
         tests/tests/app_launch_plan.cpp

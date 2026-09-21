@@ -29,8 +29,10 @@
 #include <matroska/KaxTracks.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <ios>
 #include <limits>
@@ -647,6 +649,16 @@ Cursor parse_track_entry(EbmlStream &stream, EbmlElement &entry_element, MkvTrac
 			value.ReadData(stream.I_O());
 			track.default_duration = value.GetValue();
 		}
+		else if (EbmlId(child) == EBML_ID(libmatroska::KaxCodecDelay)) {
+			auto& value = *static_cast<libmatroska::KaxCodecDelay *>(cursor.element.get());
+			value.ReadData(stream.I_O());
+			track.codec_delay_ns = value.GetValue();
+		}
+		else if (EbmlId(child) == EBML_ID(libmatroska::KaxSeekPreRoll)) {
+			auto& value = *static_cast<libmatroska::KaxSeekPreRoll *>(cursor.element.get());
+			value.ReadData(stream.I_O());
+			track.seek_pre_roll_ns = value.GetValue();
+		}
 		else if (EbmlId(child) == EBML_ID(libmatroska::KaxCodecPrivate)) {
 			auto &value = *static_cast<libmatroska::KaxCodecPrivate*>(cursor.element.get());
 			value.ReadData(stream.I_O());
@@ -760,6 +772,151 @@ MkvTrackScanResult scan_tracks(agi::fs::path const& filename) {
 	}
 
 	return result;
+}
+
+Cursor next_timeline_child(EbmlStream& stream, EbmlElement const& parent) {
+	if (parent.IsFiniteSize() && stream.I_O().getFilePointer() >= parent.GetEndPosition())
+		return {};
+	return next_child(stream, EBML_CONTEXT(&parent));
+}
+
+std::pair<uint64_t, int16_t> read_timeline_block(EbmlStream& stream, EbmlElement& block) {
+	std::array<unsigned char, 11> header{};
+	if (!block.IsFiniteSize() || block.GetSize() < 4 || stream.I_O().read(header.data(), 1) != 1 || !header[0])
+		throw MatroskaException("Invalid Matroska block header in Opus timeline.");
+	unsigned width = 1;
+	unsigned marker = 0x80;
+	while (!(header[0] & marker)) {
+		marker >>= 1;
+		++width;
+	}
+	if (block.GetSize() < width + 3 || stream.I_O().read(header.data() + 1, width + 2) != width + 2)
+		throw MatroskaException("Truncated Matroska block header in Opus timeline.");
+	uint64_t track_number = header[0] & (marker - 1);
+	for (unsigned i = 1; i < width; ++i)
+		track_number = (track_number << 8) | header[i];
+	int const timestamp = (header[width] << 8) | header[width + 1];
+	block.SkipData(stream, EBML_CONTEXT(&block));
+	return {track_number, static_cast<int16_t>(timestamp < 0x8000 ? timestamp : timestamp - 0x10000)};
+}
+
+int64_t timeline_timestamp_ns(uint64_t cluster_time, int16_t relative_time, uint64_t segment_scale, double track_scale) {
+	if (!segment_scale || !std::isfinite(track_scale) || track_scale <= 0 || cluster_time > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / segment_scale)
+		throw MatroskaException("Invalid or unrepresentable Matroska Opus timestamp scale.");
+	auto const origin = static_cast<int64_t>(cluster_time * segment_scale);
+	auto const relative = std::round(static_cast<long double>(relative_time) * segment_scale * track_scale);
+	auto const limit = std::ldexp(1.0L, 63);
+	if (!std::isfinite(relative) || relative >= limit || relative < -limit)
+		throw MatroskaException("Matroska Opus block timestamp is out of range.");
+	auto const offset = static_cast<int64_t>(relative);
+	if (offset > 0 && origin > std::numeric_limits<int64_t>::max() - offset)
+		throw MatroskaException("Matroska Opus block timestamp is out of range.");
+	return origin + offset;
+}
+
+std::optional<MkvAudioTimeline> scan_opus_audio_timeline(agi::fs::path const& filename, int audio_ordinal, int audio_count) {
+	PathIOCallback input(filename);
+	std::array<unsigned char, 4> signature{};
+	if (input.read(signature.data(), signature.size()) != signature.size() || signature != std::array<unsigned char, 4>{0x1a, 0x45, 0xdf, 0xa3})
+		return std::nullopt;
+	input.setFilePointer(0);
+	EbmlStream stream(input);
+	auto segment = open_segment(stream);
+	if (!segment)
+		return std::nullopt;
+
+	auto const scan = scan_tracks(filename);
+	MkvTrackInfo const *audio = nullptr;
+	MkvTrackInfo const *video = nullptr;
+	for (auto const& track : scan.tracks) {
+		if (track.type == MkvTrackType::Audio && track.type_ordinal == audio_ordinal)
+			audio = &track;
+		if (track.type == MkvTrackType::Video && !video)
+			video = &track;
+	}
+	if (!video)
+		return std::nullopt;
+	if (audio_count >= 0 && std::ranges::count_if(scan.tracks, [](auto const& track) { return track.type == MkvTrackType::Audio; }) != audio_count)
+		throw MatroskaException("Cannot map decoder audio streams to Matroska tracks.");
+	if (!audio || audio->codec_id != "A_OPUS")
+		return std::nullopt;
+	std::string error;
+	auto const head = DecodeMkvContentEncodedData(audio->codec_private, audio->content_encodings, MkvContentEncodingTarget::Private, &error);
+	if (!head)
+		throw MatroskaException("Failed to decode Matroska Opus header: " + error);
+	if (head->size() < 19 || !head->starts_with("OpusHead") || static_cast<unsigned char>((*head)[8]) > 15 || (*head)[9] == 0)
+		throw MatroskaException("Invalid Matroska Opus identification header.");
+	auto const channels = static_cast<unsigned char>((*head)[9]);
+	auto const family = static_cast<unsigned char>((*head)[18]);
+	if ((!family && channels > 2) || (family && head->size() < 21u + channels))
+		throw MatroskaException("Invalid Matroska Opus channel mapping header.");
+	MkvAudioTimeline result;
+	result.codec_delay_ns = audio->codec_delay_ns;
+	result.seek_pre_roll_ns = audio->seek_pre_roll_ns;
+	result.pre_skip = static_cast<unsigned char>((*head)[10]) | (static_cast<unsigned char>((*head)[11]) << 8);
+	std::optional<int64_t> first_audio;
+	std::optional<int64_t> first_video;
+	auto const& segment_context = EBML_CONTEXT(segment.get());
+	auto cursor = next_timeline_child(stream, *segment);
+	while (cursor.element && cursor.upper <= 0) {
+		if (EbmlId(*cursor.element) != EBML_ID(libmatroska::KaxCluster)) {
+			cursor.element->SkipData(stream, EBML_CONTEXT(cursor.element.get()));
+			cursor = next_timeline_child(stream, *segment);
+			continue;
+		}
+		auto& cluster = *cursor.element;
+		auto const& cluster_context = EBML_CONTEXT(&cluster);
+		std::optional<uint64_t> cluster_time;
+		std::optional<int16_t> audio_time;
+		std::optional<int16_t> video_time;
+		auto read_block = [&](EbmlElement& block) {
+			auto const [track_number, timestamp] = read_timeline_block(stream, block);
+			if (track_number == audio->track_number && !first_audio && !audio_time)
+				audio_time = timestamp;
+			if (track_number == video->track_number && !first_video)
+				video_time = video_time ? std::min(*video_time, timestamp) : timestamp;
+		};
+		auto child = next_timeline_child(stream, cluster);
+		while (child.element && child.upper <= 0) {
+			if (EbmlId(*child.element) == EBML_ID(libmatroska::KaxClusterTimecode)) {
+				auto& value = *static_cast<libmatroska::KaxClusterTimecode *>(child.element.get());
+				value.ReadData(stream.I_O());
+				cluster_time = value.GetValue();
+			}
+			else if (EbmlId(*child.element) == EBML_ID(libmatroska::KaxSimpleBlock))
+				read_block(*child.element);
+			else if (EbmlId(*child.element) == EBML_ID(libmatroska::KaxBlockGroup)) {
+				auto& group = *child.element;
+				auto nested = next_timeline_child(stream, group);
+				while (nested.element && nested.upper <= 0) {
+					if (EbmlId(*nested.element) == EBML_ID(libmatroska::KaxBlock))
+						read_block(*nested.element);
+					else
+						nested.element->SkipData(stream, EBML_CONTEXT(nested.element.get()));
+					nested = next_timeline_child(stream, group);
+				}
+				child = continue_after_nested(stream, cluster_context, std::move(nested));
+				continue;
+			}
+			else
+				child.element->SkipData(stream, EBML_CONTEXT(child.element.get()));
+			child = next_timeline_child(stream, cluster);
+		}
+		if ((audio_time || video_time) && !cluster_time)
+			throw MatroskaException("Matroska Opus timeline cluster has no timestamp.");
+		if (audio_time)
+			first_audio = timeline_timestamp_ns(*cluster_time, *audio_time, scan.segment_timecode_scale, audio->timecode_scale);
+		// The first video cluster may store B frames after later presentation times.
+		if (video_time)
+			first_video = timeline_timestamp_ns(*cluster_time, *video_time, scan.segment_timecode_scale, video->timecode_scale);
+		if (first_audio && first_video) {
+			result.first_audio_ns = *first_audio;
+			result.first_video_ns = *first_video;
+			return result;
+		}
+		cursor = continue_after_nested(stream, segment_context, std::move(child));
+	}
+	throw MatroskaException("Matroska Opus timeline has no audio or video block origin.");
 }
 
 std::vector<MkvTrackInfo const*> collect_importable_subtitle_tracks(MkvTrackScanResult const& scan, bool log_tracks) {
@@ -1055,6 +1212,10 @@ void load_text_track(agi::fs::path const& filename, MkvTrackInfo const& track, u
 MkvTrackScanResult MatroskaWrapper::ScanTracks(agi::fs::path const& filename) {
 	LogMkvParserBackendOnce();
 	return scan_tracks(filename);
+}
+
+std::optional<MkvAudioTimeline> MatroskaWrapper::GetOpusAudioTimeline(agi::fs::path const& filename, int audio_ordinal, int audio_count) {
+	return scan_opus_audio_timeline(filename, audio_ordinal, audio_count);
 }
 
 MkvSubtitleAvailability MatroskaWrapper::GetSubtitleAvailability(agi::fs::path const& filename) {

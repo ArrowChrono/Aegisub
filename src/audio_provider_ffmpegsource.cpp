@@ -36,10 +36,13 @@
 #include <libaegisub/audio/provider.h>
 
 #include "ffmpegsource_common.h"
+#include "audio_provider_timeline.h"
+#include "mkv_wrap.h"
 #include "options.h"
 
 #include <libaegisub/fs.h>
 #include <libaegisub/make_unique.h>
+#include <libaegisub/scope_exit.h>
 
 #include <map>
 
@@ -59,6 +62,7 @@ class FFmpegSourceAudioProvider final : public agi::AudioProvider, FFmpegSourceP
 	mutable char FFMSErrMsg[1024];			///< FFMS error message
 	mutable FFMS_ErrorInfo ErrInfo;			///< FFMS error codes/messages
 
+	std::optional<MkvAudioTimeline> timeline;
 	void LoadAudio(agi::fs::path const& filename);
 	void FillBuffer(void *Buf, int64_t Start, int64_t Count) const override {
 		if (ffms::GetAudio(AudioSource, Buf, Start, Count, &ErrInfo))
@@ -68,6 +72,7 @@ class FFmpegSourceAudioProvider final : public agi::AudioProvider, FFmpegSourceP
 public:
 	FFmpegSourceAudioProvider(agi::fs::path const& filename, agi::BackgroundRunner *br, std::shared_ptr<agi::SingleChoiceInteractionSink> choice_sink);
 
+	std::optional<MkvAudioTimeline> const& GetTimeline() const { return timeline; }
 	bool NeedsCache() const override { return true; }
 	agi::AudioProviderMemoryStats GetMemoryStats() const override { return BuildMemoryStats("FFmpegSource"); }
 };
@@ -100,6 +105,7 @@ void FFmpegSourceAudioProvider::LoadAudio(agi::fs::path const& filename) {
 			throw agi::AudioDataNotFound(ErrInfo.Buffer);
 	}
 
+	auto cancel_indexer = agi::make_scope_exit([&] { ffms::CancelIndexing(Indexer); });
 	auto TrackList = GetTracksOfType(filename, Indexer, FFMS_TYPE_AUDIO);
 
 	// initialize the track number to an invalid value so we can detect later on
@@ -115,6 +121,19 @@ void FFmpegSourceAudioProvider::LoadAudio(agi::fs::path const& filename) {
 		TrackNumber = TrackList.front().ffms_track_index;
 	else
 		throw agi::AudioDataNotFound("no audio tracks found");
+
+	// The UI list omits streams with unavailable codecs; count the raw audio
+	// streams instead so a skipped choice cannot change the Matroska ordinal.
+	int audio_ordinal = 0;
+	int audio_count = 0;
+	for (int i = 0; i < ffms::GetNumTracksI(Indexer); ++i) {
+		if (ffms::GetTrackTypeI(Indexer, i) == FFMS_TYPE_AUDIO) {
+			if (i < TrackNumber)
+				++audio_ordinal;
+			++audio_count;
+		}
+	}
+	timeline = MatroskaWrapper::GetOpusAudioTimeline(filename, audio_ordinal, audio_count);
 
 	// generate a name for the cache file
 	agi::fs::path CacheName = GetCacheFilename(filename);
@@ -147,15 +166,18 @@ void FFmpegSourceAudioProvider::LoadAudio(agi::fs::path const& filename) {
 		TrackSelection TrackMask = static_cast<TrackSelection>(TrackNumber);
 		if (GetConfiguredFFmpegSourceIndexAllTracks())
 			TrackMask = TrackSelection::All;
+		cancel_indexer.release(); // DoIndexing consumes the FFMS indexer.
 		Index = DoIndexing(Indexer, CacheName, TrackMask, ErrorHandling);
 	}
-	else
+	else {
 		ffms::CancelIndexing(Indexer);
+		cancel_indexer.release();
+	}
 
 	// update access time of index file so it won't get cleaned away
 	agi::fs::Touch(CacheName);
 
-	AudioSource = ffms::CreateAudioSource(filename_utf8.c_str(), TrackNumber, Index, FFMS_DELAY_FIRST_VIDEO_TRACK, &ErrInfo);
+	AudioSource = ffms::CreateAudioSource(filename_utf8.c_str(), TrackNumber, Index, timeline ? FFMS_DELAY_NO_SHIFT : FFMS_DELAY_FIRST_VIDEO_TRACK, &ErrInfo);
 	if (!AudioSource)
 		throw agi::AudioProviderError(std::string("Failed to open audio track: ") + ErrInfo.Buffer);
 
@@ -200,7 +222,9 @@ void FFmpegSourceAudioProvider::LoadAudio(agi::fs::path const& filename) {
 }
 
 std::unique_ptr<agi::AudioProvider> CreateFFmpegSourceAudioProvider(agi::fs::path const& file, agi::BackgroundRunner *br, std::shared_ptr<agi::SingleChoiceInteractionSink> choice_sink) {
-	return agi::make_unique<FFmpegSourceAudioProvider>(file, br, std::move(choice_sink));
+	auto provider = agi::make_unique<FFmpegSourceAudioProvider>(file, br, std::move(choice_sink));
+	auto const timeline = provider->GetTimeline();
+	return ApplyMatroskaAudioTimeline(std::move(provider), timeline);
 }
 
 #endif /* WITH_FFMS2 */

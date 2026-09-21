@@ -75,6 +75,8 @@ struct MkvTrackInfo {
 	MkvTrackType type = MkvTrackType::Other;
 	uint64_t track_number = 0;
 	uint64_t default_duration = 0;
+	uint64_t codec_delay_ns = 0;
+	uint64_t seek_pre_roll_ns = 0;
 	double timecode_scale = 1.0;
 	std::string codec_id;
 	std::string language = "eng";
@@ -91,6 +93,14 @@ struct MkvTrackInfo {
 struct MkvTrackScanResult {
 	uint64_t segment_timecode_scale = kDefaultSegmentTimecodeScale;
 	std::vector<MkvTrackInfo> tracks;
+};
+
+struct MkvAudioTimeline {
+	int64_t first_audio_ns = 0;
+	int64_t first_video_ns = 0;
+	uint64_t codec_delay_ns = 0;
+	uint16_t pre_skip = 0;
+	uint64_t seek_pre_roll_ns = 0;
 };
 
 struct MkvSubtitleAvailability {

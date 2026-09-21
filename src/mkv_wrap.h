@@ -40,6 +40,13 @@ public:
 	static bool HasSubtitles(agi::fs::path const& filename);
 	/// Scan all tracks in a Matroska file and return their metadata
 	static MkvTrackScanResult ScanTracks(agi::fs::path const& filename);
+	/// Read exact container origins for a selected Opus audio track with video.
+#if AEGISUB_MATROSKA_PARSING
+	static std::optional<MkvAudioTimeline> GetOpusAudioTimeline(agi::fs::path const& filename, int audio_ordinal, int audio_count = -1);
+#else
+	// The legacy subtitle parser does not expose exact Opus timing metadata.
+	static std::optional<MkvAudioTimeline> GetOpusAudioTimeline(agi::fs::path const&, int, int = -1) { return std::nullopt; }
+#endif
 	/// Report text and bitmap subtitle availability without importing a track.
 	static MkvSubtitleAvailability GetSubtitleAvailability(agi::fs::path const& filename);
 	/// Load subtitles from a matroska file
