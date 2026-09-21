@@ -77,7 +77,5 @@ vendor/luajit/src/gen
 vendor/luajit/src/lj_vm.s
 vendor/luajit/src/luajit
 
-**/.vs/
-.vscode
-.zcode
-.claude
+**/.*/*
+!.git/*
