@@ -331,6 +331,8 @@ public static class UiaDriver
             (long)(timeout.TotalSeconds * Stopwatch.Frequency);
         bool? foregroundRequestSucceeded = null;
         var targetWindowHandle = IntPtr.Zero;
+        InvalidOperationException? lastFocusError = null;
+        var focusAttempts = 0;
         while (Stopwatch.GetTimestamp() < deadline)
         {
             process.Refresh();
@@ -352,7 +354,25 @@ public static class UiaDriver
                     foregroundRequestSucceeded =
                         SetForegroundWindow(targetWindowHandle);
                 }
-                element.SetFocus();
+                // A focused child already satisfies the window contract; its
+                // top-level UIA element need not itself accept keyboard focus.
+                if (HasFocusedElementInWindow(
+                    process,
+                    targetWindowHandle,
+                    out _,
+                    out _))
+                    return;
+                try
+                {
+                    ++focusAttempts;
+                    element.SetFocus();
+                }
+                catch (InvalidOperationException error)
+                {
+                    // Restoration/activation can temporarily reject SetFocus.
+                    // Keep the same deadline and require verified focus below.
+                    lastFocusError = error;
+                }
                 if (HasFocusedElementInWindow(
                     process,
                     targetWindowHandle,
@@ -385,6 +405,18 @@ public static class UiaDriver
         catch (InvalidOperationException)
         {
         }
+        string targetState;
+        try
+        {
+            var current = element.Current;
+            targetState = $"target_enabled={current.IsEnabled};" +
+                $"target_focusable={current.IsKeyboardFocusable};" +
+                $"target_offscreen={current.IsOffscreen};";
+        }
+        catch (ElementNotAvailableException)
+        {
+            targetState = "target_state=unavailable;";
+        }
         throw new TimeoutException(
             "UIA window did not accept focus " +
             $"(target_pid={process.Id};target_session={targetSession};" +
@@ -394,7 +426,11 @@ public static class UiaDriver
             $"focused_pid={focusedProcessId};" +
             $"focused_hwnd=0x{focusedWindowHandle.ToInt64():X};" +
             $"set_foreground={foregroundRequestSucceeded?.ToString() ?? "unknown"};" +
-            $"interactive={Environment.UserInteractive})");
+            targetState +
+            $"focus_attempts={focusAttempts};" +
+            $"last_focus_error={lastFocusError?.Message ?? "none"};" +
+            $"interactive={Environment.UserInteractive})",
+            lastFocusError);
     }
 
     private const int ShowWindowRestore = 9;
