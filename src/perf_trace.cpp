@@ -579,6 +579,10 @@ public:
 	void ObserveVideoFrameRenderDuration(int frame, double time, bool delivered, bool immediate, double duration_ms) override {
 		perf_trace::ObserveVideoFrameRenderDuration(frame, time, delivered, immediate, duration_ms);
 	}
+
+	void ObservePipelineEvent(aegisub::async_video_trace::PipelineEvent const& event) override {
+		perf_trace::ObserveVideoPipelineEvent(event);
+	}
 };
 
 struct Session {
@@ -1144,7 +1148,9 @@ VideoUiDurationScope::~VideoUiDurationScope() noexcept {
 	if (!started_ns)
 		return;
 	auto const duration_ms = static_cast<double>(NowNs() - started_ns) / 1'000'000.0;
-	ObserveVideoUiDuration(phase, duration_ms, detail_a, detail_b, duration_ms >= 8.0);
+	// A slow scope is the observation, not a reason to synchronously flush the
+	// trace on the GUI thread. Keep it on the same bounded buffer as fast scopes.
+	ObserveVideoUiDuration(phase, duration_ms, detail_a, detail_b);
 }
 
 void VideoUiDurationScope::SetDetails(int first, int second) noexcept {
@@ -1164,6 +1170,11 @@ bool ShouldSampleVideoMemory(bool force) {
 		return false;
 	if (force)
 		return true;
+	// Periodic snapshots synchronously collect worker statistics. Video timing
+	// traces retain explicit lifecycle snapshots, but must not stall every 500 ms
+	// waiting for the renderer unless memory sampling was requested as well.
+	if (!IsCategoryEnabledLocked(session, TraceCategory::Memory | TraceCategory::Audio))
+		return false;
 	return timestamp_ns - session.last_video_memory_sample_ns
 		>= std::chrono::duration_cast<std::chrono::nanoseconds>(kVideoMemorySampleInterval).count();
 }
@@ -1410,6 +1421,7 @@ void ObserveVideoFrameRenderDuration(int frame, double time, bool delivered, boo
 	if (!trace_active.load(std::memory_order_relaxed))
 		return;
 
+	auto const timestamp_ns = NowNs();
 	auto& session = GetSession();
 	std::lock_guard<std::mutex> lock(session.mutex);
 	if (!session.enabled || session.closing || !IsCategoryEnabledLocked(session, TraceCategory::Video))
@@ -1421,7 +1433,30 @@ void ObserveVideoFrameRenderDuration(int frame, double time, bool delivered, boo
 	payload.AddBool("delivered", delivered);
 	payload.AddBool("immediate", immediate);
 	payload.AddDouble("duration_ms", duration_ms);
-	AppendEntryLocked(session, "metric", "video_frame_render_duration", payload.Finish(), false, NowNs());
+	AppendEntryLocked(session, "metric", "video_frame_render_duration", payload.Finish(), false, timestamp_ns);
+}
+
+void ObserveVideoPipelineEvent(aegisub::async_video_trace::PipelineEvent const& event) {
+	if (!trace_active.load(std::memory_order_relaxed))
+		return;
+
+	auto const timestamp_ns = event.timestamp_ns > 0 ? event.timestamp_ns : NowNs();
+	auto& session = GetSession();
+	std::scoped_lock lock(session.mutex);
+	if (!session.enabled || session.closing || !IsCategoryEnabledLocked(session, TraceCategory::Video))
+		return;
+
+	JsonObjectBuilder payload;
+	payload.AddString("stage", event.stage ? event.stage : "");
+	payload.AddUInt("provider_version", event.version.provider);
+	payload.AddUInt("content_version", event.version.content);
+	payload.AddUInt("request_version", event.version.request);
+	payload.AddInt("delivery_class", static_cast<int>(event.delivery_class));
+	payload.AddUInt("interaction_id", event.visual_interaction_id);
+	payload.AddInt("frame", event.frame);
+	if (event.duration_ms >= 0.0)
+		payload.AddDouble("duration_ms", event.duration_ms);
+	AppendEntryLocked(session, "metric", "video_preview_pipeline", payload.Finish(), false, timestamp_ns);
 }
 
 void ObserveVideoRenderPacketCacheLookup(int frame, bool hit, char const* source) {
@@ -1987,6 +2022,8 @@ void ObserveVideoMemorySnapshot(char const* reason, VideoMemorySnapshot const& s
 	std::lock_guard<std::mutex> lock(session.mutex);
 	if (!session.enabled || session.closing
 		|| !IsCategoryEnabledLocked(session, TraceCategory::Memory | TraceCategory::Audio | TraceCategory::Video))
+		return;
+	if (!force && !IsCategoryEnabledLocked(session, TraceCategory::Memory | TraceCategory::Audio))
 		return;
 
 	auto const sample_interval_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(kVideoMemorySampleInterval).count();

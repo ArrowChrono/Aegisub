@@ -3,6 +3,7 @@
 #include "../../src/ass_dialogue.h"
 #include "../../src/ass_file.h"
 #include "../../src/async_video_provider.h"
+#include "../../src/async_video_trace.h"
 #include "../../src/export_fixstyle.h"
 #include "../../src/include/aegisub/subtitles_provider.h"
 #include "../../src/subtitle_overlay_blend.h"
@@ -15,10 +16,12 @@
 
 #include <libaegisub/background_runner.h>
 #include <libaegisub/make_unique.h>
+#include <libaegisub/scope_exit.h>
 #include <libaegisub/vfr.h>
 
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <condition_variable>
@@ -688,6 +691,7 @@ public:
 struct RecordedFrame {
 	int frame_number = -1;
 	int subtitle_generation = -1;
+	VideoRenderDeliveryVersion delivery_version;
 	double time = 0.0;
 	bool has_overlay = false;
 	int overlay_dirty_rect_count = 0;
@@ -709,6 +713,7 @@ public:
 		RecordedFrame frame;
 		frame.frame_number = display_frame && !display_frame->data.empty() ? display_frame->data[0] : -1;
 		frame.subtitle_generation = display_frame && display_frame->data.size() > 1 ? display_frame->data[1] : -1;
+		frame.delivery_version = packet.delivery_version;
 		frame.time = time;
 		frame.has_overlay = packet.has_subtitle_overlay;
 		frame.overlay_dirty_rect_count = packet.subtitle_overlay.dirty_rect_count;
@@ -1186,6 +1191,87 @@ TEST(async_video_provider, load_subtitles_invalidates_stale_render_result) {
 	ASSERT_EQ(1u, frames.size());
 	EXPECT_EQ(1, frames.back().frame_number);
 	EXPECT_EQ(2, frames.back().subtitle_generation);
+}
+
+TEST(async_video_provider, pipeline_events_correlate_superseded_render_and_latest_delivery) {
+	using aegisub::async_video_trace::PipelineEvent;
+	class PipelineRecorder final : public aegisub::async_video_trace::Sink {
+		std::mutex mutex;
+		std::vector<PipelineEvent> events;
+
+		public:
+		void ObserveFrameResult(int, double, bool, bool) override {}
+		void ObserveVideoFrameRenderDuration(int, double, bool, bool, double) override {}
+		void ObservePipelineEvent(PipelineEvent const& event) override {
+			std::scoped_lock lock(mutex);
+			events.push_back(event);
+		}
+		std::vector<PipelineEvent> Snapshot() {
+			std::scoped_lock lock(mutex);
+			return events;
+		}
+	} pipeline;
+	// The provider's inner scope drains its worker before this disconnects the
+	// sink, including when an ASSERT returns early from the test.
+	auto disconnect = agi::make_scope_exit([] { aegisub::async_video_trace::SetSink(nullptr); });
+	auto state = std::make_shared<VideoProviderState>();
+	EventRecorder recorder;
+	auto subtitles = MakeSubtitleFile("before");
+	std::uint64_t provider_id = 0;
+	{
+		AsyncVideoProvider provider(
+			agi::make_unique<FakeVideoProvider>(state),
+			agi::make_unique<FakeSubtitlesProvider>(), recorder);
+		provider_id = provider.GetRawVideoIdentity().generation;
+		provider.SetCurrentFrameContext(7, 1000);
+		provider.CollectMemoryStats();
+		aegisub::async_video_trace::SetSink(&pipeline);
+		ScopedVideoProviderBlock block(state);
+
+		provider.LoadSubtitles(&subtitles, {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate, .visual_interaction_id = 41});
+		// Source acquisition is inside ProcRenderPacket, after worker_render_begin
+		// and the pre-render version check. Supersede that exact in-flight pass.
+		ASSERT_TRUE(block.WaitUntilBlocked());
+		subtitles.Events.front().Text = "after";
+		provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleFinal, .visual_interaction_id = 42, .force_current_frame_render = true});
+		block.Release();
+		ASSERT_TRUE(recorder.WaitForCount(1));
+	}
+
+	auto const events = pipeline.Snapshot();
+	ASSERT_EQ(8u, events.size());
+	constexpr std::array<char const *, 8> stages = {
+		"submit_load", "worker_take", "worker_render_begin", "submit_update",
+		"worker_render_drop", "worker_take", "worker_render_begin", "worker_render_deliver"};
+	constexpr std::array<std::uint64_t, 8> contents = {1, 1, 1, 2, 1, 2, 2, 2};
+	for (size_t index = 0; index < events.size(); ++index) {
+		SCOPED_TRACE(index);
+		auto const& event = events[index];
+		bool const latest = contents[index] == 2;
+		EXPECT_STREQ(stages[index], event.stage);
+		EXPECT_EQ(provider_id, event.version.provider);
+		EXPECT_EQ(contents[index], event.version.content);
+		EXPECT_EQ(0u, event.version.request);
+		EXPECT_EQ(latest ? VideoRenderDeliveryClass::VisualSubtitleFinal : VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+				  event.delivery_class);
+		EXPECT_EQ(latest ? 42u : 41u, event.visual_interaction_id);
+		EXPECT_EQ(index == 0 || index == 3 ? -1 : 7, event.frame);
+		EXPECT_GT(event.timestamp_ns, 0);
+		if (index == 4 || index == 7)
+			EXPECT_GE(event.duration_ms, 0.0);
+		else
+			EXPECT_EQ(-1.0, event.duration_ms);
+	}
+
+	auto const frames = recorder.Snapshot();
+	ASSERT_EQ(1u, frames.size());
+	VideoRenderDeliveryVersion const latest_version{.provider = provider_id, .content = 2, .request = 0};
+	EXPECT_EQ(latest_version, frames.front().delivery_version);
+	EXPECT_EQ(7, frames.front().frame_number);
+	EXPECT_EQ(1000, frames.front().time);
+	EXPECT_EQ(2, frames.front().subtitle_generation);
+	EXPECT_EQ(VideoRenderDeliveryClass::VisualSubtitleFinal, frames.front().delivery_class);
+	EXPECT_EQ(42u, frames.front().visual_interaction_id);
 }
 
 TEST_F(MainThreadDeliveryFixture, queued_same_frame_packet_is_rejected_after_subtitle_reload) {

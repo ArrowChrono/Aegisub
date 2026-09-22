@@ -1,6 +1,7 @@
 #include "async_video_trace.h"
 
 #include <atomic>
+#include <chrono>
 
 namespace aegisub::async_video_trace {
 namespace {
@@ -23,5 +24,17 @@ void ObserveVideoFrameRenderDuration(int frame, double time, bool delivered, boo
 		sink->ObserveVideoFrameRenderDuration(frame, time, delivered, immediate, duration_ms);
 }
 
+void ObservePipelineEvent(PipelineEvent const& event) {
+	if (auto *sink = active_sink.load(std::memory_order_acquire))
+		sink->ObservePipelineEvent(event);
+}
+
+std::int64_t CaptureTimestamp() noexcept {
+	if (!active_sink.load(std::memory_order_acquire))
+		return 0;
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(
+			   std::chrono::steady_clock::now().time_since_epoch())
+		.count();
+}
 }
 

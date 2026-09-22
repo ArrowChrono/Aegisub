@@ -998,9 +998,10 @@ void AsyncVideoProvider::GenerateSceneChangeKeyframes(agi::fs::path const& outpu
 void AsyncVideoProvider::LoadSubtitles(
 	const AssFile *new_subs,
 	VideoSubtitleUpdateOptions options) throw() {
+	aegisub::async_video_trace::PipelineEvent submitted;
 	{
 		std::lock_guard<std::mutex> lock(pending_mutex);
-		++content_version;
+		submitted.version.content = ++content_version;
 		pending_subs = agi::make_unique<AssFile>(*new_subs);
 		pending_changed_lines.clear();
 		subtitle_source_file = new_subs;
@@ -1008,7 +1009,15 @@ void AsyncVideoProvider::LoadSubtitles(
 		pending_overlay_upload_continuity_invalidation = true;
 		pending_check_updated = false;
 		MergeSubtitleUpdateOptions(pending_subtitle_update_options, options);
+		submitted.stage = "submit_load";
+		submitted.version.provider = provider_version;
+		submitted.version.request = request_version.load(std::memory_order_relaxed);
+		submitted.delivery_class = options.delivery_class;
+		submitted.visual_interaction_id = options.visual_interaction_id;
+		submitted.frame = pending_frame_number;
+		submitted.timestamp_ns = aegisub::async_video_trace::CaptureTimestamp();
 	}
+	aegisub::async_video_trace::ObservePipelineEvent(submitted);
 	ScheduleProcessing();
 }
 
@@ -1028,9 +1037,10 @@ void AsyncVideoProvider::UpdateSubtitles(
 	const AssFile *new_subs,
 	std::span<const AssDialogue *const> changed,
 	VideoSubtitleUpdateOptions options) throw() {
+	aegisub::async_video_trace::PipelineEvent submitted;
 	{
 		std::lock_guard<std::mutex> lock(pending_mutex);
-		++content_version;
+		submitted.version.content = ++content_version;
 		bool valid = !changed.empty() && subtitle_source_file == new_subs;
 		for (auto line : changed) {
 			if (!valid)
@@ -1067,7 +1077,15 @@ void AsyncVideoProvider::UpdateSubtitles(
 		if (pending_frame_kind != PendingFrameKind::Request)
 			pending_check_updated = true;
 		MergeSubtitleUpdateOptions(pending_subtitle_update_options, options);
+		submitted.stage = "submit_update";
+		submitted.version.provider = provider_version;
+		submitted.version.request = request_version.load(std::memory_order_relaxed);
+		submitted.delivery_class = options.delivery_class;
+		submitted.visual_interaction_id = options.visual_interaction_id;
+		submitted.frame = pending_frame_number;
+		submitted.timestamp_ns = aegisub::async_video_trace::CaptureTimestamp();
 	}
+	aegisub::async_video_trace::ObservePipelineEvent(submitted);
 	ScheduleProcessing();
 }
 
@@ -1290,6 +1308,7 @@ bool AsyncVideoProvider::ProcessPending() {
 	};
 
 	PendingWork work;
+	aegisub::async_video_trace::PipelineEvent work_trace;
 	{
 		std::lock_guard<std::mutex> lock(pending_mutex);
 		if (!pending_subs
@@ -1348,7 +1367,22 @@ bool AsyncVideoProvider::ProcessPending() {
 			? 0
 			: work.subtitle_update_options.visual_interaction_id;
 		work.force_current_frame_render = work.subtitle_update_options.force_current_frame_render;
+		work_trace = {
+			.stage = "worker_take",
+			.version = work.delivery_version,
+			.delivery_class = work.delivery_class,
+			.visual_interaction_id = work.visual_interaction_id,
+			.frame = work.frame_number,
+			.timestamp_ns = aegisub::async_video_trace::CaptureTimestamp()};
 	}
+	aegisub::async_video_trace::ObservePipelineEvent(work_trace);
+	auto observe_work = [&](char const *stage, double duration_ms = -1.0) {
+		auto event = work_trace;
+		event.stage = stage;
+		event.timestamp_ns = aegisub::async_video_trace::CaptureTimestamp();
+		event.duration_ms = duration_ms;
+		aegisub::async_video_trace::ObservePipelineEvent(event);
+	};
 
 	if (work.has_color_space)
 		source_provider->SetColorSpace(work.color_space);
@@ -1383,8 +1417,10 @@ bool AsyncVideoProvider::ProcessPending() {
 			single_frame = NEW_SUBS_FILE;
 	}
 
-	if (!work.has_frame)
+	if (!work.has_frame) {
+		observe_work("worker_skip_no_frame");
 		return true;
+	}
 
 	frame_number = work.frame_number;
 	time = work.time;
@@ -1398,8 +1434,10 @@ bool AsyncVideoProvider::ProcessPending() {
 		}
 	}
 
-	if (work.check_updated && !work.force_current_frame_render && !NeedUpdate(visible_lines))
+	if (work.check_updated && !work.force_current_frame_render && !NeedUpdate(visible_lines)) {
+		observe_work("worker_skip_no_change");
 		return true;
+	}
 
 	auto remember_rendered_lines = [&] {
 		last_lines.clear();
@@ -1413,16 +1451,19 @@ bool AsyncVideoProvider::ProcessPending() {
 	// If newer work arrived before entering the renderer, skip this stale pass
 	// instead of spending a long CSRI render only to drop the packet afterwards.
 	if (!IsCurrent(work.delivery_version)) {
+		observe_work("worker_skip_stale");
 		AdvanceOverlayUploadContinuity();
 		return true;
 	}
 
 	try {
+		observe_work("worker_render_begin");
 		auto const render_begin = std::chrono::steady_clock::now();
 		auto packet = ProcRenderPacket(frame_number, time, false, false);
 		auto const render_duration_ms =
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - render_begin).count();
 		bool should_deliver = IsCurrent(work.delivery_version);
+		observe_work(should_deliver ? "worker_render_deliver" : "worker_render_drop", render_duration_ms);
 		aegisub::async_video_trace::ObserveVideoFrameRenderDuration(frame_number, time, should_deliver, false, render_duration_ms);
 		aegisub::async_video_trace::ObserveFrameResult(frame_number, time, should_deliver, false);
 		if (should_deliver) {
@@ -1438,6 +1479,7 @@ bool AsyncVideoProvider::ProcessPending() {
 	}
 	catch (AsyncVideoProviderVideoError const& err) {
 		bool should_deliver = IsCurrent(work.delivery_version);
+		observe_work(should_deliver ? "worker_error_video" : "worker_error_video_stale");
 		if (should_deliver)
 			DeliverVideoError(err.GetMessage());
 		else {
@@ -1446,6 +1488,7 @@ bool AsyncVideoProvider::ProcessPending() {
 	}
 	catch (AsyncVideoProviderSubtitlesError const& err) {
 		bool should_deliver = IsCurrent(work.delivery_version);
+		observe_work(should_deliver ? "worker_error_subtitles" : "worker_error_subtitles_stale");
 		if (should_deliver)
 			DeliverSubtitlesError(err.GetMessage());
 		else {

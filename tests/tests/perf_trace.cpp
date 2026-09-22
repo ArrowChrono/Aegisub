@@ -1,6 +1,7 @@
 #include <main.h>
 
 #include "../../src/perf_trace.h"
+#include "../../src/async_video_trace.h"
 
 #include <libaegisub/fs.h>
 #include <libaegisub/log.h>
@@ -8,8 +9,10 @@
 #include <libaegisub/scope_exit.h>
 
 #include <fstream>
+#include <chrono>
 #include <locale>
 #include <sstream>
+#include <thread>
 
 namespace {
 class DiagnosticTestNumpunct final : public std::numpunct<char> {
@@ -28,6 +31,118 @@ std::string ReadAll(agi::fs::path const& path) {
 std::string Utf8PathSegment() {
 	return "\xE8\xB7\xAF\xE5\xBE\x84";
 }
+}
+
+TEST(PerfTrace, VideoPipelinePreservesVersionsAndCaptureTime) {
+	agi::Path path_helper;
+	auto const directory = agi::fs::UniquePath(path_helper.Decode("?temp/video_pipeline_trace_%%%%%%%%"));
+	perf_trace::InitializeAt(directory, "test-build", "video");
+	auto shutdown = agi::make_scope_exit([] { perf_trace::Shutdown(); });
+
+	aegisub::async_video_trace::PipelineEvent event{
+		.stage = "worker_render_deliver",
+		.version = {.provider = 4294967297ULL, .content = 9007199254740993ULL, .request = 17},
+		.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+		.visual_interaction_id = 23,
+		.frame = 41,
+		.timestamp_ns = 123456789,
+		.duration_ms = 12.5};
+	aegisub::async_video_trace::ObservePipelineEvent(event);
+	event.stage = "display_present";
+	event.timestamp_ns = 123987654;
+	event.duration_ms = -1.0;
+	aegisub::async_video_trace::ObservePipelineEvent(event);
+	perf_trace::Shutdown();
+	EXPECT_EQ(0, aegisub::async_video_trace::CaptureTimestamp());
+	aegisub::async_video_trace::ObservePipelineEvent(event);
+
+	std::istringstream lines(ReadAll(directory / "trace.ndjson"));
+	std::string rendered, presented, extra;
+	ASSERT_TRUE(static_cast<bool>(std::getline(lines, rendered)));
+	ASSERT_TRUE(static_cast<bool>(std::getline(lines, presented)));
+	EXPECT_FALSE(static_cast<bool>(std::getline(lines, extra)));
+	EXPECT_NE(std::string::npos, rendered.find("\"t_monotonic_ns\":123456789,"));
+	EXPECT_NE(std::string::npos, presented.find("\"t_monotonic_ns\":123987654,"));
+	EXPECT_NE(std::string::npos, rendered.find(
+									 "\"payload\":{\"stage\":\"worker_render_deliver\",\"provider_version\":4294967297,"
+									 "\"content_version\":9007199254740993,\"request_version\":17,\"delivery_class\":1,"
+									 "\"interaction_id\":23,\"frame\":41,\"duration_ms\":12.5}"));
+	EXPECT_NE(std::string::npos, presented.find(
+									 "\"payload\":{\"stage\":\"display_present\",\"provider_version\":4294967297,"
+									 "\"content_version\":9007199254740993,\"request_version\":17,\"delivery_class\":1,"
+									 "\"interaction_id\":23,\"frame\":41}"));
+}
+
+TEST(PerfTrace, VideoPipelineHonorsCategorySelection) {
+	agi::Path path_helper;
+	auto const directory = agi::fs::UniquePath(path_helper.Decode("?temp/video_pipeline_selection_%%%%%%%%"));
+	perf_trace::InitializeAt(directory, "test-build", "audio");
+	auto shutdown = agi::make_scope_exit([] { perf_trace::Shutdown(); });
+	aegisub::async_video_trace::ObservePipelineEvent({.stage = "worker_take", .version = {.provider = 1, .content = 2, .request = 3}});
+	perf_trace::ObserveAudioUiDuration("audio_test", 1.25);
+	perf_trace::Shutdown();
+	auto const trace = ReadAll(directory / "trace.ndjson");
+	EXPECT_EQ(std::string::npos, trace.find("video_preview_pipeline"));
+	EXPECT_NE(std::string::npos, trace.find("\"phase\":\"audio_test\",\"duration_ms\":1.25"));
+}
+
+TEST(PerfTrace, VideoTimingDoesNotRequestPeriodicWorkerMemorySampling) {
+	agi::Path path_helper;
+	auto const directory = agi::fs::UniquePath(path_helper.Decode("?temp/video_memory_selection_%%%%%%%%"));
+	perf_trace::InitializeAt(directory, "test-build", "video");
+	auto shutdown = agi::make_scope_exit([] { perf_trace::Shutdown(); });
+	EXPECT_FALSE(perf_trace::ShouldSampleVideoMemory());
+	EXPECT_TRUE(perf_trace::ShouldSampleVideoMemory(true));
+	perf_trace::ObserveVideoMemorySnapshot("periodic_not_requested", {}, false);
+	perf_trace::ObserveVideoMemorySnapshot("explicit_lifecycle", {}, true);
+	perf_trace::Shutdown();
+	auto const trace = ReadAll(directory / "trace.ndjson");
+	EXPECT_EQ(std::string::npos, trace.find("periodic_not_requested"));
+	EXPECT_NE(std::string::npos, trace.find("\"reason\":\"explicit_lifecycle\""));
+}
+
+TEST(PerfTrace, MemoryAndAudioProfilesRetainPeriodicSampling) {
+	agi::Path path_helper;
+	auto shutdown = agi::make_scope_exit([] { perf_trace::Shutdown(); });
+	for (auto profile : {"memory", "audio", "video,memory"}) {
+		SCOPED_TRACE(profile);
+		auto const directory = agi::fs::UniquePath(path_helper.Decode("?temp/periodic_memory_trace_%%%%%%%%"));
+		perf_trace::InitializeAt(directory, "test-build", profile);
+		EXPECT_TRUE(perf_trace::ShouldSampleVideoMemory());
+		perf_trace::ObserveVideoMemorySnapshot("periodic_requested", {}, false);
+		perf_trace::Shutdown();
+		EXPECT_NE(std::string::npos, ReadAll(directory / "trace.ndjson").find("\"reason\":\"periodic_requested\""));
+	}
+}
+
+TEST(PerfTrace, SlowVideoScopesRemainBuffered) {
+	agi::Path path_helper;
+	auto const directory = agi::fs::UniquePath(path_helper.Decode("?temp/video_slow_scope_%%%%%%%%"));
+	perf_trace::InitializeAt(directory, "test-build", "video");
+	auto shutdown = agi::make_scope_exit([] { perf_trace::Shutdown(); });
+	{
+		perf_trace::VideoUiDurationScope scope("slow_video_scope");
+		// Cross the former immediate-flush threshold; scheduling delays cannot
+		// invalidate the test because there is no upper duration assertion.
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	// Flush this marker explicitly, so exactly one immediate flush is expected
+	// even if the time-based bounded buffer already flushed the slow scope.
+	perf_trace::ObserveVideoUiDuration("test_end", 0.0, -1, -1, true);
+	perf_trace::Shutdown();
+	auto const summary = ReadAll(directory / "summary.txt");
+	auto has_exact_line = [&](char const *expected) {
+		std::istringstream lines(summary);
+		for (std::string line; std::getline(lines, line);) {
+			if (!line.empty() && line.back() == '\r')
+				line.pop_back();
+			if (line == expected)
+				return true;
+		}
+		return false;
+	};
+	EXPECT_TRUE(has_exact_line("trace.flushes.immediate=1")) << summary;
+	EXPECT_TRUE(has_exact_line("video_ui_phase.slow_video_scope.count=1")) << summary;
 }
 
 TEST(PerfTrace, TileDiagnosticSummaryPreservesHashAndIsExplicitlyOptIn) {

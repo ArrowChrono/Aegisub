@@ -95,7 +95,17 @@ void VisualToolBase::OnInteractionRenderTimer(wxTimerEvent &) {
 	if (!IsInteracting() || !interaction_render_pacer.IsActive())
 		return;
 
-	if (interaction_render_pacer.OnTimer(DeadlinePacingPolicy::Clock::now()))
+	auto const now = DeadlinePacingPolicy::Clock::now();
+	auto const deadline = interaction_render_pacer.NextDeadline();
+	if (deadline) {
+		perf_trace::ObserveVideoUiDuration(
+			"visual_tool.interaction_render.timer_lateness",
+			std::chrono::duration<double, std::milli>(now - *deadline).count());
+	}
+	bool const allowed = interaction_render_pacer.OnTimer(now);
+	perf_trace::ObserveVideoUiDuration(
+		"visual_tool.interaction_render.timer_fire", 0.0, allowed ? 1 : 0, deadline ? 1 : 0);
+	if (allowed)
 		RenderInteractionFrame(1);
 	else
 		ArmInteractionRenderTimer();
@@ -113,9 +123,9 @@ void VisualToolBase::ArmInteractionRenderTimer() {
 	auto const delay = std::max<std::int64_t>(
 		1,
 		std::chrono::ceil<std::chrono::milliseconds>(remaining).count());
-	interaction_render_timer.Start(
-		static_cast<int>(std::min<std::int64_t>(delay, std::numeric_limits<int>::max())),
-		wxTIMER_ONE_SHOT);
+	int const delay_ms = static_cast<int>(std::min<std::int64_t>(delay, std::numeric_limits<int>::max()));
+	interaction_render_timer.Start(delay_ms, wxTIMER_ONE_SHOT);
+	perf_trace::ObserveVideoUiDuration("visual_tool.interaction_render.timer_arm", 0.0, delay_ms);
 }
 
 void VisualToolBase::RenderInteractionFrame(int reason) {
@@ -442,6 +452,15 @@ void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
 	bool release_mouse = false;
 	bool left_click = event.LeftDown();
 	bool left_double = event.LeftDClick();
+	if (left_click || left_double || event.LeftUp() || (interaction_was_active && (event.Moving() || event.Dragging()))) {
+		char const *phase = "visual_tool.input.motion";
+		if (left_click || left_double)
+			phase = "visual_tool.input.down";
+		else if (event.LeftUp())
+			phase = "visual_tool.input.up";
+		perf_trace::ObserveVideoUiDuration(
+			phase, 0.0, event.LeftIsDown() ? 1 : 0, interaction_was_active ? 1 : 0);
+	}
 	shift_down = event.ShiftDown();
 	ctrl_down = event.CmdDown();
 	alt_down = event.AltDown();
@@ -863,7 +882,9 @@ void VisualToolBase::ScheduleInteractionRender() {
 	if (!IsInteracting() || !interaction_render_pacer.IsActive())
 		return;
 
-	if (interaction_render_pacer.Request(DeadlinePacingPolicy::Clock::now())) {
+	bool const allowed = interaction_render_pacer.Request(DeadlinePacingPolicy::Clock::now());
+	perf_trace::ObserveVideoUiDuration("visual_tool.interaction_render.request", 0.0, allowed ? 1 : 0);
+	if (allowed) {
 		interaction_render_timer.Stop();
 		RenderInteractionFrame(0);
 	}

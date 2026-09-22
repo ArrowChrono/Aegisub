@@ -41,6 +41,7 @@
 #include "selection_controller.h"
 #include "time_range.h"
 #include "async_video_provider.h"
+#include "async_video_trace.h"
 #include "utils.h"
 #include "video_controller_timer.h"
 #include "video_navigation_ops.h"
@@ -150,7 +151,9 @@ void VideoController::OnSubtitlesCommit(AssFileCommitDetails commit) {
 	if (visual_subtitle_interaction_active) {
 		AddSubtitleCommit(pending_visual_subtitle_updates, update_mode, commit.changed_lines);
 		AddSubtitleCommit(final_visual_subtitle_updates, update_mode, commit.changed_lines);
-		if (visual_subtitle_update_pacer.Request(DeadlinePacingPolicy::Clock::now())) {
+		bool const allowed = visual_subtitle_update_pacer.Request(DeadlinePacingPolicy::Clock::now());
+		perf_trace::ObserveVideoUiDuration("video_controller.subtitle_update.request.commit", 0.0, allowed ? 1 : 0);
+		if (allowed) {
 			visual_subtitle_update_timer->Stop();
 			FlushPendingVisualSubtitleUpdate();
 		}
@@ -207,7 +210,17 @@ void VideoController::OnVisualSubtitleUpdateTimer() {
 	if (!visual_subtitle_interaction_active)
 		return;
 
-	if (visual_subtitle_update_pacer.OnTimer(DeadlinePacingPolicy::Clock::now()))
+	auto const now = DeadlinePacingPolicy::Clock::now();
+	auto const deadline = visual_subtitle_update_pacer.NextDeadline();
+	if (deadline) {
+		perf_trace::ObserveVideoUiDuration(
+			"video_controller.subtitle_update.timer_lateness",
+			std::chrono::duration<double, std::milli>(now - *deadline).count());
+	}
+	bool const allowed = visual_subtitle_update_pacer.OnTimer(now);
+	perf_trace::ObserveVideoUiDuration(
+		"video_controller.subtitle_update.timer_fire", 0.0, allowed ? 1 : 0, deadline ? 1 : 0);
+	if (allowed)
 		FlushPendingVisualSubtitleUpdate();
 	else
 		ArmVisualSubtitleUpdateTimer();
@@ -225,8 +238,9 @@ void VideoController::ArmVisualSubtitleUpdateTimer() {
 	auto const delay = std::max<std::int64_t>(
 		1,
 		std::chrono::ceil<std::chrono::milliseconds>(remaining).count());
-	visual_subtitle_update_timer->StartOnce(
-		static_cast<int>(std::min<std::int64_t>(delay, std::numeric_limits<int>::max())));
+	int const delay_ms = static_cast<int>(std::min<std::int64_t>(delay, std::numeric_limits<int>::max()));
+	visual_subtitle_update_timer->StartOnce(delay_ms);
+	perf_trace::ObserveVideoUiDuration("video_controller.subtitle_update.timer_arm", 0.0, delay_ms);
 }
 
 void VideoController::FlushPendingVisualSubtitleUpdate() {
@@ -239,7 +253,9 @@ void VideoController::FlushDueVisualSubtitleUpdateBeforeFrameRequest() {
 	if (!visual_subtitle_interaction_active || pending_visual_subtitle_updates.Empty())
 		return;
 
-	if (visual_subtitle_update_pacer.Request(DeadlinePacingPolicy::Clock::now())) {
+	bool const allowed = visual_subtitle_update_pacer.Request(DeadlinePacingPolicy::Clock::now());
+	perf_trace::ObserveVideoUiDuration("video_controller.subtitle_update.request.frame", 0.0, allowed ? 1 : 0);
+	if (allowed) {
 		visual_subtitle_update_timer->Stop();
 		FlushPendingVisualSubtitleUpdate();
 	}
@@ -1131,23 +1147,19 @@ void VideoController::InvalidateRenderPacketCache() {
 AsyncVideoProviderEventSink VideoController::CreateAsyncVideoProviderEventSink() {
 	return CreateAsyncVideoProviderMainThreadSink(
 		GetAsyncUiLifetime(),
-		{
-			[this](VideoRenderPacket packet, double time) {
-				if (!provider || !provider->IsCurrent(packet.delivery_version)) {
-					perf_trace::ObserveVideoUiDuration(
-						"video_controller.frame_ready_stale",
-						0.0,
-						packet.frame_number);
-					return;
-				}
-				DeliverFrameReady(std::move(packet), time);
-			},
-			[this](std::string const& message) {
-				HandleVideoError(message);
-			},
-			[this](std::string const& message) {
-				HandleSubtitlesError(message);
-			}
-		},
+		{.on_frame_ready = [this](VideoRenderPacket packet, double time) {
+			 aegisub::async_video_trace::ObservePipelineEvent({.stage = "gui_receive", .version = packet.delivery_version, .delivery_class = packet.delivery_class, .visual_interaction_id = packet.visual_interaction_id, .frame = packet.frame_number});
+			 if (!provider || !provider->IsCurrent(packet.delivery_version)) {
+				 aegisub::async_video_trace::ObservePipelineEvent({.stage = "gui_stale", .version = packet.delivery_version, .delivery_class = packet.delivery_class, .visual_interaction_id = packet.visual_interaction_id, .frame = packet.frame_number});
+				 perf_trace::ObserveVideoUiDuration(
+					 "video_controller.frame_ready_stale",
+					 0.0,
+					 packet.frame_number);
+				 return;
+			 }
+			 aegisub::async_video_trace::ObservePipelineEvent({.stage = "gui_accept", .version = packet.delivery_version, .delivery_class = packet.delivery_class, .visual_interaction_id = packet.visual_interaction_id, .frame = packet.frame_number});
+			 DeliverFrameReady(std::move(packet), time); },
+		 .on_video_error = [this](std::string const& message) { HandleVideoError(message); },
+		 .on_subtitles_error = [this](std::string const& message) { HandleSubtitlesError(message); }},
 		AsyncVideoFrameDeliveryMode::VisualSubtitleBatches);
 }

@@ -7,6 +7,10 @@
 #include <cstdint>
 #include <string>
 
+namespace aegisub::async_video_trace {
+struct PipelineEvent;
+}
+
 namespace perf_trace {
 
 enum class Category {
@@ -228,6 +232,7 @@ void TraceVideoStepPreviewRelease(int final_target_frame);
 void ObserveFrameRequest(int frame, double time, bool immediate);
 void ObserveFrameResult(int frame, double time, bool delivered, bool immediate);
 void ObserveVideoFrameRenderDuration(int frame, double time, bool delivered, bool immediate, double duration_ms);
+void ObserveVideoPipelineEvent(aegisub::async_video_trace::PipelineEvent const& event);
 void ObserveVideoRenderPacketCacheLookup(int frame, bool hit, char const* source);
 void ObserveVideoUiDuration(char const* phase, double duration_ms, int detail_a = -1, int detail_b = -1, bool immediate = false);
 void ObserveAudioUiTimerPosition(int ms);

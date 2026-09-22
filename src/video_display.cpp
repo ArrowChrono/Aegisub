@@ -37,6 +37,7 @@
 #include "ass_file.h"
 #include "ass_time_projection.h"
 #include "async_video_provider.h"
+#include "async_video_trace.h"
 #include "audio_tile_diagnostics_enabled.h"
 #include "command/command.h"
 #include "compat.h"
@@ -864,6 +865,7 @@ void VideoDisplay::OnVideoProviderChanged(AsyncVideoProvider *provider) {
 }
 
 void VideoDisplay::UploadFrameData(VideoRenderPacket const& packet, double) {
+	aegisub::async_video_trace::ObservePipelineEvent({.stage = "display_receive", .version = packet.delivery_version, .delivery_class = packet.delivery_class, .visual_interaction_id = packet.visual_interaction_id, .frame = packet.frame_number});
 	if (ShouldIgnoreVideoDisplayFrameReady(
 		freeSize,
 		con->GetUI().videoDisplay == this)) {
@@ -874,6 +876,9 @@ void VideoDisplay::UploadFrameData(VideoRenderPacket const& packet, double) {
 		return;
 	}
 
+	if (has_pending_packet) {
+		aegisub::async_video_trace::ObservePipelineEvent({.stage = "display_replace", .version = pending_packet.delivery_version, .delivery_class = pending_packet.delivery_class, .visual_interaction_id = pending_packet.visual_interaction_id, .frame = pending_packet.frame_number});
+	}
 	bool const defer_interactive_subtitle_packet = ShouldDeferIncomingSubtitlePacket(packet);
 	if (defer_interactive_subtitle_packet) {
 		pending_packet = packet;
@@ -1214,8 +1219,10 @@ void VideoDisplay::ScheduleRender() {
 	render_scheduled = true;
 	CallAfter([this] {
 		render_scheduled = false;
-		if (render_requested)
+		if (render_requested) {
+			perf_trace::ObserveVideoUiDuration("video_display.scheduled_render", 0.0);
 			DoRender();
+		}
 	});
 }
 
@@ -1948,6 +1955,7 @@ void VideoDisplay::DoRender() try {
 
 	try {
 		if (has_pending_packet && !(pending_packet_deferred_for_visual_interaction && tool && tool->IsInteracting())) {
+			aegisub::async_video_trace::ObservePipelineEvent({.stage = "display_upload_begin", .version = pending_packet.delivery_version, .delivery_class = pending_packet.delivery_class, .visual_interaction_id = pending_packet.visual_interaction_id, .frame = pending_packet.frame_number});
 			bool const packet_was_deferred_for_visual_interaction = pending_packet_deferred_for_visual_interaction;
 			first_presented_frame = !has_displayed_packet;
 			bool const reuse_uploaded_source_frame =
@@ -2007,6 +2015,7 @@ void VideoDisplay::DoRender() try {
 			RefreshDisplayedSubtitleSceneSnapshot();
 			presented_new_frame = true;
 			presented_frame_number = displayed_packet.frame_number;
+			aegisub::async_video_trace::ObservePipelineEvent({.stage = "display_upload_end", .version = displayed_packet.delivery_version, .delivery_class = displayed_packet.delivery_class, .visual_interaction_id = displayed_packet.visual_interaction_id, .frame = displayed_packet.frame_number});
 		}
 	}
 	catch (const VideoOutInitException& err) {
@@ -2126,8 +2135,8 @@ void VideoDisplay::DoRender() try {
 		swap_trace.SetDetails(swapped ? 1 : 0, presented_new_frame ? 1 : 0);
 	}
 	render_trace.SetDetails(presented_new_frame ? 1 : 0, swapped ? 1 : 0);
-
 	if (presented_new_frame) {
+		aegisub::async_video_trace::ObservePipelineEvent({.stage = swapped ? "display_present" : "display_swap_failed", .version = displayed_packet.delivery_version, .delivery_class = displayed_packet.delivery_class, .visual_interaction_id = displayed_packet.visual_interaction_id, .frame = displayed_packet.frame_number});
 		if (zoom_preview)
 			zoom_preview->OnFramePresented(presented_frame_number);
 		FramePresented(presented_frame_number);
