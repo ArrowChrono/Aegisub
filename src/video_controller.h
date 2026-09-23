@@ -94,7 +94,8 @@ class VideoController final {
 	std::unique_ptr<UiDeadlineTimer> visual_subtitle_update_timer;
 	/// Debounce timer for idle prefetch of the frames ahead of the playhead
 	std::unique_ptr<VideoControllerTimer> paused_prefetch_timer;
-	DeadlinePacingPolicy visual_subtitle_update_pacer{std::chrono::milliseconds(33)};
+	// Match the tool's interactive display budget instead of producing faster than it can present.
+	DeadlinePacingPolicy visual_subtitle_update_pacer{std::chrono::milliseconds(17)};
 	video_subtitle_update_policy::UpdateCoalescer pending_visual_subtitle_updates;
 	video_subtitle_update_policy::UpdateCoalescer final_visual_subtitle_updates;
 	bool visual_subtitle_interaction_active = false;

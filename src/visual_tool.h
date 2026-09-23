@@ -150,7 +150,8 @@ protected:
 	AssDialogue *single_changed_line = nullptr;
 	agi::signal::Connection file_changed_connection;
 	UiDeadlineTimer interaction_render_timer;
-	DeadlinePacingPolicy interaction_render_pacer{std::chrono::milliseconds(16)};
+	// Keep this aligned with visual_subtitle_update_pacer; Final bypasses both gates.
+	DeadlinePacingPolicy interaction_render_pacer{std::chrono::milliseconds(17)};
 	int commit_id_reset_timer_id; ///< Distinct from other timers on VideoDisplay
 	wxTimer commit_id_reset_timer; ///< Splits keyboard-nudge undo after idle
 	void OnInteractionRenderTimer();

@@ -93,8 +93,15 @@ texture retirement retain their existing ownership rules. Compare complete
 presentation and final-packet latency, not just activation duration, when
 evaluating this path: eliminating a bind must not merely move a wait elsewhere.
 
-The subtitle and feedback gates remain 33 ms and 16 ms respectively. Their
-one-shot `UiDeadlineTimer` waits off-thread and posts the callback to the GUI
+The active-interaction subtitle and feedback gates share a 17 ms budget. This
+allows more fresh subtitle pictures than the former 33 ms submission gate,
+without producing at a faster nominal rate than the display gate. The budget
+is a conservative approximately-60-Hz cap, not refresh synchronization or a
+guarantee that each picture appears within 17 ms. More frequent subtitle
+updates perform more renderer work; latest-wins coalescing remains necessary
+under load. Final submission bypasses these gates, and its separate bounded
+release-feedback window remains 16 ms. Each one-shot `UiDeadlineTimer` waits
+off-thread and posts the callback to the GUI
 dispatcher only once the steady-clock deadline has arrived. It remains running
 while that callback is queued. Restart, Stop, and destruction invalidate queued
 callbacks by generation; an old callback cannot consume a newer arm. All
