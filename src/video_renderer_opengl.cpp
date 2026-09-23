@@ -502,7 +502,8 @@ void OpenGLVideoRenderer::UploadBgraLayer(LayerResources& layer, unsigned char c
 	layer.offset_x = offset_x;
 	layer.offset_y = offset_y;
 	layer.composition_mode = composition_mode;
-	geometry_changed = geometry_changed || UpdateLayerRenderOutputLayout(layer, apply_source_display_transform);
+	bool const output_layout_changed = UpdateLayerRenderOutputLayout(layer, apply_source_display_transform);
+	geometry_changed = geometry_changed || output_layout_changed;
 
 	if (textures_changed) {
 		layer.layout = BuildOpenGLVideoRendererTileLayout(

@@ -634,6 +634,90 @@ bool ValidateHiddenOutsideVisibleScenario() {
 		&& parity.max_abs_error == 0;
 }
 
+bool ValidateExpectedOverlayRectangle(
+	std::string const& name,
+	std::vector<unsigned char> const& actual,
+	int width,
+	int height,
+	SourceFrameRect const& expected_rect,
+	Rgba8 color) {
+	std::vector<unsigned char> expected(static_cast<std::size_t>(width) * height * 4, 0);
+	for (int y = expected_rect.y; y < expected_rect.y + expected_rect.height; ++y) {
+		for (int x = expected_rect.x; x < expected_rect.x + expected_rect.width; ++x) {
+			std::size_t base = ((static_cast<std::size_t>(y) * width) + x) * 4;
+			expected[base + 0] = color.r;
+			expected[base + 1] = color.g;
+			expected[base + 2] = color.b;
+			expected[base + 3] = color.a;
+		}
+	}
+	auto comparison = CompareRgbaImages(name, expected, actual, width, height);
+	auto bounds = FindActiveBounds(actual, width, height);
+	PrintValidationResult(comparison);
+	std::cout << name << "/bounds=" << bounds.x0 << "," << bounds.y0 << " -> "
+			  << bounds.x1 << "," << bounds.y1 << " alpha_pixels=" << bounds.non_zero_alpha_pixels << "\n";
+	return comparison.max_abs_error == 0 && bounds.valid && bounds.x0 == expected_rect.x && bounds.y0 == expected_rect.y && bounds.x1 == expected_rect.x + expected_rect.width && bounds.y1 == expected_rect.y + expected_rect.height && bounds.non_zero_alpha_pixels == expected_rect.width * expected_rect.height;
+}
+
+bool ValidateOverlayLayoutRefresh(
+	std::string const& name,
+	int rotation,
+	bool display_vflip,
+	SourceFrameRect const& first_expected_rect,
+	SourceFrameRect const& changed_expected_rect) {
+	constexpr int output_width = 6;
+	constexpr int output_height = 8;
+	HiddenGLWindow window(output_width, output_height);
+	OpenGLVideoRenderer renderer(false, true, true);
+	window.MakeCurrent();
+
+	auto validate_stage = [&](SecondaryOverlayScenario const& scenario, SourceFrameRect const& expected_rect) {
+		NativeFrameStorage native_storage;
+		auto source = MakeNativeNv12SourceFrame(
+			scenario.source_width, scenario.source_height, scenario.geometry, native_storage);
+		SubtitleOverlayStorage overlay_storage;
+		auto overlay = BuildStorageOverlay(scenario, overlay_storage);
+		renderer.UploadFrame(source);
+		renderer.UploadOverlay(&overlay);
+		renderer.Render({.x = 0, .y = 0, .width = output_width, .height = output_height}, output_width, output_height);
+		auto first = window.ReadBackRgbaTopLeft();
+		bool passed = ValidateExpectedOverlayRectangle(
+			scenario.name, first, output_width, output_height, expected_rect, scenario.color);
+
+		renderer.UploadOverlay(&overlay);
+		renderer.Render({.x = 0, .y = 0, .width = output_width, .height = output_height}, output_width, output_height);
+		auto repeated = window.ReadBackRgbaTopLeft();
+		auto stability = CompareRgbaImages(
+			scenario.name + "/repeated", first, repeated, output_width, output_height);
+		PrintValidationResult(stability);
+		return stability.max_abs_error == 0 && passed;
+	};
+
+	SecondaryOverlayScenario scenario;
+	scenario.name = name + "/first";
+	scenario.source_width = 8;
+	scenario.source_height = 6;
+	scenario.geometry = MakeDefaultSourceFrameGeometry(8, 6);
+	scenario.geometry.rotation = rotation;
+	scenario.geometry.display_vflip = display_vflip;
+	scenario.patch_rect = {.x = 1, .y = 1, .width = 2, .height = 3};
+	bool passed = validate_stage(scenario, first_expected_rect);
+
+	// Reuse the renderer while changing the canvas, patch size and offset. The
+	// doubled source canvas is displayed at half scale in the same viewport.
+	scenario.name = name + "/canvas_change";
+	scenario.source_width = 16;
+	scenario.source_height = 12;
+	scenario.geometry = MakeDefaultSourceFrameGeometry(16, 12);
+	scenario.geometry.rotation = rotation;
+	scenario.geometry.display_vflip = display_vflip;
+	scenario.patch_rect = {.x = 6, .y = 2, .width = 4, .height = 6};
+	passed = validate_stage(scenario, changed_expected_rect) && passed;
+	window.MakeCurrent();
+	renderer.Reset();
+	return passed;
+}
+
 bool RunSecondaryOverlayTransformValidation() {
 	std::vector<SecondaryOverlayScenario> scenarios;
 
@@ -690,6 +774,19 @@ bool RunSecondaryOverlayTransformValidation() {
 	for (auto const& scenario : scenarios)
 		passed = ValidateEquivalentOverlayScenario(scenario) && passed;
 	passed = ValidateHiddenOutsideVisibleScenario() && passed;
+	// Independent raster expectations: clockwise 90 degrees maps (x, y) to
+	// (height - y, x); 270 degrees followed by a display vflip maps it to (y, x).
+	// All bounds align with output pixels, including the half-scale canvas change.
+	passed = ValidateOverlayLayoutRefresh(
+				 "secondary/rotate90_layout", 90, false,
+				 {.x = 2, .y = 1, .width = 3, .height = 2},
+				 {.x = 2, .y = 3, .width = 3, .height = 2}) &&
+			 passed;
+	passed = ValidateOverlayLayoutRefresh(
+				 "secondary/rotate270_vflip_layout", 270, true,
+				 {.x = 1, .y = 1, .width = 3, .height = 2},
+				 {.x = 1, .y = 3, .width = 3, .height = 2}) &&
+			 passed;
 	return passed;
 }
 }
