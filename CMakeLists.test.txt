@@ -150,6 +150,7 @@ if(GTEST_FOUND)
         src/subtitle_matcher.cpp
         src/time_display_mode.cpp
         src/threaded_ui_timer.cpp
+        src/ui_deadline_timer.cpp
         src/ui_timer.cpp
         src/utils.cpp
         src/translation_service.cpp
@@ -306,6 +307,7 @@ if(GTEST_FOUND)
         tests/tests/watched_file.cpp
         tests/tests/reload_external_changes_policy.cpp
         tests/tests/ui_timer.cpp
+        tests/tests/ui_deadline_timer.cpp
         tests/tests/ui_services.cpp
         tests/tests/util.cpp
         tests/tests/uuencode.cpp
@@ -324,6 +326,7 @@ if(GTEST_FOUND)
         tests/tests/visual_tool_scale_policy.cpp
         tests/tests/navigation_preview_policy.cpp
         tests/tests/deadline_pacing_policy.cpp
+        tests/tests/video_tool_release_feedback.cpp
         tests/tests/video_subtitle_update_policy.cpp
         tests/tests/playback_transport_policy.cpp
         tests/tests/video_session_ops.cpp

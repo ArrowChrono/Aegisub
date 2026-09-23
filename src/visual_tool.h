@@ -25,6 +25,7 @@
 #include "vector2d.h"
 #include "options.h"
 #include "subtitle_command_session.h"
+#include "ui_deadline_timer.h"
 
 #include <libaegisub/owning_intrusive_list.h>
 #include <libaegisub/signal.h>
@@ -148,12 +149,11 @@ protected:
 	std::unordered_set<AssDialogue const *> changed_line_set;
 	AssDialogue *single_changed_line = nullptr;
 	agi::signal::Connection file_changed_connection;
-	int interaction_render_timer_id;
-	wxTimer interaction_render_timer;
+	UiDeadlineTimer interaction_render_timer;
 	DeadlinePacingPolicy interaction_render_pacer{std::chrono::milliseconds(16)};
 	int commit_id_reset_timer_id; ///< Distinct from other timers on VideoDisplay
 	wxTimer commit_id_reset_timer; ///< Splits keyboard-nudge undo after idle
-	void OnInteractionRenderTimer(wxTimerEvent &);
+	void OnInteractionRenderTimer();
 	void ArmInteractionRenderTimer();
 	void RenderInteractionFrame(int reason);
 	void BeginInteractionPacing(int selection_count);
@@ -208,6 +208,10 @@ public:
 	virtual bool SupportsNudge() const { return false; }
 	/// Request a paced redraw after an interaction-related subtitle packet arrives.
 	void ScheduleInteractionRender();
+	/// A holding tool can commit its release state before ending its pacing session.
+	[[nodiscard]] bool IsFinishingLocalInteractionCommit() const noexcept {
+		return !IsInteracting() && interaction_render_pacer.IsActive() && command_session.IsLocalCommitInProgress();
+	}
 	/// Select a tool-specific sub-mode. Return true when applied.
 	virtual bool SetSubMode(int /*mode*/) { return false; }
 	/// Current sub-mode, or -1 when the tool has none.

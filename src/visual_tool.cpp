@@ -52,17 +52,7 @@
 #include <limits>
 
 VisualToolBase::VisualToolBase(VideoDisplay *parent, agi::Context *context)
-: c(context)
-, parent(parent)
-, command_session(context->GetCore().ass.get())
-, frame_number(c->GetCore().videoController->GetFrameN())
-, highlight_color_primary_opt(OPT_GET("Colour/Visual Tools/Highlight Primary"))
-, highlight_color_secondary_opt(OPT_GET("Colour/Visual Tools/Highlight Secondary"))
-, line_color_primary_opt(OPT_GET("Colour/Visual Tools/Lines Primary"))
-, line_color_secondary_opt(OPT_GET("Colour/Visual Tools/Lines Secondary"))
-, shaded_area_alpha_opt(OPT_GET("Colour/Visual Tools/Shaded Area Alpha"))
-, file_changed_connection(c->GetCore().ass->AddCommitListener(&VisualToolBase::OnCommit, this))
-{
+	: c(context), parent(parent), command_session(context->GetCore().ass.get()), frame_number(c->GetCore().videoController->GetFrameN()), highlight_color_primary_opt(OPT_GET("Colour/Visual Tools/Highlight Primary")), highlight_color_secondary_opt(OPT_GET("Colour/Visual Tools/Highlight Secondary")), line_color_primary_opt(OPT_GET("Colour/Visual Tools/Lines Primary")), line_color_secondary_opt(OPT_GET("Colour/Visual Tools/Lines Secondary")), shaded_area_alpha_opt(OPT_GET("Colour/Visual Tools/Shaded Area Alpha")), file_changed_connection(c->GetCore().ass->AddCommitListener(&VisualToolBase::OnCommit, this)), interaction_render_timer([this] { OnInteractionRenderTimer(); }) {
 	auto core = c->GetCore();
 	UpdateScriptResolution();
 	UpdateLayoutResolution();
@@ -70,10 +60,6 @@ VisualToolBase::VisualToolBase(VideoDisplay *parent, agi::Context *context)
 	connections.push_back(core.selectionController->AddActiveLineListener(&VisualToolBase::OnActiveLineChanged, this));
 	connections.push_back(core.videoController->AddSeekListener(&VisualToolBase::OnSeek, this));
 	parent->Bind(wxEVT_MOUSE_CAPTURE_LOST, &VisualToolBase::OnMouseCaptureLost, this);
-
-	interaction_render_timer_id = wxNewId();
-	interaction_render_timer.SetOwner(parent, interaction_render_timer_id);
-	parent->Bind(wxEVT_TIMER, &VisualToolBase::OnInteractionRenderTimer, this, interaction_render_timer_id);
 
 	// Coalesce keyboard-nudge undos while keys are held/repeated; split after idle.
 	// Explicit id so this handler does not receive every timer event on VideoDisplay.
@@ -84,14 +70,13 @@ VisualToolBase::VisualToolBase(VideoDisplay *parent, agi::Context *context)
 
 VisualToolBase::~VisualToolBase() {
 	interaction_render_timer.Stop();
-	parent->Unbind(wxEVT_TIMER, &VisualToolBase::OnInteractionRenderTimer, this, interaction_render_timer_id);
 	commit_id_reset_timer.Stop();
 	parent->Unbind(wxEVT_TIMER, &VisualToolBase::OnCommitIdResetTimer, this, commit_id_reset_timer_id);
 	parent->Unbind(wxEVT_MOUSE_CAPTURE_LOST, &VisualToolBase::OnMouseCaptureLost, this);
 	CancelInteraction(true);
 }
 
-void VisualToolBase::OnInteractionRenderTimer(wxTimerEvent &) {
+void VisualToolBase::OnInteractionRenderTimer() {
 	if (!IsInteracting() || !interaction_render_pacer.IsActive())
 		return;
 
@@ -124,7 +109,7 @@ void VisualToolBase::ArmInteractionRenderTimer() {
 		1,
 		std::chrono::ceil<std::chrono::milliseconds>(remaining).count());
 	int const delay_ms = static_cast<int>(std::min<std::int64_t>(delay, std::numeric_limits<int>::max()));
-	interaction_render_timer.Start(delay_ms, wxTIMER_ONE_SHOT);
+	interaction_render_timer.StartAt(*deadline);
 	perf_trace::ObserveVideoUiDuration("visual_tool.interaction_render.timer_arm", 0.0, delay_ms);
 }
 
@@ -137,6 +122,7 @@ void VisualToolBase::BeginInteractionPacing(int selection_count) {
 	if (interaction_render_pacer.IsActive())
 		return;
 
+	parent->CancelReleaseToolFeedback();
 	interaction_render_pacer.Begin(DeadlinePacingPolicy::Clock::now());
 	c->GetCore().videoController->BeginVisualSubtitleInteraction();
 	interaction_trace_active = true;
@@ -150,13 +136,13 @@ void VisualToolBase::EndInteractionPacing(bool render_final, int selection_count
 	interaction_render_timer.Stop();
 	interaction_render_pacer.Force(DeadlinePacingPolicy::Clock::now());
 	interaction_render_pacer.End();
-	c->GetCore().videoController->EndVisualSubtitleInteraction();
+	auto const final_interaction_id = c->GetCore().videoController->EndVisualSubtitleInteraction();
 	if (interaction_trace_active) {
 		perf_trace::ObserveVideoUiDuration("visual_tool.interaction_end", 0.0, selection_count);
 		interaction_trace_active = false;
 	}
 	if (render_final)
-		RenderInteractionFrame(2);
+		parent->RenderFinalToolFeedback(final_interaction_id);
 }
 
 void VisualToolBase::OnCommitIdResetTimer(wxTimerEvent &) {
@@ -237,6 +223,7 @@ void VisualToolBase::OnCommit(int type, AssDialogue const* changed) {
 }
 
 void VisualToolBase::OnSeek(int new_frame) {
+	parent->CancelReleaseToolFeedback();
 	if (frame_number == new_frame) return;
 	perf_trace::VideoUiDurationScope trace(
 		"grid_select.visual.seek",
@@ -291,6 +278,7 @@ void VisualToolBase::OnActiveLineChanged(AssDialogue *new_line) {
 }
 
 bool VisualToolBase::CancelInteraction(bool release_capture) {
+	parent->CancelReleaseToolFeedback();
 	bool const was_interacting = IsInteracting();
 	holding = false;
 	dragging = false;
@@ -452,6 +440,16 @@ void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
 	bool release_mouse = false;
 	bool left_click = event.LeftDown();
 	bool left_double = event.LeftDClick();
+	auto render_tool_feedback = [&] {
+		perf_trace::VideoUiDurationScope trace("visual_tool.feedback_request");
+		if (trace.IsActive()) {
+			int const mouse_flags = (left_click ? 1 : 0) | (left_double ? 2 : 0) | (event.LeftUp() ? 4 : 0) | (event.Moving() ? 8 : 0) | (event.Dragging() ? 16 : 0) | (event.Leaving() ? 32 : 0) | (event.Entering() ? 64 : 0) | (event.LeftIsDown() ? 128 : 0);
+			int const interaction_flags = (interaction_was_active ? 1 : 0) | (holding ? 2 : 0) | (dragging ? 4 : 0);
+			trace.SetDetails(mouse_flags, interaction_flags);
+			perf_trace::ObserveVideoUiDuration("visual_tool.feedback_request.begin", 0.0, mouse_flags, interaction_flags);
+		}
+		parent->RenderToolFeedback();
+	};
 	if (left_click || left_double || event.LeftUp() || (interaction_was_active && (event.Moving() || event.Dragging()))) {
 		char const *phase = "visual_tool.input.motion";
 		if (left_click || left_double)
@@ -469,7 +467,7 @@ void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
 
 	if (event.Leaving()) {
 		mouse_pos = Vector2D();
-		parent->RenderToolFeedback();
+		render_tool_feedback();
 		return;
 	}
 
@@ -573,7 +571,7 @@ void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
 		EndInteractionPacing(true, static_cast<int>(sel_features.size()));
 	}
 	else if (interaction_started || !interaction_is_active) {
-		parent->RenderToolFeedback();
+		render_tool_feedback();
 	}
 
 	if (interaction_started)

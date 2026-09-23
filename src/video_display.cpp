@@ -56,6 +56,7 @@
 #include "spline_curve.h"
 #include "subs_edit_box.h"
 #include "utils.h"
+#include "ui_deadline_timer.h"
 #include "video_render_opengl_proc_loader.h"
 #include "video_renderer_factory.h"
 #include "video_renderer_error.h"
@@ -86,6 +87,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <locale>
 #include <sstream>
 #include <wx/combobox.h>
@@ -589,11 +591,32 @@ bool VideoDisplay::InitContext() {
 	}
 
 	bool made_current = false;
+#ifdef _WIN32
+	int context_was_current = -1;
+	int drawable_was_current = -1;
+#endif
 	{
 		perf_trace::VideoUiDurationScope trace("video_display.context_activate");
+#ifdef _WIN32
+		bool const context_matches = glContext->GetGLRC() != nullptr && wglGetCurrentContext() == glContext->GetGLRC();
+		bool const drawable_matches = GetHDC() != nullptr && wglGetCurrentDC() == GetHDC();
+		if (trace.IsActive()) {
+			context_was_current = context_matches ? 1 : 0;
+			drawable_was_current = drawable_matches ? 1 : 0;
+		}
+		// Other canvases can change the thread's binding. Reuse it only when both
+		// native identities currently match; rebinding even the same pair can stall.
+		made_current = glContext->IsOK() && ((context_matches && drawable_matches) || SetCurrent(*glContext));
+#else
 		made_current = glContext->IsOK() && SetCurrent(*glContext);
+#endif
 		trace.SetDetails(made_current ? 1 : 0, created_context ? 1 : 0);
 	}
+#ifdef _WIN32
+	// Sample before activation, but emit afterward so tracing does not delay the bind.
+	if (context_was_current >= 0)
+		perf_trace::ObserveVideoUiDuration("video_display.context_pre_current", 0.0, context_was_current, drawable_was_current);
+#endif
 	TraceVideoGlLifecycle("context_activate", this, glContext.get(),
 						  reinterpret_cast<std::uintptr_t>(tool.get()), reinterpret_cast<std::uintptr_t>(tool.get()), made_current);
 	if (!made_current) {
@@ -820,6 +843,7 @@ bool VideoDisplay::ApplyRendererSourceModePreference() {
 }
 
 void VideoDisplay::OnRendererBackendChanged(agi::OptionValue const&) {
+	CancelReleaseToolFeedback();
 	if (!con->project->VideoProvider())
 		return;
 
@@ -832,11 +856,14 @@ void VideoDisplay::OnRendererBackendChanged(agi::OptionValue const&) {
 	ResetRenderers();
 	InvalidateSceneCache();
 
-	if (has_pending_packet)
+	if (has_pending_packet) {
+		TraceRenderState("video_display.render_dispatch.backend_change");
 		DoRender();
+	}
 }
 
 void VideoDisplay::ApplyVideoProvider(AsyncVideoProvider *provider) {
+	CancelReleaseToolFeedback();
 	last_size_event_client_size = wxDefaultSize;
 	pending_packet = { };
 	has_pending_packet = false;
@@ -876,6 +903,8 @@ void VideoDisplay::UploadFrameData(VideoRenderPacket const& packet, double) {
 		return;
 	}
 
+	if (con->videoController->IsPlaying())
+		CancelReleaseToolFeedback();
 	if (has_pending_packet) {
 		aegisub::async_video_trace::ObservePipelineEvent({.stage = "display_replace", .version = pending_packet.delivery_version, .delivery_class = pending_packet.delivery_class, .visual_interaction_id = pending_packet.visual_interaction_id, .frame = pending_packet.frame_number});
 	}
@@ -886,6 +915,7 @@ void VideoDisplay::UploadFrameData(VideoRenderPacket const& packet, double) {
 		pending_packet_deferred_for_visual_interaction = true;
 		scene_cache_waiting_for_subtitle_packet = false;
 		render_requested = true;
+		TraceRenderRequest(3);
 		if (con->videoController->IsPlaying())
 			ScheduleRender();
 		return;
@@ -927,6 +957,7 @@ void VideoDisplay::UploadFrameData(VideoRenderPacket const& packet, double) {
 		return;
 
 	// Instead of calling Render(), we force a render here to minimize delay
+	TraceRenderState("video_display.render_dispatch.packet");
 	DoRender();
 }
 
@@ -951,6 +982,7 @@ VideoDisplayMemoryStats VideoDisplay::CollectMemoryStats() const {
 
 void VideoDisplay::Render() {
 	render_requested = true;
+	TraceRenderRequest(1);
 	ScheduleRender();
 }
 
@@ -965,14 +997,23 @@ void VideoDisplay::RenderNow() {
 		return;
 
 	render_requested = true;
+	TraceRenderRequest(2);
 	if (render_in_progress || con->videoController->IsPlaying()) {
 		ScheduleRender();
 		return;
 	}
+	TraceRenderState("video_display.render_dispatch.now");
 	DoRender();
 }
 
 void VideoDisplay::RenderToolFeedback() {
+	perf_trace::VideoUiDurationScope trace("video_display.tool_feedback_request");
+	if (trace.IsActive()) {
+		int const playing = con->videoController->IsPlaying() ? 1 : 0;
+		int const interacting = IsVisualToolInteracting() ? 1 : 0;
+		trace.SetDetails(playing, interacting);
+		perf_trace::ObserveVideoUiDuration("video_display.tool_feedback_request.begin", 0.0, playing, interacting);
+	}
 	// Mouse motion arrives far faster than the video frame rate, and every
 	// render ends in a SwapBuffers() that can block the UI thread until vsync.
 	// Scheduling a render per motion event during playback therefore interleaves
@@ -982,11 +1023,63 @@ void VideoDisplay::RenderToolFeedback() {
 	// state on every presented frame, so during playback only mark the frame
 	// dirty and let that cadence own the repaint.
 	if (con->videoController->IsPlaying()) {
+		CancelReleaseToolFeedback();
 		tool_feedback_dirty = true;
 		return;
 	}
 
-	Render();
+	tool_feedback_dirty = true;
+	release_tool_feedback.RequestFeedback();
+	TraceRenderRequest(7);
+	if (IsToolFeedbackReady())
+		ScheduleRender();
+}
+
+bool VideoDisplay::IsToolFeedbackReady() const {
+	return tool_feedback_dirty && !con->videoController->IsPlaying() && !release_tool_feedback.ShouldDefer(VideoToolReleaseFeedback::Clock::now());
+}
+
+void VideoDisplay::RenderFinalToolFeedback(std::uint64_t final_interaction_id) {
+	CancelReleaseToolFeedback();
+	if (con->videoController->IsPlaying() || !release_tool_feedback.Begin(final_interaction_id, VideoToolReleaseFeedback::Clock::now())) {
+		perf_trace::ObserveVideoUiDuration("video_display.release_feedback.immediate", 0.0);
+		RenderNow();
+		return;
+	}
+
+	tool_feedback_dirty = true;
+	TraceRenderRequest(8);
+	if (!release_tool_feedback_timer)
+		release_tool_feedback_timer = std::make_unique<UiDeadlineTimer>([this] { OnReleaseToolFeedbackTimer(); });
+	release_tool_feedback_timer->StartAt(*release_tool_feedback.Deadline());
+	perf_trace::ObserveVideoUiDuration("video_display.release_feedback.arm", 0.0,
+									   static_cast<int>(VideoToolReleaseFeedback::MergeInterval.count()));
+}
+
+void VideoDisplay::CancelReleaseToolFeedback() {
+	if (!release_tool_feedback.Deadline())
+		return;
+	perf_trace::ObserveVideoUiDuration("video_display.release_feedback.cancel", 0.0);
+	release_tool_feedback.Cancel();
+	if (release_tool_feedback_timer)
+		release_tool_feedback_timer->Stop();
+}
+
+void VideoDisplay::OnReleaseToolFeedbackTimer() {
+	if (con->videoController->IsPlaying()) {
+		CancelReleaseToolFeedback();
+		return;
+	}
+	auto const fallback = release_tool_feedback.Expire(VideoToolReleaseFeedback::Clock::now());
+	if (!fallback) {
+		if (auto const deadline = release_tool_feedback.Deadline())
+			release_tool_feedback_timer->StartAt(*deadline);
+		return;
+	}
+	perf_trace::ObserveVideoUiDuration("video_display.release_feedback.deadline", 0.0, *fallback ? 1 : 0);
+	// The window is already ended: even a failed fallback is a single attempt.
+	if (*fallback)
+		RenderNow();
 }
 
 void VideoDisplay::OnEraseBackground(wxEraseEvent &) {
@@ -1001,6 +1094,7 @@ void VideoDisplay::OnPaint(wxPaintEvent&) {
 	}
 	wxPaintDC dc(this);
 	(void)dc;
+	TraceRenderState("video_display.render_dispatch.paint");
 	DoRender();
 }
 
@@ -1202,14 +1296,42 @@ wxImage VideoDisplay::GetFrameImage(bool raw) {
 }
 
 void VideoDisplay::OnIdle(wxIdleEvent&) {
-	// Tool feedback deferred during playback rides along with the next presented
-	// frame, but once playback stops no further frame is presented to carry it,
-	// so promote it to a real render request here.
-	if (tool_feedback_dirty && !con->videoController->IsPlaying())
+	if (con->videoController->IsPlaying())
+		CancelReleaseToolFeedback();
+	// Playback owns its feedback cadence. Paused feedback may wait for a Final,
+	// but is promoted once that short release window ends.
+	if (IsToolFeedbackReady()) {
 		render_requested = true;
+		TraceRenderRequest(6);
+	}
 
-	if (render_requested)
+	if (render_requested) {
+		TraceRenderState("video_display.render_dispatch.idle");
 		DoRender();
+	}
+}
+
+void VideoDisplay::TraceRenderRequest(int kind) {
+	if (!perf_trace::IsCategoryEnabled(perf_trace::Category::Video))
+		return;
+
+	// Kinds: Render, RenderNow, deferred packet, reentry, frame follow-up,
+	// and idle promotion of feedback, respectively (one through six). Seven is
+	// a pure feedback request; eight establishes a release-feedback window.
+	// Bounded integer fields match the existing observer API. A wrap starts a
+	// new trace sequence at one without affecting any render state.
+	render_request_trace_sequence = render_request_trace_sequence == std::numeric_limits<int>::max()
+										? 1
+										: render_request_trace_sequence + 1;
+	perf_trace::ObserveVideoUiDuration("video_display.render_request", 0.0, render_request_trace_sequence, kind);
+}
+
+void VideoDisplay::TraceRenderState(char const *phase) const {
+	if (!perf_trace::IsCategoryEnabled(perf_trace::Category::Video))
+		return;
+
+	int const flags = (con->videoController->IsPlaying() ? 1 : 0) | (IsVisualToolInteracting() ? 2 : 0) | (has_pending_packet ? 4 : 0) | (pending_packet_deferred_for_visual_interaction ? 8 : 0) | (render_in_progress ? 16 : 0) | (render_requested ? 32 : 0) | (tool_feedback_dirty ? 64 : 0) | (render_scheduled ? 128 : 0);
+	perf_trace::ObserveVideoUiDuration(phase, 0.0, render_request_trace_sequence, flags);
 }
 
 void VideoDisplay::ScheduleRender() {
@@ -1217,10 +1339,21 @@ void VideoDisplay::ScheduleRender() {
 		return;
 
 	render_scheduled = true;
-	CallAfter([this] {
+	int trace_queue_sequence = 0;
+	if (perf_trace::IsCategoryEnabled(perf_trace::Category::Video)) {
+		render_queue_trace_sequence = render_queue_trace_sequence == std::numeric_limits<int>::max()
+										  ? 1
+										  : render_queue_trace_sequence + 1;
+		trace_queue_sequence = render_queue_trace_sequence;
+		perf_trace::ObserveVideoUiDuration("video_display.render_queue", 0.0, trace_queue_sequence, render_request_trace_sequence);
+	}
+	CallAfter([this, trace_queue_sequence] {
 		render_scheduled = false;
-		if (render_requested) {
+		if (trace_queue_sequence)
+			perf_trace::ObserveVideoUiDuration("video_display.render_callback", 0.0, trace_queue_sequence, render_request_trace_sequence);
+		if (render_requested || IsToolFeedbackReady()) {
 			perf_trace::ObserveVideoUiDuration("video_display.scheduled_render", 0.0);
+			TraceRenderState("video_display.render_dispatch.scheduled");
 			DoRender();
 		}
 	});
@@ -1863,7 +1996,13 @@ void VideoDisplay::OnSubtitlesCommit(int type, AssDialogue const* changed) {
 	auto render_after_commit = [&] {
 		if (tool && tool->IsInteracting())
 			return;
-		Render();
+		perf_trace::VideoUiDurationScope trace("video_display.subtitle_commit_render_request", type, 0);
+		if (trace.IsActive())
+			perf_trace::ObserveVideoUiDuration("video_display.subtitle_commit_render_request.begin", 0.0, type, 0);
+		if (tool && tool->IsFinishingLocalInteractionCommit())
+			RenderToolFeedback();
+		else
+			Render();
 	};
 
 	if (!has_displayed_packet) {
@@ -1910,6 +2049,7 @@ void VideoDisplay::OnSubtitlesCommit(int type, AssDialogue const* changed) {
 void VideoDisplay::DoRender() try {
 	if (render_in_progress) {
 		render_requested = true;
+		TraceRenderRequest(4);
 		ScheduleRender();
 		return;
 	}
@@ -1922,9 +2062,10 @@ void VideoDisplay::DoRender() try {
 		if (render_requested)
 			ScheduleRender();
 	});
+	TraceRenderState("video_display.render_consume");
 	render_requested = false;
-	// This pass redraws the overlay from live tool state, so it satisfies any
-	// visual tool change that was deferred while playing back.
+	// Consume this feedback attempt. Release feedback is only satisfied after
+	// a successful swap; failure leaves its single deadline fallback intact.
 	tool_feedback_dirty = false;
 
 	if (!con->project->VideoProvider() || !InitContext() || (!videoRenderer && !has_pending_packet))
@@ -2134,6 +2275,15 @@ void VideoDisplay::DoRender() try {
 		swapped = SwapBuffers();
 		swap_trace.SetDetails(swapped ? 1 : 0, presented_new_frame ? 1 : 0);
 	}
+	if (swapped && release_tool_feedback.Deadline()) {
+		auto const final_id = presented_new_frame && displayed_packet.delivery_class == VideoRenderDeliveryClass::VisualSubtitleFinal
+								  ? displayed_packet.visual_interaction_id
+								  : 0;
+		bool const finished = release_tool_feedback.OnPresented(final_id);
+		perf_trace::ObserveVideoUiDuration("video_display.release_feedback.presented", 0.0, finished ? 1 : 0);
+		if (finished)
+			release_tool_feedback_timer->Stop();
+	}
 	render_trace.SetDetails(presented_new_frame ? 1 : 0, swapped ? 1 : 0);
 	if (presented_new_frame) {
 		aegisub::async_video_trace::ObservePipelineEvent({.stage = swapped ? "display_present" : "display_swap_failed", .version = displayed_packet.delivery_version, .delivery_class = displayed_packet.delivery_class, .visual_interaction_id = displayed_packet.visual_interaction_id, .frame = displayed_packet.frame_number});
@@ -2146,6 +2296,7 @@ void VideoDisplay::DoRender() try {
 		// packet for the same frame already has current tool feedback.
 		if (tool && !con->videoController->IsPlaying() && overlay_frame_number != presented_frame_number) {
 			render_requested = true;
+			TraceRenderRequest(5);
 			ScheduleRender();
 		}
 		if (perf_trace::ShouldSampleVideoMemory(first_presented_frame)) {
@@ -2496,6 +2647,7 @@ void VideoDisplay::DestroySkiaOverlayBacking() noexcept {
 #endif
 
 void VideoDisplay::PositionVideo() {
+	CancelReleaseToolFeedback();
 	auto provider = con->project->VideoProvider();
 	if (!provider || !IsShownOnScreen()) return;
 
@@ -2948,6 +3100,7 @@ std::unique_ptr<OpenGLText> VideoDisplay::CreateTextRenderer() {
 }
 
 void VideoDisplay::SetTool(std::unique_ptr<VisualToolBase> new_tool) {
+	CancelReleaseToolFeedback();
 	// Defer GL object destruction until the next render has made this canvas
 	// current. This releases a possibly full-window invert backing on tool
 	// switches without deleting it on every non-invert frame.
@@ -3117,6 +3270,7 @@ Vector2D VideoDisplay::GetMousePosition() const {
 }
 
 void VideoDisplay::Unload() {
+	CancelReleaseToolFeedback();
 	ResetRenderers();
 	bool const context_active = glContext && glContext->IsOK() && SetCurrent(*glContext);
 	DestroySceneCache();

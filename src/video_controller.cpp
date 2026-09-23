@@ -40,6 +40,7 @@
 #include "project.h"
 #include "selection_controller.h"
 #include "time_range.h"
+#include "ui_deadline_timer.h"
 #include "async_video_provider.h"
 #include "async_video_trace.h"
 #include "utils.h"
@@ -89,12 +90,7 @@ constexpr int PausedPrefetchMaxFrames = 16;
 }
 
 VideoController::VideoController(agi::Context *c)
-: context(c)
-, playback_timer(CreateVideoControllerTimer([this] { OnPlayTimer(); }))
-, visual_subtitle_update_timer(CreateVideoControllerTimer([this] { OnVisualSubtitleUpdateTimer(); }))
-, paused_prefetch_timer(CreateVideoControllerTimer([this] { OnPausedPrefetchTimer(); }))
-, playAudioOnStep(OPT_GET("Audio/Plays When Stepping Video"))
-{
+	: context(c), playback_timer(CreateVideoControllerTimer([this] { OnPlayTimer(); })), visual_subtitle_update_timer(std::make_unique<UiDeadlineTimer>([this] { OnVisualSubtitleUpdateTimer(); })), paused_prefetch_timer(CreateVideoControllerTimer([this] { OnPausedPrefetchTimer(); })), playAudioOnStep(OPT_GET("Audio/Plays When Stepping Video")) {
 	auto core = context->GetCore();
 	ui_activation.AddConnections(
 		core.ass->AddCommitDetailsListener(&VideoController::OnSubtitlesCommit, this),
@@ -192,9 +188,9 @@ void VideoController::BeginVisualSubtitleInteraction() {
 	visual_subtitle_interaction_active = true;
 }
 
-void VideoController::EndVisualSubtitleInteraction() {
+std::uint64_t VideoController::EndVisualSubtitleInteraction() {
 	if (!visual_subtitle_interaction_active)
-		return;
+		return 0;
 
 	visual_subtitle_interaction_active = false;
 	visual_subtitle_update_timer->Stop();
@@ -202,8 +198,11 @@ void VideoController::EndVisualSubtitleInteraction() {
 	visual_subtitle_update_pacer.End();
 	pending_visual_subtitle_updates.Clear();
 	auto final_update = final_visual_subtitle_updates.Take();
-	if (final_update)
+	if (final_update && provider) {
 		SubmitSubtitleUpdate(std::move(*final_update), 2);
+		return visual_subtitle_interaction_id;
+	}
+	return 0;
 }
 
 void VideoController::OnVisualSubtitleUpdateTimer() {
@@ -239,7 +238,7 @@ void VideoController::ArmVisualSubtitleUpdateTimer() {
 		1,
 		std::chrono::ceil<std::chrono::milliseconds>(remaining).count());
 	int const delay_ms = static_cast<int>(std::min<std::int64_t>(delay, std::numeric_limits<int>::max()));
-	visual_subtitle_update_timer->StartOnce(delay_ms);
+	visual_subtitle_update_timer->StartAt(*deadline);
 	perf_trace::ObserveVideoUiDuration("video_controller.subtitle_update.timer_arm", 0.0, delay_ms);
 }
 

@@ -48,6 +48,7 @@
 
 class AssDialogue;
 class AsyncVideoProvider;
+class UiDeadlineTimer;
 class VideoControllerTimer;
 struct AssFileCommitDetails;
 
@@ -90,7 +91,7 @@ class VideoController final {
 	/// Playback timer used to periodically check if we should go to the next
 	/// frame while playing video
 	std::unique_ptr<VideoControllerTimer> playback_timer;
-	std::unique_ptr<VideoControllerTimer> visual_subtitle_update_timer;
+	std::unique_ptr<UiDeadlineTimer> visual_subtitle_update_timer;
 	/// Debounce timer for idle prefetch of the frames ahead of the playhead
 	std::unique_ptr<VideoControllerTimer> paused_prefetch_timer;
 	DeadlinePacingPolicy visual_subtitle_update_pacer{std::chrono::milliseconds(33)};
@@ -233,8 +234,8 @@ public:
 	void InvalidateRenderPacketCache();
 	/// Begin coalescing subtitle-provider updates produced by a legacy visual tool.
 	void BeginVisualSubtitleInteraction();
-	/// Submit and present the final subtitle state for a legacy visual interaction.
-	void EndVisualSubtitleInteraction();
+	/// Submit the final state; return its interaction id, or zero if none was submitted.
+	std::uint64_t EndVisualSubtitleInteraction();
 
 	/// Get the actual aspect ratio from a predefined AR type
 	double GetARFromType(AspectRatio type) const;

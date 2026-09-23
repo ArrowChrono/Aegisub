@@ -992,6 +992,7 @@ set(AEGISUB_CORE_SOURCES
     src/text_file_writer.cpp
     src/time_display_mode.cpp
     src/threaded_ui_timer.cpp
+    src/ui_deadline_timer.cpp
     src/ui_timer.cpp
     src/vector2d.cpp
     src/version.cpp

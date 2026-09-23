@@ -39,6 +39,7 @@
 #include "video_memory_stats.h"
 #include "video_render_packet.h"
 #include "video_subtitle_scene_cache.h"
+#include "video_tool_release_feedback.h"
 
 #include "vector2d.h"
 
@@ -78,6 +79,7 @@ class VideoController;
 class VideoOverlayDrawContext;
 struct VisualGuideViewport;
 class VisualToolBase;
+class UiDeadlineTimer;
 enum class VisualScaleAxis;
 enum class VisualNudgeMagnitude;
 class wxComboBox;
@@ -204,9 +206,13 @@ class VideoDisplay final : public wxGLCanvas {
 	bool render_requested = false;
 	bool render_in_progress = false;
 	bool render_scheduled = false;
-	/// Visual tool state changed while playing back; the repaint was left to the
-	/// next presented frame, and is flushed on idle once playback ends
+	/// Trace-only, display-local sequence numbers; never consulted by scheduling.
+	int render_request_trace_sequence = 0;
+	int render_queue_trace_sequence = 0;
+	/// Pure tool feedback pending one render attempt, separate from ordinary repaints.
 	bool tool_feedback_dirty = false;
+	VideoToolReleaseFeedback release_tool_feedback;
+	std::unique_ptr<UiDeadlineTimer> release_tool_feedback_timer;
 	bool scene_cache_enabled = true;
 	bool scene_cache_retry_blocked = false;
 	bool scene_cache_valid = false;
@@ -351,6 +357,10 @@ class VideoDisplay final : public wxGLCanvas {
 	void OnSizeEvent(wxSizeEvent &event);
 	void OnContextMenu(wxContextMenuEvent&);
 	void OnIdle(wxIdleEvent&);
+	[[nodiscard]] bool IsToolFeedbackReady() const;
+	void OnReleaseToolFeedbackTimer();
+	void TraceRenderRequest(int kind);
+	void TraceRenderState(char const *phase) const;
 	void ScheduleRender();
 	void DoRender();
 	void LayoutContainingSizers();
@@ -377,6 +387,10 @@ public:
 	void RenderNow();
 	/// @brief Request a repaint for per-mouse-event visual tool state changes
 	void RenderToolFeedback();
+	/// Let a submitted Final share the release/hover feedback draw for one interval.
+	void RenderFinalToolFeedback(std::uint64_t final_interaction_id);
+	/// Invalidate only the release window; ordinary repaint requests remain intact.
+	void CancelReleaseToolFeedback();
 	wxImage GetFrameImage(bool raw);
 	VideoDisplayMemoryStats CollectMemoryStats() const;
 	DEFINE_SIGNAL_ADDERS(FramePresented, AddFramePresentedListener)
