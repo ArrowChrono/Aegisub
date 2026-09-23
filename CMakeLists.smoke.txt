@@ -777,3 +777,30 @@ if(BUILD_TESTING)
     endif()
 
 endif()
+
+if(WIN32 AND WITH_WXSTC)
+    add_executable(subs-edit-stc-smoke EXCLUDE_FROM_ALL
+        tests/smoke/subs_edit_stc_smoke.cpp
+        src/subs_edit_ctrl_stc.cpp
+        src/compat.cpp
+        src/perf_trace.cpp
+        src/spellchecker.cpp
+        src/text_selection_controller.cpp
+        src/thesaurus.cpp
+        src/utils.cpp
+    )
+    target_compile_features(subs-edit-stc-smoke PRIVATE cxx_std_20)
+    target_compile_definitions(subs-edit-stc-smoke PRIVATE CMAKE_BUILD WITH_WXSTC)
+    add_dependencies(subs-edit-stc-smoke aegisub_generated_resources)
+    target_include_directories(subs-edit-stc-smoke PRIVATE src src/libresrc
+        "${CMAKE_CURRENT_BINARY_DIR}/src/libresrc")
+    target_link_libraries(subs-edit-stc-smoke PRIVATE aegisub_core libaegisub
+        ${wxWidgets_LIBRARIES} ICU::uc ICU::in Psapi)
+    aegisub_enable_wx_utf8_guard(subs-edit-stc-smoke)
+    if(BUILD_TESTING)
+        add_test(NAME subs_edit_stc_smoke COMMAND subs-edit-stc-smoke)
+        set_tests_properties(subs_edit_stc_smoke PROPERTIES
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            LABELS "smoke;subtitle;gui" RUN_SERIAL TRUE TIMEOUT 30)
+    endif()
+endif()
