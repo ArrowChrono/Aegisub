@@ -214,6 +214,31 @@ whether a fallback attempt is needed), and `cancel`. An ordinary successful
 presentation reports `presented` with 0 and leaves the deadline fixed. These are
 diagnostics, not substitutes for the exact Final packet chain.
 
+## Reported presentation configuration
+
+When video tracing is enabled, the first successful activation of each video
+context emits two configuration observations. Unloading the context resets this
+observation; it is not repeated per upload or automatically refreshed when the
+window moves between monitors. Neither observation changes presentation policy.
+
+- `video_display.swap_interval.reported`: `detail_a` is 0 on non-WGL platforms,
+  1 when the WGL extension list is unavailable, 2 when `WGL_EXT_swap_control` is
+  absent, or 3 when its getter is unavailable. These unknown states omit
+  `detail_b`; they do not mean interval 0. Status 4 reports a nonnegative interval
+  directly in `detail_b`. Status 5 encodes a negative interval as
+  `-(interval + 1)`, so decode it as `-1 - detail_b`; this preserves adaptive -1
+  despite the trace API omitting negative detail fields.
+- `video_display.nominal_refresh_hz`: `detail_a` is 0 when no valid display is
+  available, 1 when its refresh is unknown, or 2 when `detail_b` contains a
+  positive nominal refresh rate in Hz.
+
+The swap interval is the driver's reported value for the current drawable,
+not proof of effective vsync, GPU queue depth, compositor behavior, or driver
+overrides. The nominal integer refresh is not an exact refresh period or a VRR
+measurement. No swap-interval setter, extra context activation, GL error query,
+flush, fence, or swap is issued by these observers. Compare their payloads as
+part of the environment, rather than treating mere event presence as a match.
+
 ## Observation overhead
 
 Video-only tracing retains explicit lifecycle memory snapshots, including the

@@ -90,8 +90,10 @@
 #include <limits>
 #include <locale>
 #include <sstream>
+#include <string_view>
 #include <wx/combobox.h>
 #include <wx/dcclient.h>
+#include <wx/display.h>
 #include <wx/image.h>
 #include <wx/menu.h>
 #include <wx/textctrl.h>
@@ -170,6 +172,67 @@ Proc LoadOptionalProc(char const *name, char const *fallback_name = nullptr) {
 			return reinterpret_cast<Proc>(proc);
 	}
 	return nullptr;
+}
+
+void TraceVideoPresentationConfiguration(wxGLCanvas *canvas) {
+	// Status: 0=non-WGL, 1=no extension list, 2=extension absent,
+	// 3=getter absent, 4=reported nonnegative, 5=reported negative.
+	// Negative detail fields are omitted by the trace API, so the reported
+	// interval is detail_b for status 4 and -1-detail_b for status 5.
+	int interval_status = 0;
+	int encoded_interval = -1;
+#ifdef _WIN32
+	using GetExtensionsArbProc = char const *(WINAPI *)(HDC);
+	using GetExtensionsExtProc = char const *(WINAPI *)();
+	using GetSwapIntervalProc = int(WINAPI *)();
+	char const *extensions = nullptr;
+	if (auto get_extensions = LoadOptionalProc<GetExtensionsArbProc>("wglGetExtensionsStringARB"))
+		extensions = get_extensions(canvas->GetHDC());
+	if (!extensions) {
+		if (auto get_extensions = LoadOptionalProc<GetExtensionsExtProc>("wglGetExtensionsStringEXT"))
+			extensions = get_extensions();
+	}
+	interval_status = 1;
+	if (extensions) {
+		bool supported = false;
+		std::string_view names(extensions);
+		while (!names.empty()) {
+			auto const end = names.find(' ');
+			if (names.substr(0, end) == "WGL_EXT_swap_control") {
+				supported = true;
+				break;
+			}
+			if (end == std::string_view::npos)
+				break;
+			names.remove_prefix(end + 1);
+		}
+		interval_status = supported ? 3 : 2;
+		if (supported) {
+			if (auto get_interval = LoadOptionalProc<GetSwapIntervalProc>("wglGetSwapIntervalEXT")) {
+				int const interval = get_interval();
+				interval_status = interval < 0 ? 5 : 4;
+				encoded_interval = interval < 0 ? -(interval + 1) : interval;
+			}
+		}
+	}
+#endif
+	// These observations neither change the interval nor report effective
+	// vsync, compositor behavior, queue depth, or an exact refresh period.
+	perf_trace::ObserveVideoUiDuration("video_display.swap_interval.reported", 0.0, interval_status, encoded_interval);
+	int refresh_status = 0;
+	int refresh_hz = -1;
+	auto const display_index = wxDisplay::GetFromWindow(canvas);
+	if (display_index != wxNOT_FOUND) {
+		wxDisplay display(static_cast<unsigned int>(display_index));
+		if (display.IsOk()) {
+			int const reported_hz = display.GetCurrentMode().GetRefresh();
+			refresh_status = reported_hz > 0 ? 2 : 1;
+			if (reported_hz > 0)
+				refresh_hz = reported_hz;
+		}
+	}
+	// Status: 0=no valid display, 1=unknown refresh, 2=nominal Hz reported.
+	perf_trace::ObserveVideoUiDuration("video_display.nominal_refresh_hz", 0.0, refresh_status, refresh_hz);
 }
 
 struct CaptureFramebufferFunctions {
@@ -628,6 +691,10 @@ bool VideoDisplay::InitContext() {
 		}
 #endif
 		return false;
+	}
+	if (!presentation_configuration_traced && perf_trace::IsCategoryEnabled(perf_trace::Category::Video)) {
+		presentation_configuration_traced = true;
+		TraceVideoPresentationConfiguration(this);
 	}
 	if (text_texture_deleter)
 		text_texture_deleter->Drain();
@@ -3291,6 +3358,7 @@ void VideoDisplay::Unload() {
 		text_texture_deleter.reset();
 	}
 	glContext.reset();
+	presentation_configuration_traced = false;
 	pending_packet = { };
 	has_pending_packet = false;
 	pending_packet_deferred_for_visual_interaction = false;

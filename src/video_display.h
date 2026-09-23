@@ -182,6 +182,8 @@ class VideoDisplay final : public wxGLCanvas {
 
 	/// The OpenGL context for this display
 	std::unique_ptr<wxGLContext> glContext;
+	/// Trace-only presentation configuration, sampled once per activated context.
+	bool presentation_configuration_traced = false;
 
 	/// The dropdown box for selecting zoom levels
 	wxComboBox *zoomBox;
