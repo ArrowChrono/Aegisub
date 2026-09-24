@@ -14,6 +14,7 @@ param(
     [string]$LibassRuntimeLibrary = './runtimes/ass.dll',
     [string]$CMakeCxxFlags = '/DWIN32 /D_WINDOWS /GR /EHsc /DUNICODE /D_UNICODE /MP',
     [string]$CMakeCFlags = '/DWIN32 /D_WINDOWS /DUNICODE /D_UNICODE /MP',
+    [string]$VcpkgInstallOptions = '',
     [switch]$Fresh
 )
 
@@ -103,6 +104,7 @@ function Configure-CMake([string]$CMakePath, [string]$GeneratorName) {
         "-DVCPKG_HOST_TRIPLET=$effectiveHostTriplet",
         "-DVCPKG_OVERLAY_TRIPLETS=$PSScriptRoot/../cmake",
         "-DVCPKG_MANIFEST_FEATURES=skia",
+        "-DVCPKG_INSTALL_OPTIONS=$VcpkgInstallOptions",
         '-DLUA_WITH_LUASOCKET=ON',
         '-DAEGISUB_LUAJIT_SHARED=ON',
         '-DXAUDIO2_REDIST=ON',
@@ -138,10 +140,14 @@ function Configure-CMake([string]$CMakePath, [string]$GeneratorName) {
         $cmakeArgs.Add('VCPKG_INSTALLED_DIR')
     }
 
+    $configureStart = Get-Date
     Invoke-Native $CMakePath $cmakeArgs
+    $configureElapsed = (Get-Date) - $configureStart
+    Write-Host ("CMake configure + vcpkg: {0:c}" -f $configureElapsed)
 }
 
 function Build-Aegisub([string]$CMakePath) {
+    $buildStart = Get-Date
     Invoke-Native $CMakePath @(
         '--build', $BuildDir,
         '--config', $Configuration,
@@ -155,6 +161,8 @@ function Build-Aegisub([string]$CMakePath) {
         throw "Expected LuaJIT runtime not found: $luaDll"
     }
 
+    $buildElapsed = (Get-Date) - $buildStart
+    Write-Host ("Aegisub build: {0:c}" -f $buildElapsed)
     Write-Step "Done: $exe"
 }
 
