@@ -1,0 +1,89 @@
+name: Cleanup vcpkg binary cache
+
+on:
+  schedule:
+    - cron: '23 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only report package versions that would be deleted'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ORG: ArrowChrono
+      KEEP_VERSIONS: '2'
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+    steps:
+      - name: Delete old vcpkg NuGet package versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+
+          $keep = [int]$env:KEEP_VERSIONS
+          $dryRun = $env:DRY_RUN -eq 'true'
+          $api = "https://api.github.com/orgs/$env:ORG/packages"
+
+          # vcpkg's NuGet binary-cache package IDs include "-vcpkg" in their
+          # generated version strings. Only touch packages that have at least
+          # one such version, so unrelated NuGet packages in the organization
+          # are left alone.
+          $packages = @()
+          $page = 1
+          do {
+            $uri = "$api" + "?package_type=nuget&per_page=100&page=$page"
+            $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri)
+            $packages += $batch
+            $page++
+          } while ($batch.Count -eq 100)
+
+          foreach ($package in $packages) {
+            $encodedName = [uri]::EscapeDataString($package.name)
+            $versions = @()
+            $page = 1
+
+            do {
+              $uri = "$api/nuget/$encodedName/versions?per_page=100&page=$page"
+              $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri)
+              $versions += $batch
+              $page++
+            } while ($batch.Count -eq 100)
+
+            $vcpkgVersions = @(
+              $versions |
+                Where-Object { $_.name -match '-vcpkg[0-9a-f]+$' } |
+                Sort-Object created_at -Descending
+            )
+
+            if ($vcpkgVersions.Count -eq 0) {
+              continue
+            }
+
+            Write-Host "$($package.name): $($vcpkgVersions.Count) vcpkg version(s)"
+
+            $oldVersions = @($vcpkgVersions | Select-Object -Skip $keep)
+            foreach ($version in $oldVersions) {
+              if ($dryRun) {
+                Write-Host "  [dry-run] delete $($version.name) ($($version.created_at))"
+                continue
+              }
+
+              Write-Host "  deleting $($version.name) ($($version.created_at))"
+              $deleteUri = "$api/nuget/$encodedName/versions/$($version.id)"
+              Invoke-RestMethod -Method Delete -Headers $headers -Uri $deleteUri
+            }
+          }

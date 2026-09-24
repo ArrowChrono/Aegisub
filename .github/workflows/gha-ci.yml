@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build-win:
     runs-on: windows-2025-vs2026
@@ -15,7 +19,7 @@ jobs:
       VCPKG_ROOT: ${{ github.workspace }}\vcpkg
       VCPKG_DEFAULT_TRIPLET: x64-windows-release
       VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-release
-      VCPKG_BINARY_SOURCES: 'clear;nuget,https://nuget.pkg.github.com/AmusementClub/index.json,readwrite'
+      VCPKG_BINARY_SOURCES: 'clear;nuget,https://nuget.pkg.github.com/ArrowChrono/index.json,readwrite'
       VCPKG_DISABLE_METRICS: '1'
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -58,18 +62,44 @@ jobs:
       run: |
         & "$env:PROJECT_VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
 
+    - name: show build environment
+      shell: pwsh
+      run: |
+        Write-Host "=== GitHub runner ==="
+        Write-Host "ImageOS=$env:ImageOS"
+        Write-Host "ImageVersion=$env:ImageVersion"
+
+        Write-Host "`n=== Visual Studio ==="
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vswhere -latest -products * -property installationPath
+        & $vswhere -latest -products * -property catalog_productDisplayVersion
+        Write-Host $vsPath
+
+        Write-Host "`n=== MSVC toolsets ==="
+        Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory |
+          Select-Object -ExpandProperty Name
+
+        Write-Host "`n=== CMake ==="
+        cmake --version
+
+        Write-Host "`n=== PowerShell ==="
+        Write-Host $PSVersionTable.PSVersion
+
+        Write-Host "`n=== vcpkg ==="
+        & "$env:PROJECT_VCPKG_ROOT\vcpkg.exe" version
+
     - name: configure nuget credentials
       shell: pwsh
       run: |
         $nugetPath = & "$env:PROJECT_VCPKG_ROOT\vcpkg" fetch nuget
-        & $nugetPath sources add -Source 'https://nuget.pkg.github.com/AmusementClub/index.json' -Name 'GitHub' -UserName 'AmusementClub' -Password $env:GITHUB_TOKEN -StorePasswordInClearText
-        & $nugetPath setapikey $env:GITHUB_TOKEN -Source 'https://nuget.pkg.github.com/AmusementClub/index.json'
+        & $nugetPath sources add -Source 'https://nuget.pkg.github.com/ArrowChrono/index.json' -Name 'GitHub' -UserName 'ArrowChrono' -Password $env:GITHUB_TOKEN -StorePasswordInClearText
+        & $nugetPath setapikey $env:GITHUB_TOKEN -Source 'https://nuget.pkg.github.com/ArrowChrono/index.json'
 
     - name: build
       id: build
       shell: pwsh
       run: |
-        ./build/build-win-vcpkg.ps1 -Mode build -VcpkgRoot $env:PROJECT_VCPKG_ROOT -VcpkgInstalledRoot $env:PROJECT_VCPKG_INSTALLED_ROOT
+        ./build/build-win-vcpkg.ps1 -Mode build -VcpkgRoot $env:PROJECT_VCPKG_ROOT -VcpkgInstalledRoot $env:PROJECT_VCPKG_INSTALLED_ROOT -VcpkgInstallOptions '--x-abi-tools-use-exact-versions'
 
     - name: test
       id: test
