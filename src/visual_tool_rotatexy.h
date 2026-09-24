@@ -37,6 +37,8 @@ class VisualToolRotateXY final : public VisualTool<VisualDraggableFeature> {
 
 	void DoRefresh() override;
 	void Draw() override;
+	std::shared_ptr<const VisualToolRenderSnapshot> CaptureRenderSnapshot(
+		std::shared_ptr<const VisualToolRenderContext> const& context) const override;
 	bool SupportsOverlayContext() const override { return true; }
 	void DrawOverlay(VideoOverlayDrawContext &context) override;
 	void UpdateDrag(Feature *feature) override;

@@ -39,6 +39,7 @@
 #include "visual_tool_clip.h"
 #include "visual_tool_commit_policy.h"
 #include "visual_tool_drag.h"
+#include "visual_tool_render_snapshot.h"
 #include "visual_tool_vector_clip.h"
 
 #include <libaegisub/ass/time.h>
@@ -87,7 +88,7 @@ void VisualToolBase::OnInteractionRenderTimer() {
 			"visual_tool.interaction_render.timer_lateness",
 			std::chrono::duration<double, std::milli>(now - *deadline).count());
 	}
-	bool const allowed = interaction_render_pacer.OnTimer(now);
+	bool const allowed = interaction_render_pacer.OnTimer(now, parent->NeedsInteractionRender());
 	perf_trace::ObserveVideoUiDuration(
 		"visual_tool.interaction_render.timer_fire", 0.0, allowed ? 1 : 0, deadline ? 1 : 0);
 	if (allowed)
@@ -124,7 +125,8 @@ void VisualToolBase::BeginInteractionPacing(int selection_count) {
 
 	parent->CancelReleaseToolFeedback();
 	interaction_render_pacer.Begin(DeadlinePacingPolicy::Clock::now());
-	c->GetCore().videoController->BeginVisualSubtitleInteraction();
+	auto const interaction_id = c->GetCore().videoController->BeginVisualSubtitleInteraction();
+	parent->BeginToolPresentation(interaction_id);
 	interaction_trace_active = true;
 	perf_trace::ObserveVideoUiDuration("visual_tool.interaction_begin", 0.0, selection_count);
 }
@@ -175,6 +177,8 @@ void VisualToolBase::UpdateLayoutResolution() {
 
 void VisualToolBase::OnCommit(int type, AssDialogue const* changed) {
 	bool const local_commit = command_session.IsLocalCommitInProgress();
+	if (!local_commit)
+		parent->ResetToolPresentation();
 	if (local_commit && !command_session.ShouldObserveLocalCommit())
 		return;
 
@@ -223,6 +227,7 @@ void VisualToolBase::OnCommit(int type, AssDialogue const* changed) {
 }
 
 void VisualToolBase::OnSeek(int new_frame) {
+	parent->ResetToolPresentation();
 	parent->CancelReleaseToolFeedback();
 	if (frame_number == new_frame) return;
 	perf_trace::VideoUiDurationScope trace(
@@ -255,6 +260,7 @@ void VisualToolBase::OnMouseCaptureLost(wxMouseCaptureLostEvent &) {
 }
 
 void VisualToolBase::OnActiveLineChanged(AssDialogue *new_line) {
+	parent->ResetToolPresentation();
 	bool const displayed = IsDisplayed(new_line);
 	perf_trace::VideoUiDurationScope trace(
 		"grid_select.visual.active",
@@ -404,12 +410,15 @@ AssDialogue* VisualToolBase::GetActiveDialogueLine() {
 }
 
 void VisualToolBase::SetCanvasSize(int w, int h) {
+	if (canvas_size != Vector2D(w, h))
+		parent->ResetToolPresentation();
 	canvas_size = Vector2D(w, h);
 }
 
 void VisualToolBase::SetDisplayArea(int x, int y, int w, int h) {
 	UpdateLayoutResolution();
 	if (x == video_pos.X() && y == video_pos.Y() && w == video_res.X() && h == video_res.Y()) return;
+	parent->ResetToolPresentation();
 
 	video_pos = Vector2D(x, y);
 	video_res = Vector2D(w, h);
@@ -474,26 +483,44 @@ void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
 	if (!dragging) {
 		int max_layer = INT_MIN;
 		active_feature = nullptr;
-		for (auto& feature : features) {
-			if (feature.IsMouseOver(mouse_pos) && feature.layer >= max_layer) {
-				active_feature = &feature;
-				max_layer = feature.layer;
+		if (auto snapshot = parent->GetToolPresentationSnapshot()) {
+			if (auto hit = snapshot->HitTest(mouse_pos)) {
+				std::size_t index = 0;
+				for (auto& feature : features) {
+					bool const matches = hit->line_id
+											 ? feature.line && feature.line->Id == *hit->line_id
+											 : !feature.line && index == hit->index;
+					if (matches && feature.type == hit->type) {
+						active_feature = &feature;
+						break;
+					}
+					++index;
+				}
+			}
+		}
+		else {
+			for (auto& feature : features) {
+				if (feature.IsMouseOver(mouse_pos) && feature.layer >= max_layer) {
+					active_feature = &feature;
+					max_layer = feature.layer;
+				}
 			}
 		}
 	}
 
 	if (dragging) {
 		// continue drag
-		if (event.LeftIsDown()) {
+		if (event.LeftIsDown() || (event.LeftUp() && (mouse_pos != drag_start || (active_feature && active_feature->HasMoved())))) {
 			for (auto sel : sel_features)
 				sel->UpdateDrag(mouse_pos - drag_start, shift_down);
 			for (auto sel : sel_features)
 				UpdateDrag(sel);
 			Commit();
-			ScheduleInteractionRender();
+			if (event.LeftIsDown())
+				ScheduleInteractionRender();
 		}
 		// end drag
-		else {
+		if (!event.LeftIsDown()) {
 			dragging = false;
 
 			// mouse didn't move, fiddle with selection
@@ -570,7 +597,7 @@ void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
 	if (interaction_ended) {
 		EndInteractionPacing(true, static_cast<int>(sel_features.size()));
 	}
-	else if (interaction_started || !interaction_is_active) {
+	else if (interaction_started || !interaction_is_active || event.Entering()) {
 		render_tool_feedback();
 	}
 
@@ -876,14 +903,23 @@ void VisualToolBase::ClearChangedLines() {
 	single_changed_line = nullptr;
 }
 
+void VisualToolBase::RenderReadyInteractionFrame() {
+	if (!IsInteracting() || !interaction_render_pacer.Force(DeadlinePacingPolicy::Clock::now()))
+		return;
+	interaction_render_timer.Stop();
+	RenderInteractionFrame(3);
+}
+
 void VisualToolBase::ScheduleInteractionRender() {
 	if (!IsInteracting() || !interaction_render_pacer.IsActive())
 		return;
 
-	bool const allowed = interaction_render_pacer.Request(DeadlinePacingPolicy::Clock::now());
+	bool const allowed = interaction_render_pacer.Request(
+		DeadlinePacingPolicy::Clock::now(), parent->NeedsInteractionRender());
 	perf_trace::ObserveVideoUiDuration("visual_tool.interaction_render.request", 0.0, allowed ? 1 : 0);
-	if (allowed) {
+	if (!interaction_render_pacer.HasPending())
 		interaction_render_timer.Stop();
+	if (allowed) {
 		RenderInteractionFrame(0);
 	}
 	else {

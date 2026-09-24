@@ -524,6 +524,7 @@ VideoDisplay::VideoDisplay(wxToolBar *toolbar, bool freeSize, wxComboBox *zoomBo
 
 	connections = agi::signal::make_vector({
 		con->videoController->AddFrameReadyListener(&VideoDisplay::UploadFrameData, this),
+		con->videoController->AddPrepareVisualSubtitleUpdateListener(&VideoDisplay::PrepareToolPresentation, this),
 		con->project->AddVideoProviderListener(&VideoDisplay::OnVideoProviderChanged, this),
 		con->videoController->AddARChangeListener(&VideoDisplay::UpdateSize, this),
 		con->ass->AddCommitListener(&VideoDisplay::OnSubtitlesCommit, this),
@@ -883,6 +884,7 @@ bool VideoDisplay::EnsureSceneCache(int canvas_width, int canvas_height) {
 }
 
 void VideoDisplay::ResetRenderers() {
+	ResetToolPresentation();
 	if (glContext)
 		SetCurrent(*glContext);
 
@@ -930,6 +932,7 @@ void VideoDisplay::OnRendererBackendChanged(agi::OptionValue const&) {
 }
 
 void VideoDisplay::ApplyVideoProvider(AsyncVideoProvider *provider) {
+	ResetToolPresentation();
 	CancelReleaseToolFeedback();
 	last_size_event_client_size = wxDefaultSize;
 	pending_packet = { };
@@ -1018,8 +1021,12 @@ void VideoDisplay::UploadFrameData(VideoRenderPacket const& packet, double) {
 	scene_cache_waiting_for_subtitle_packet = false;
 	if (!can_reuse_video_only_scene_cache || !IsSceneCacheUsableForCurrentPlayback())
 		InvalidateSceneCache();
-	if (throttle_paused_visual_interaction)
-		tool->ScheduleInteractionRender();
+	if (throttle_paused_visual_interaction) {
+		if (con->GetUI().videoDisplay == this && packet.delivery_class == VideoRenderDeliveryClass::VisualSubtitleIntermediate && tool_presentation.MatchesActiveInteraction(packet.visual_interaction_id, packet.visual_tool_snapshot))
+			tool->RenderReadyInteractionFrame();
+		else
+			tool->ScheduleInteractionRender();
+	}
 	if (defer_interactive_playback_same_frame_packet || throttle_paused_visual_interaction)
 		return;
 
@@ -1051,6 +1058,59 @@ void VideoDisplay::Render() {
 	render_requested = true;
 	TraceRenderRequest(1);
 	ScheduleRender();
+}
+
+void VideoDisplay::ResetToolPresentation() {
+	tool_presentation.Reset();
+}
+
+std::shared_ptr<const VisualToolRenderSnapshot> VideoDisplay::GetToolPresentationSnapshot() const {
+	if (!has_displayed_packet || con->GetUI().videoDisplay != this || con->videoController->IsPlaying())
+		return {};
+#ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
+	if (IsSkiaVideoRuntimeRequested())
+		return {};
+#endif
+	return tool_presentation.Select(displayed_packet.visual_tool_snapshot);
+}
+
+bool VideoDisplay::NeedsInteractionRender() const {
+	bool const paired_snapshot = tool_presentation.IsActive() && con->GetUI().videoDisplay == this && !con->videoController->IsPlaying();
+	bool const uploadable_packet = has_pending_packet && !(pending_packet_deferred_for_visual_interaction && tool && tool->IsInteracting());
+	auto const drawn_snapshot = paired_snapshot && has_displayed_packet
+		? tool_presentation.Select(displayed_packet.visual_tool_snapshot)
+		: nullptr;
+	return ShouldRenderVideoDisplayInteraction(
+		paired_snapshot, last_render_succeeded, uploadable_packet, render_requested, IsToolFeedbackReady(),
+		drawn_snapshot && drawn_snapshot->HasMouseDrivenFeedback());
+}
+
+void VideoDisplay::BeginToolPresentation(std::uint64_t interaction_id) {
+	if (!tool || !has_displayed_packet || con->GetUI().videoDisplay != this || con->videoController->IsPlaying())
+		return;
+#ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
+	if (IsSkiaVideoRuntimeRequested())
+		return;
+#endif
+	auto baseline = tool_presentation.Select(displayed_packet.visual_tool_snapshot);
+	if (!baseline && tool_presentation.Matches(displayed_packet.visual_tool_snapshot))
+		baseline = displayed_packet.visual_tool_snapshot;
+	if (!baseline) {
+		auto *provider = con->project->VideoProvider();
+		if (!provider || !provider->IsCurrent(displayed_packet.delivery_version) || video_subtitle_scene_cache::CurrentFrameSubtitleSceneNeedsRefresh(con->ass->Events, con->project->Timecodes(), static_cast<int>(displayed_packet.time), displayed_subtitle_scene))
+			return;
+		baseline = tool->CaptureRenderSnapshot(tool_presentation.Context());
+	}
+	bool const paired = tool_presentation.Begin(interaction_id, std::move(baseline));
+	perf_trace::ObserveVideoUiDuration("video_display.tool_snapshot.begin", 0.0, paired ? 1 : 0);
+}
+
+void VideoDisplay::PrepareToolPresentation(VideoSubtitleUpdateOptions& options) {
+	if (con->GetUI().videoDisplay != this || !tool || con->videoController->IsPlaying())
+		return;
+	if (!tool_presentation.IsActive() || options.visual_interaction_id != tool_presentation.InteractionId())
+		return;
+	options.visual_tool_snapshot = tool->CaptureRenderSnapshot(tool_presentation.Context());
 }
 
 void VideoDisplay::RenderNow() {
@@ -1108,6 +1168,11 @@ bool VideoDisplay::IsToolFeedbackReady() const {
 
 void VideoDisplay::RenderFinalToolFeedback(std::uint64_t final_interaction_id) {
 	CancelReleaseToolFeedback();
+	if (!final_interaction_id && tool_presentation.IsActive() && tool && !tool->IsInteracting()) {
+		auto* provider = con->project->VideoProvider();
+		if (provider && provider->IsCurrent(displayed_packet.delivery_version))
+			ResetToolPresentation();
+	}
 	if (con->videoController->IsPlaying() || !release_tool_feedback.Begin(final_interaction_id, VideoToolReleaseFeedback::Clock::now())) {
 		perf_trace::ObserveVideoUiDuration("video_display.release_feedback.immediate", 0.0);
 		RenderNow();
@@ -1531,8 +1596,21 @@ void VideoDisplay::DrawLegacyOverlayPass(wxSize const& client_size) {
 		DrawVisualGuides(guide_context);
 	}
 
-	if ((mouse_pos || !autohideTools->GetBool()) && tool)
-		tool->Draw();
+	if ((mouse_pos || !autohideTools->GetBool()) && tool) {
+		if (tool_presentation.IsActive() && (con->GetUI().videoDisplay != this || con->videoController->IsPlaying()))
+			ResetToolPresentation();
+		if (auto snapshot = GetToolPresentationSnapshot()) {
+			perf_trace::VideoUiDurationScope trace("video_display.tool_snapshot.draw");
+			if (!visualGuideText)
+				visualGuideText = CreateTextRenderer();
+			OpenGLWrapper snapshot_gl;
+			LegacyVideoOverlayDrawContext snapshot_context(snapshot_gl, *visualGuideText);
+			snapshot->Draw(snapshot_context);
+			snapshot->DrawLiveFeedback(mouse_pos);
+		}
+		else
+			tool->Draw();
+	}
 }
 
 #ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
@@ -2134,6 +2212,7 @@ void VideoDisplay::DoRender() try {
 	// Consume this feedback attempt. Release feedback is only satisfied after
 	// a successful swap; failure leaves its single deadline fallback intact.
 	tool_feedback_dirty = false;
+	last_render_succeeded = false;
 
 	if (!con->project->VideoProvider() || !InitContext() || (!videoRenderer && !has_pending_packet))
 		return;
@@ -2341,6 +2420,16 @@ void VideoDisplay::DoRender() try {
 		perf_trace::VideoUiDurationScope swap_trace("video_display.swap");
 		swapped = SwapBuffers();
 		swap_trace.SetDetails(swapped ? 1 : 0, presented_new_frame ? 1 : 0);
+	}
+	last_render_succeeded = swapped;
+	if (swapped && tool_presentation.IsActive() && tool && !tool->IsInteracting()) {
+		auto *provider = con->project->VideoProvider();
+		if (provider && provider->IsCurrent(displayed_packet.delivery_version)) {
+			if (displayed_packet.delivery_class == VideoRenderDeliveryClass::VisualSubtitleFinal)
+				tool_presentation.OnFinalPresented(displayed_packet.visual_interaction_id);
+			if (tool_presentation.IsActive())
+				ResetToolPresentation();
+		}
 	}
 	if (swapped && release_tool_feedback.Deadline()) {
 		auto const final_id = presented_new_frame && displayed_packet.delivery_class == VideoRenderDeliveryClass::VisualSubtitleFinal
@@ -3167,6 +3256,7 @@ std::unique_ptr<OpenGLText> VideoDisplay::CreateTextRenderer() {
 }
 
 void VideoDisplay::SetTool(std::unique_ptr<VisualToolBase> new_tool) {
+	ResetToolPresentation();
 	CancelReleaseToolFeedback();
 	// Defer GL object destruction until the next render has made this canvas
 	// current. This releases a possibly full-window invert backing on tool

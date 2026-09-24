@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <memory>
 
+class VisualToolRenderSnapshot;
+
 struct VideoRenderDeliveryVersion {
 	std::uint64_t provider = 0;
 	std::uint64_t content = 0;
@@ -39,6 +41,7 @@ struct VideoSubtitleUpdateOptions {
 	VideoRenderDeliveryClass delivery_class = VideoRenderDeliveryClass::EveryFrame;
 	std::uint64_t visual_interaction_id = 0;
 	bool force_current_frame_render = false;
+	std::shared_ptr<const VisualToolRenderSnapshot> visual_tool_snapshot;
 };
 
 struct VideoRenderPacket {
@@ -53,6 +56,7 @@ struct VideoRenderPacket {
 	VideoRenderDeliveryVersion delivery_version;
 	VideoRenderDeliveryClass delivery_class = VideoRenderDeliveryClass::EveryFrame;
 	std::uint64_t visual_interaction_id = 0;
+	std::shared_ptr<const VisualToolRenderSnapshot> visual_tool_snapshot;
 	SourceFrame source_frame;
 	SubtitleOverlay subtitle_overlay;
 	bool has_subtitle_overlay = false;

@@ -13,6 +13,7 @@
 #include "../../src/include/aegisub/video_provider.h"
 #include "../../src/video_frame.h"
 #include "../../src/video_provider_manager.h"
+#include "../../src/visual_tool_render_snapshot.h"
 
 #include <libaegisub/background_runner.h>
 #include <libaegisub/make_unique.h>
@@ -688,6 +689,16 @@ public:
 	}
 };
 
+class FakeVisualToolRenderSnapshot final : public VisualToolRenderSnapshot {
+	public:
+	FakeVisualToolRenderSnapshot()
+		: VisualToolRenderSnapshot(std::make_shared<VisualToolRenderContext>()) {}
+
+	void Draw(VideoOverlayDrawContext&) const override {
+		ADD_FAILURE() << "the subtitle worker must not draw visual-tool snapshots";
+	}
+};
+
 struct RecordedFrame {
 	int frame_number = -1;
 	int subtitle_generation = -1;
@@ -699,6 +710,7 @@ struct RecordedFrame {
 	SourceFrameRect source_visible_rect = { };
 	VideoRenderDeliveryClass delivery_class = VideoRenderDeliveryClass::EveryFrame;
 	uint64_t visual_interaction_id = 0;
+	std::shared_ptr<const VisualToolRenderSnapshot> visual_tool_snapshot;
 };
 
 class EventRecorder {
@@ -721,6 +733,7 @@ public:
 		frame.source_visible_rect = GetSourceFrameVisibleRect(packet.source_frame);
 		frame.delivery_class = packet.delivery_class;
 		frame.visual_interaction_id = packet.visual_interaction_id;
+		frame.visual_tool_snapshot = std::move(packet.visual_tool_snapshot);
 
 		{
 			std::lock_guard<std::mutex> lock(mutex);
@@ -1217,6 +1230,9 @@ TEST(async_video_provider, pipeline_events_correlate_superseded_render_and_lates
 	auto state = std::make_shared<VideoProviderState>();
 	EventRecorder recorder;
 	auto subtitles = MakeSubtitleFile("before");
+	auto stale_snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	std::weak_ptr<const VisualToolRenderSnapshot> stale_lifetime = stale_snapshot;
+	auto final_snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
 	std::uint64_t provider_id = 0;
 	{
 		AsyncVideoProvider provider(
@@ -1228,12 +1244,16 @@ TEST(async_video_provider, pipeline_events_correlate_superseded_render_and_lates
 		aegisub::async_video_trace::SetSink(&pipeline);
 		ScopedVideoProviderBlock block(state);
 
-		provider.LoadSubtitles(&subtitles, {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate, .visual_interaction_id = 41});
+		provider.LoadSubtitles(&subtitles, {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+											.visual_interaction_id = 41,
+											.visual_tool_snapshot = stale_snapshot});
+		stale_snapshot.reset();
 		// Source acquisition is inside ProcRenderPacket, after worker_render_begin
 		// and the pre-render version check. Supersede that exact in-flight pass.
 		ASSERT_TRUE(block.WaitUntilBlocked());
+		EXPECT_FALSE(stale_lifetime.expired());
 		subtitles.Events.front().Text = "after";
-		provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleFinal, .visual_interaction_id = 42, .force_current_frame_render = true});
+		provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleFinal, .visual_interaction_id = 42, .force_current_frame_render = true, .visual_tool_snapshot = final_snapshot});
 		block.Release();
 		ASSERT_TRUE(recorder.WaitForCount(1));
 	}
@@ -1272,6 +1292,8 @@ TEST(async_video_provider, pipeline_events_correlate_superseded_render_and_lates
 	EXPECT_EQ(2, frames.front().subtitle_generation);
 	EXPECT_EQ(VideoRenderDeliveryClass::VisualSubtitleFinal, frames.front().delivery_class);
 	EXPECT_EQ(42u, frames.front().visual_interaction_id);
+	EXPECT_EQ(final_snapshot, frames.front().visual_tool_snapshot);
+	EXPECT_TRUE(stale_lifetime.expired());
 }
 
 TEST_F(MainThreadDeliveryFixture, queued_same_frame_packet_is_rejected_after_subtitle_reload) {
@@ -1603,6 +1625,171 @@ TEST(async_video_provider, pending_full_subtitles_coalesce_same_line_updates) {
 	block.Release();
 
 	ASSERT_TRUE(load_recorder.WaitForSnapshot({ "latest", "unchanged" }));
+}
+
+TEST(async_video_provider, pending_visual_snapshot_tracks_latest_subtitle_content_and_version) {
+	auto state = std::make_shared<VideoProviderState>();
+	SubtitleLoadRecorder load_recorder;
+	ScopedSubtitleLoadRecorder scoped_load_recorder(load_recorder);
+	EventRecorder recorder;
+	AsyncVideoProvider provider(
+		agi::make_unique<FakeVideoProvider>(state),
+		agi::make_unique<FakeSubtitlesProvider>(), recorder);
+	ScopedVideoProviderBlock block(state);
+	provider.RequestFrame(1, 1000);
+	ASSERT_TRUE(block.WaitUntilBlocked());
+
+	auto first_snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	std::weak_ptr<const VisualToolRenderSnapshot> first_lifetime = first_snapshot;
+	auto latest_snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	auto subtitles = MakeSubtitleFile("before", "unchanged");
+	provider.LoadSubtitles(&subtitles, {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+										.visual_interaction_id = 71,
+										.visual_tool_snapshot = first_snapshot});
+	first_snapshot.reset();
+	EXPECT_FALSE(first_lifetime.expired());
+	subtitles.Events.front().Text = "latest";
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate, .visual_interaction_id = 72, .visual_tool_snapshot = latest_snapshot});
+	EXPECT_TRUE(first_lifetime.expired());
+	block.Release();
+	provider.CollectMemoryStats();
+
+	auto const frames = recorder.Snapshot();
+	ASSERT_EQ(1u, frames.size());
+	EXPECT_EQ(latest_snapshot, frames.front().visual_tool_snapshot);
+	EXPECT_EQ((std::vector<std::vector<std::string>>{{"latest", "unchanged"}}), load_recorder.Snapshot());
+	EXPECT_EQ((VideoRenderDeliveryVersion{.provider = provider.GetRawVideoIdentity().generation,
+										  .content = 2,
+										  .request = 1}),
+			  frames.front().delivery_version);
+	EXPECT_EQ(VideoRenderDeliveryClass::VisualSubtitleIntermediate, frames.front().delivery_class);
+	EXPECT_EQ(72u, frames.front().visual_interaction_id);
+	EXPECT_EQ(1, frames.front().frame_number);
+	EXPECT_EQ(1000, frames.front().time);
+}
+
+TEST(async_video_provider, newest_null_visual_snapshot_clears_pending_overlay) {
+	auto state = std::make_shared<VideoProviderState>();
+	SubtitleLoadRecorder load_recorder;
+	ScopedSubtitleLoadRecorder scoped_load_recorder(load_recorder);
+	EventRecorder recorder;
+	AsyncVideoProvider provider(
+		agi::make_unique<FakeVideoProvider>(state),
+		agi::make_unique<FakeSubtitlesProvider>(), recorder);
+	ScopedVideoProviderBlock block(state);
+	provider.RequestFrame(1, 1000);
+	ASSERT_TRUE(block.WaitUntilBlocked());
+
+	auto snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	std::weak_ptr<const VisualToolRenderSnapshot> lifetime = snapshot;
+	auto subtitles = MakeSubtitleFile("with tool");
+	provider.LoadSubtitles(&subtitles, {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+										.visual_interaction_id = 71,
+										.visual_tool_snapshot = snapshot});
+	snapshot.reset();
+	subtitles.Events.front().Text = "without tool";
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate, .visual_interaction_id = 72});
+	EXPECT_TRUE(lifetime.expired());
+	block.Release();
+	provider.CollectMemoryStats();
+
+	auto const frames = recorder.Snapshot();
+	ASSERT_EQ(1u, frames.size());
+	EXPECT_FALSE(frames.front().visual_tool_snapshot);
+	EXPECT_EQ((std::vector<std::vector<std::string>>{{"without tool"}}), load_recorder.Snapshot());
+	EXPECT_EQ(2u, frames.front().delivery_version.content);
+	EXPECT_EQ(VideoRenderDeliveryClass::VisualSubtitleIntermediate, frames.front().delivery_class);
+	EXPECT_EQ(72u, frames.front().visual_interaction_id);
+}
+
+TEST(async_video_provider, explicit_frame_request_strips_pending_visual_snapshot) {
+	auto state = std::make_shared<VideoProviderState>();
+	EventRecorder recorder;
+	AsyncVideoProvider provider(
+		agi::make_unique<FakeVideoProvider>(state),
+		agi::make_unique<FakeSubtitlesProvider>(), recorder);
+	ScopedVideoProviderBlock block(state);
+	provider.RequestFrame(1, 1000);
+	ASSERT_TRUE(block.WaitUntilBlocked());
+
+	auto snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	std::weak_ptr<const VisualToolRenderSnapshot> lifetime = snapshot;
+	auto subtitles = MakeSubtitleFile("seek");
+	provider.LoadSubtitles(&subtitles, {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+										.visual_interaction_id = 71,
+										.visual_tool_snapshot = snapshot});
+	snapshot.reset();
+	EXPECT_FALSE(lifetime.expired());
+	provider.RequestFrame(2, 2000);
+	block.Release();
+	provider.CollectMemoryStats();
+
+	auto const frames = recorder.Snapshot();
+	ASSERT_EQ(1u, frames.size());
+	EXPECT_EQ(2, frames.front().frame_number);
+	EXPECT_EQ(2000, frames.front().time);
+	EXPECT_EQ(VideoRenderDeliveryClass::EveryFrame, frames.front().delivery_class);
+	EXPECT_EQ(0u, frames.front().visual_interaction_id);
+	EXPECT_FALSE(frames.front().visual_tool_snapshot);
+	EXPECT_TRUE(lifetime.expired());
+	EXPECT_EQ((VideoRenderDeliveryVersion{.provider = provider.GetRawVideoIdentity().generation,
+										  .content = 1,
+										  .request = 2}),
+			  frames.front().delivery_version);
+}
+
+TEST(async_video_provider, visual_snapshots_release_without_frame_or_visible_change) {
+	auto state = std::make_shared<VideoProviderState>();
+	EventRecorder recorder;
+	auto subtitles_provider = agi::make_unique<FakeSubtitlesProvider>();
+	auto *subtitles_provider_ptr = subtitles_provider.get();
+	AsyncVideoProvider provider(
+		agi::make_unique<FakeVideoProvider>(state), std::move(subtitles_provider), recorder);
+	auto subtitles = MakeSubtitleFile("unchanged");
+	auto no_frame_snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	std::weak_ptr<const VisualToolRenderSnapshot> no_frame_lifetime = no_frame_snapshot;
+	provider.LoadSubtitles(&subtitles, {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+										.visual_tool_snapshot = no_frame_snapshot});
+	no_frame_snapshot.reset();
+	provider.CollectMemoryStats();
+	EXPECT_TRUE(no_frame_lifetime.expired());
+	EXPECT_TRUE(recorder.Snapshot().empty());
+	EXPECT_EQ(0, subtitles_provider_ptr->load_calls);
+
+	provider.RequestFrame(1, 1000);
+	provider.CollectMemoryStats();
+	ASSERT_EQ(1u, recorder.Snapshot().size());
+	ASSERT_EQ(1, subtitles_provider_ptr->load_calls);
+	auto no_change_snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	std::weak_ptr<const VisualToolRenderSnapshot> no_change_lifetime = no_change_snapshot;
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate, .visual_tool_snapshot = no_change_snapshot});
+	no_change_snapshot.reset();
+	provider.CollectMemoryStats();
+	EXPECT_TRUE(no_change_lifetime.expired());
+	EXPECT_EQ(1u, recorder.Snapshot().size());
+	EXPECT_EQ(1, subtitles_provider_ptr->load_calls);
+}
+
+TEST(async_video_provider, visual_snapshot_releases_after_subtitle_render_error) {
+	auto state = std::make_shared<VideoProviderState>();
+	EventRecorder recorder;
+	AsyncVideoProvider provider(
+		agi::make_unique<FakeVideoProvider>(state),
+		agi::make_unique<ThrowingOverlaySubtitlesProvider>(), recorder);
+	provider.SetCurrentFrameContext(1, 1000);
+	provider.CollectMemoryStats();
+	auto subtitles = MakeSubtitleFile("failure path");
+	auto snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	std::weak_ptr<const VisualToolRenderSnapshot> lifetime = snapshot;
+	provider.LoadSubtitles(&subtitles, {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+										.visual_tool_snapshot = snapshot});
+	snapshot.reset();
+	provider.CollectMemoryStats();
+	auto const errors = recorder.SubtitleErrors();
+	ASSERT_EQ(1u, errors.size());
+	EXPECT_NE(std::string::npos, errors.front().find("synthetic overlay render failure"));
+	EXPECT_TRUE(recorder.Snapshot().empty());
+	EXPECT_TRUE(lifetime.expired());
 }
 
 TEST(async_video_provider, pending_different_line_updates_preserve_both_lines) {
@@ -3641,10 +3828,8 @@ TEST(async_video_provider, visual_subtitle_final_update_keeps_incremental_packet
 	provider.RequestFrame(0, 0);
 	ASSERT_TRUE(recorder.WaitForCount(1));
 
-	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {
-		VideoRenderDeliveryClass::VisualSubtitleFinal,
-		42,
-		true});
+	auto snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleFinal, .visual_interaction_id = 42, .force_current_frame_render = true, .visual_tool_snapshot = snapshot});
 	ASSERT_TRUE(recorder.WaitForCount(2));
 
 	auto frames = recorder.Snapshot();
@@ -3652,6 +3837,8 @@ TEST(async_video_provider, visual_subtitle_final_update_keeps_incremental_packet
 	EXPECT_EQ(VideoRenderDeliveryClass::EveryFrame, frames.front().delivery_class);
 	EXPECT_EQ(VideoRenderDeliveryClass::VisualSubtitleFinal, frames.back().delivery_class);
 	EXPECT_EQ(42u, frames.back().visual_interaction_id);
+	EXPECT_EQ(snapshot, frames.back().visual_tool_snapshot);
+	EXPECT_FALSE(frames.front().visual_tool_snapshot);
 }
 
 TEST(async_video_provider, dropped_packet_advances_overlay_continuity_generation_on_next_delivered_event) {

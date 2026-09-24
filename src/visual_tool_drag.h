@@ -85,4 +85,6 @@ class VisualToolDrag final : public VisualTool<VisualToolDragDraggableFeature> {
 public:
 	VisualToolDrag(VideoDisplay *parent, agi::Context *context);
 	void SetToolbar(wxToolBar *tb) override;
+	std::shared_ptr<const VisualToolRenderSnapshot> CaptureRenderSnapshot(
+		std::shared_ptr<const VisualToolRenderContext> const& context) const override;
 };

@@ -31,6 +31,7 @@
 #include <libaegisub/signal.h>
 
 #include <set>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -41,6 +42,8 @@
 class AssDialogue;
 class VideoDisplay;
 class VideoOverlayDrawContext;
+class VisualToolRenderSnapshot;
+struct VisualToolRenderContext;
 class wxMouseCaptureLostEvent;
 class wxKeyEvent;
 class wxMouseEvent;
@@ -209,6 +212,7 @@ public:
 	virtual bool SupportsNudge() const { return false; }
 	/// Request a paced redraw after an interaction-related subtitle packet arrives.
 	void ScheduleInteractionRender();
+	void RenderReadyInteractionFrame();
 	/// A holding tool can commit its release state before ending its pacing session.
 	[[nodiscard]] bool IsFinishingLocalInteractionCommit() const noexcept {
 		return !IsInteracting() && interaction_render_pacer.IsActive() && command_session.IsLocalCommitInProgress();
@@ -228,6 +232,8 @@ public:
 	/// Whether the tool currently has an active (on-frame) dialogue line.
 	bool HasActiveLine() const { return active_line != nullptr; }
 	virtual void Draw()=0;
+	virtual std::shared_ptr<const VisualToolRenderSnapshot> CaptureRenderSnapshot(
+		std::shared_ptr<const VisualToolRenderContext> const&) const { return {}; }
 	virtual bool SupportsOverlayContext() const { return false; }
 	virtual void DrawOverlay(VideoOverlayDrawContext &) { }
 	virtual void SetCanvasSize(int w, int h);

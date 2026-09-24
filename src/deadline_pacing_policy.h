@@ -18,7 +18,11 @@ public:
 		deadline = now + interval;
 	}
 
-	bool Request(TimePoint now) noexcept {
+	bool Request(TimePoint now, bool has_work = true) noexcept {
+		if (!has_work) {
+			pending = false;
+			return false;
+		}
 		if (!active)
 			Begin(now);
 
@@ -30,7 +34,11 @@ public:
 		return true;
 	}
 
-	bool OnTimer(TimePoint now) noexcept {
+	bool OnTimer(TimePoint now, bool has_work = true) noexcept {
+		if (!has_work) {
+			pending = false;
+			return false;
+		}
 		if (!active || !pending || now < deadline)
 			return false;
 

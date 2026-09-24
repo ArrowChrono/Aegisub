@@ -175,9 +175,9 @@ void VideoController::OnSubtitlesCommit(AssFileCommitDetails commit) {
 		provider->LoadSubtitles(core.ass.get());
 }
 
-void VideoController::BeginVisualSubtitleInteraction() {
+std::uint64_t VideoController::BeginVisualSubtitleInteraction() {
 	if (visual_subtitle_interaction_active)
-		return;
+		return visual_subtitle_interaction_id;
 
 	visual_subtitle_update_timer->Stop();
 	pending_visual_subtitle_updates.Clear();
@@ -186,6 +186,7 @@ void VideoController::BeginVisualSubtitleInteraction() {
 		++visual_subtitle_interaction_id;
 	visual_subtitle_update_pacer.Begin(DeadlinePacingPolicy::Clock::now());
 	visual_subtitle_interaction_active = true;
+	return visual_subtitle_interaction_id;
 }
 
 std::uint64_t VideoController::EndVisualSubtitleInteraction() {
@@ -301,16 +302,15 @@ void VideoController::SubmitSubtitleUpdate(
 		"video_controller.subtitle_update",
 		static_cast<int>(changed_lines.size()),
 		incremental ? 1 : 0);
+	VideoSubtitleUpdateOptions options;
+	options.delivery_class = reason == 1 ? VideoRenderDeliveryClass::VisualSubtitleIntermediate : VideoRenderDeliveryClass::VisualSubtitleFinal;
+	options.visual_interaction_id = visual_subtitle_interaction_id;
+	options.force_current_frame_render = reason == 2;
+	PrepareVisualSubtitleUpdate(options);
 	if (incremental)
-		provider->UpdateSubtitles(core.ass.get(), changed_lines, {
-			reason == 1 ? VideoRenderDeliveryClass::VisualSubtitleIntermediate : VideoRenderDeliveryClass::VisualSubtitleFinal,
-			visual_subtitle_interaction_id,
-			reason == 2});
+		provider->UpdateSubtitles(core.ass.get(), changed_lines, std::move(options));
 	else
-		provider->LoadSubtitles(core.ass.get(), {
-			reason == 1 ? VideoRenderDeliveryClass::VisualSubtitleIntermediate : VideoRenderDeliveryClass::VisualSubtitleFinal,
-			visual_subtitle_interaction_id,
-			reason == 2});
+		provider->LoadSubtitles(core.ass.get(), std::move(options));
 }
 
 void VideoController::ResetVisualSubtitleInteraction() noexcept {
@@ -1067,17 +1067,17 @@ bool VideoController::TrySeekAndDeliverRecentRenderPacket(int frame) {
 		if (it->frame_number != frame)
 			continue;
 
-		perf_trace::ObserveVideoRenderPacketCacheLookup(frame, true, "recent_render_packet");
 		auto packet = *it;
 		recent_render_packets.erase(it);
-		recent_render_packets.push_front(packet);
 		double const packet_time = packet.time;
+		if (!provider || !provider->TryAdoptCachedFrame(packet, frame, TimeAtFrame(frame)))
+			break;
+
 		context->GetCore().ass->Properties.video_position = frame;
-		if (provider) {
-			provider->CancelPendingFrameRequests();
-			provider->SetCurrentFrameContext(frame, packet_time);
-		}
 		Seek(frame);
+		if (!provider || !provider->IsCurrent(packet, frame_n))
+			break;
+		perf_trace::ObserveVideoRenderPacketCacheLookup(frame, true, "recent_render_packet");
 		DeliverFrameReady(std::move(packet), packet_time);
 		return true;
 	}

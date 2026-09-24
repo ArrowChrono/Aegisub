@@ -322,6 +322,8 @@ if(GTEST_FOUND)
         tests/tests/visual_guide_model.cpp
         tests/tests/visual_guide_overlay.cpp
         tests/tests/visual_tool_commit_policy.cpp
+        tests/tests/visual_tool_drag_snapshot.cpp
+        tests/tests/visual_tool_presentation.cpp
         tests/tests/visual_tool_roi_press_policy.cpp
         tests/tests/visual_tool_scale_policy.cpp
         tests/tests/navigation_preview_policy.cpp
@@ -346,6 +348,8 @@ if(GTEST_FOUND)
         src/subtitle_overlay_blend.cpp
         src/track_choice.cpp
         src/vector2d.cpp
+        src/visual_feature_overlay.cpp
+        src/visual_tool_drag_snapshot.cpp
         src/video_renderer_opengl_tile.cpp
         src/visual_guide_controller.cpp
         src/visual_guide_interaction.cpp

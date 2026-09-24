@@ -305,6 +305,7 @@ public:
 
 	/// Cancel any pending preview frame request and supersede in-flight work.
 	void CancelPendingFrameRequests() noexcept;
+	bool TryAdoptCachedFrame(VideoRenderPacket& packet, int frame, double time) noexcept;
 	/// Align the provider's current-frame context with a frame presented from an
 	/// external cache, without requesting another render.
 	void SetCurrentFrameContext(int frame, double time) throw();

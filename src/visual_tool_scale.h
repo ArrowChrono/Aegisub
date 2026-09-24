@@ -50,6 +50,8 @@ class VisualToolScale final : public VisualTool<VisualDraggableFeature> {
 	void Draw() override;
 	bool SupportsOverlayContext() const override { return true; }
 	void DrawOverlay(VideoOverlayDrawContext &context) override;
+	std::shared_ptr<const VisualToolRenderSnapshot> CaptureRenderSnapshot(
+		std::shared_ptr<const VisualToolRenderContext> const& context) const override;
 	void OnSubTool(wxCommandEvent &event);
 	void UpdateToolbarState();
 public:

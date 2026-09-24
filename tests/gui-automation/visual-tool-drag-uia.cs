@@ -19,7 +19,8 @@ using Aegisub.GuiAutomation.Driver;
 
 try
 {
-    return Run(DriverOptions.Parse(args));
+    var options = DriverOptions.Parse(args);
+    return options.InputContract == "none" ? Run(options) : RunInputContract(options);
 }
 catch (Exception error)
 {
@@ -328,6 +329,405 @@ static int Run(DriverOptions options)
     }
 }
 
+static int RunInputContract(DriverOptions options)
+{
+    var rapid = options.InputContract.StartsWith("rapid-", StringComparison.Ordinal);
+    var scenario = InputContractCase.Get(rapid ? options.InputContract[6..] : options.InputContract);
+    if (rapid && (scenario.Hold || scenario.Freehand || scenario.Name == "vector-node"))
+        throw new ArgumentException("Rapid regrab requires a paired-snapshot feature tool");
+    PrepareArtifactsDirectory(options.Artifacts);
+    var fixturePath = Path.Combine(options.Artifacts, "scenario.ass");
+    var profilePath = Path.Combine(options.Artifacts, "profile");
+    var hostArtifactsPath = Path.Combine(options.Artifacts, "host");
+    var resultPath = Path.Combine(options.Artifacts, "input-contract-result.json");
+    var fixture = scenario.BuildFixture();
+    if (rapid)
+        fixture = fixture.Replace(@"\bord2.5\shad1.25", @"\frx63\fry86\fs64\blur6\bord6\shad3", StringComparison.Ordinal);
+    File.WriteAllText(fixturePath, fixture, new UTF8Encoding(false));
+    WriteProfileConfig(profilePath, options.SubtitleProvider);
+    Directory.CreateDirectory(hostArtifactsPath);
+    Process? process = null;
+    var results = new List<string>();
+    var rapidChecks = new List<(string Expected, string Actual, string Label)>();
+    var rapidAttempted = false;
+    var rapidWitnessChecked = false;
+    var totalTimeout = TimeSpan.FromSeconds(Math.Max(120, options.TimeoutSeconds * 6));
+    using var watchdog = new Timer(_ =>
+    {
+        File.WriteAllText(resultPath, JsonSerializer.Serialize(new
+        {
+            scenario = scenario.Name, passed = false, error = "total-timeout",
+            total_timeout_seconds = totalTimeout.TotalSeconds,
+        }));
+        try { process?.Kill(entireProcessTree: true); }
+        finally { Environment.Exit(124); }
+    }, null, totalTimeout, Timeout.InfiniteTimeSpan);
+    try
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = options.Executable,
+            WorkingDirectory = Environment.CurrentDirectory,
+            UseShellExecute = false,
+            WindowStyle = ProcessWindowStyle.Minimized,
+        };
+        startInfo.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
+        startInfo.Environment["AEGISUB_PERF_TRACE"] = "video,visual-tool-input-contract";
+        foreach (var value in new[] { "--gui-test", "host", "--profile-dir", profilePath,
+            "--artifacts", hostArtifactsPath, "--open", fixturePath, "--open", options.Video })
+            AddArgument(startInfo, value);
+        process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start Aegisub");
+        AutomationProtocol.WaitForReadyArtifact(Path.Combine(hostArtifactsPath, "ready.json"),
+            process, TimeSpan.FromSeconds(options.TimeoutSeconds));
+        var mainWindow = UiaDriver.WaitForMainWindow(process, TimeSpan.FromSeconds(options.TimeoutSeconds));
+        var mainHwnd = new nint(mainWindow.Current.NativeWindowHandle);
+        ShowWindow(mainHwnd, NativeConstants.ShowNoActivate);
+        if (!SetWindowPos(mainHwnd, 0, 40, 40, options.WindowWidth, options.WindowHeight,
+                SetWindowPosFlags.NoActivate | SetWindowPosFlags.ShowWindow))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "SetWindowPos failed");
+        Thread.Sleep(rapid ? Math.Max(2500, options.SettleMilliseconds) : options.SettleMilliseconds);
+        SelectVisibleDialogueLines(mainWindow);
+        SelectVisualTool(mainWindow, scenario.Tooltip);
+        Thread.Sleep(250);
+        var canvas = WaitForVideoCanvas(process, options.TimeoutSeconds);
+        if (!GetClientRect(canvas, out var rect) || rect.Width < 320 || rect.Height < 240
+            || Math.Abs(rect.Width / (double)rect.Height - 640.0 / 480.0) > 0.005)
+            throw new InvalidOperationException("Input contracts require a 4:3 canvas of at least 320x240");
+        PointI Pixel(PointI point) => new(
+            (int)Math.Round(point.X * rect.Width / 640.0),
+            (int)Math.Round(point.Y * rect.Height / 480.0));
+        var start = Pixel(scenario.Start);
+        var middle = new PointI(start.X + 23, start.Y - 11);
+        var terminal = new PointI(start.X + 47, start.Y + 18);
+        EnsureSaved(mainWindow, process, fixturePath, options.TimeoutSeconds);
+        var initial = ContractDocument(fixturePath);
+        File.Copy(fixturePath, Path.Combine(options.Artifacts, "initial.ass"));
+        if (rapid)
+        {
+            ScreenCapture.SaveWindowPng(mainWindow, Path.Combine(options.Artifacts, "rapid-initial-window.png"));
+            Console.WriteLine("visual_tool_input_contract.initial_capture=setup_diagnostic_only_not_pixel_coherence_evidence");
+        }
+
+        string Save(string name)
+        {
+            SendWindowMessage(canvas, WindowMessage.Null, 0, 0);
+            EnsureSaved(mainWindow, process, fixturePath, options.TimeoutSeconds);
+            File.Copy(fixturePath, Path.Combine(options.Artifacts, name + ".ass"));
+            return ContractDocument(fixturePath);
+        }
+        void Restore(string name)
+        {
+            InvokeUndo(mainWindow, process, options.TimeoutSeconds);
+            var restored = Save(name + "-undo");
+            AssertContractEqual(initial, restored, name + ": one Undo restores original document");
+            Thread.Sleep(250);
+        }
+        void Gesture(PointI end, bool endpointMotion, bool shift)
+        {
+            var modifiers = shift ? NativeConstants.MouseKeyShift : 0;
+            SendMouseToWindow(canvas, WindowMessage.MouseMove, start, modifiers);
+            SendMouseToWindow(canvas, WindowMessage.LeftButtonDown, start,
+                NativeConstants.MouseKeyLeftButton | modifiers);
+            WaitForCapture(canvas, true, process, options.TimeoutSeconds);
+            SendMouseToWindow(canvas, WindowMessage.MouseMove, middle,
+                NativeConstants.MouseKeyLeftButton | modifiers);
+            if (endpointMotion)
+                SendMouseToWindow(canvas, WindowMessage.MouseMove, end,
+                    NativeConstants.MouseKeyLeftButton | modifiers);
+            SendMouseToWindow(canvas, WindowMessage.LeftButtonUp, end, modifiers);
+            WaitForCapture(canvas, false, process, options.TimeoutSeconds);
+        }
+
+        if (rapid)
+        {
+            var firstEnd = new PointI(start.X + 81, start.Y + 35);
+            var secondEnd = new PointI(start.X + 13, start.Y - 6);
+            void CompletedDrag(PointI from, PointI to)
+            {
+                SendMouseToWindow(canvas, WindowMessage.MouseMove, from, 0);
+                SendMouseToWindow(canvas, WindowMessage.LeftButtonDown, from, NativeConstants.MouseKeyLeftButton);
+                WaitForCapture(canvas, true, process, options.TimeoutSeconds);
+                SendMouseToWindow(canvas, WindowMessage.MouseMove, to, NativeConstants.MouseKeyLeftButton);
+                SendMouseToWindow(canvas, WindowMessage.LeftButtonUp, to, 0);
+                WaitForCapture(canvas, false, process, options.TimeoutSeconds);
+            }
+            CompletedDrag(start, firstEnd);
+            var firstEdit = Save("sequential-first");
+            AssertContractUnrelated(initial, firstEdit, scenario.TagPattern);
+            if (firstEdit == initial)
+                throw new InvalidOperationException("Reference first drag did not change the intended feature");
+            Thread.Sleep(2500);
+            CompletedDrag(firstEnd, new PointI(firstEnd.X + secondEnd.X - start.X,
+                firstEnd.Y + secondEnd.Y - start.Y));
+            var secondEdit = Save("sequential-second");
+            if (secondEdit == firstEdit)
+                throw new InvalidOperationException("Reference second drag did not accumulate a delta");
+            InvokeUndo(mainWindow, process, options.TimeoutSeconds);
+            AssertContractEqual(firstEdit, Save("sequential-undo-second"), "Reference second Undo boundary");
+            Restore("sequential-first");
+            Thread.Sleep(2500);
+
+            rapidAttempted = true;
+            SendMouseToWindow(canvas, WindowMessage.MouseMove, start, 0);
+            SendMouseToWindow(canvas, WindowMessage.LeftButtonDown, start, NativeConstants.MouseKeyLeftButton);
+            SendMouseToWindow(canvas, WindowMessage.MouseMove, firstEnd, NativeConstants.MouseKeyLeftButton);
+            SendMouseToWindow(canvas, WindowMessage.LeftButtonUp, firstEnd, 0);
+            SendMouseToWindow(canvas, WindowMessage.LeftButtonDown, start, NativeConstants.MouseKeyLeftButton);
+            SendMouseToWindow(canvas, WindowMessage.MouseMove, secondEnd, NativeConstants.MouseKeyLeftButton);
+            SendMouseToWindow(canvas, WindowMessage.LeftButtonUp, secondEnd, 0);
+            WaitForCapture(canvas, false, process, options.TimeoutSeconds);
+            rapidChecks.Add((secondEdit, Save("rapid-second"), "Displayed feature regrab accumulates against latest model"));
+            InvokeUndo(mainWindow, process, options.TimeoutSeconds);
+            var afterFirstUndo = Save("rapid-undo-second");
+            rapidChecks.Add((firstEdit, afterFirstUndo, "Rapid second drag has its own Undo boundary"));
+            if (afterFirstUndo != initial)
+            {
+                InvokeUndo(mainWindow, process, options.TimeoutSeconds);
+                rapidChecks.Add((initial, Save("rapid-first-undo"), "Rapid first drag has its own Undo boundary"));
+            }
+        }
+        else if (scenario.Freehand)
+        {
+            SelectVisualTool(mainWindow, scenario.Submode!);
+            var points = new[] { start, new PointI(start.X + 75, start.Y + 8),
+                new PointI(start.X + 80, start.Y + 84), new PointI(start.X + 160, start.Y + 70) };
+            var end = new PointI(points[^1].X + 11, points[^1].Y - 7);
+            SendMouseToWindow(canvas, WindowMessage.MouseMove, start, 0);
+            SendMouseToWindow(canvas, WindowMessage.LeftButtonDown, start, NativeConstants.MouseKeyLeftButton);
+            WaitForCapture(canvas, true, process, options.TimeoutSeconds);
+            foreach (var point in points.Skip(1))
+                SendMouseToWindow(canvas, WindowMessage.MouseMove, point, NativeConstants.MouseKeyLeftButton);
+            SendMouseToWindow(canvas, WindowMessage.LeftButtonUp, end, 0);
+            WaitForCapture(canvas, false, process, options.TimeoutSeconds);
+            var actual = Save("freehand-short-release-tail");
+            AssertContractUnrelated(initial, actual, scenario.TagPattern);
+            AssertFreehandEndpoint(actual, end.X * 640.0 / rect.Width, end.Y * 480.0 / rect.Height);
+            Restore("freehand-short-release-tail");
+            results.Add("FreehandShortReleaseTailPreservesEndpointAndUndo");
+        }
+        else
+        {
+            foreach (var variant in scenario.Hold
+                ? new[] { "endpoint" }
+                : new[] { "endpoint", "return-to-start", "shift-endpoint" })
+            {
+                var end = variant == "return-to-start" ? start : terminal;
+                var shift = variant == "shift-endpoint";
+                Gesture(end, endpointMotion: true, shift);
+                var reference = Save(variant + "-reference");
+                AssertContractUnrelated(initial, reference, scenario.TagPattern);
+                if (variant != "return-to-start" && reference == initial)
+                    throw new InvalidOperationException(variant + ": reference did not edit the intended subtitle");
+                Restore(variant + "-reference");
+                Gesture(end, endpointMotion: false, shift);
+                var actual = Save(variant + "-release-gap");
+                AssertContractEqual(reference, actual, variant + ": distinct release equals explicit terminal motion");
+                Restore(variant + "-release-gap");
+                results.Add(variant switch
+                {
+                    "endpoint" => "DistinctReleaseEqualsTerminalMotionAndUndo",
+                    "return-to-start" => "ReleaseBackToStartEqualsTerminalMotionAndUndo",
+                    _ => "ShiftReleaseEqualsTerminalMotionAndUndo",
+                });
+            }
+            if (!scenario.Hold)
+            {
+                SendMouseToWindow(canvas, WindowMessage.MouseMove, start, 0);
+                SendMouseToWindow(canvas, WindowMessage.LeftButtonDown, start, NativeConstants.MouseKeyLeftButton);
+                WaitForCapture(canvas, true, process, options.TimeoutSeconds);
+                SendMouseToWindow(canvas, WindowMessage.LeftButtonUp, start, 0);
+                WaitForCapture(canvas, false, process, options.TimeoutSeconds);
+                AssertContractEqual(initial, Save("no-motion-click"), "No-motion feature click preserves ASS exactly");
+                results.Add("NoMotionFeatureClickPreservesDocument");
+            }
+        }
+        RequestCleanClose(process, mainHwnd, options.TimeoutSeconds);
+        if (rapid)
+        {
+            rapidWitnessChecked = true;
+            AssertRapidRegrabWitness(profilePath, options.Artifacts);
+            foreach (var check in rapidChecks)
+                AssertContractEqual(check.Expected, check.Actual, check.Label);
+            if (rapidChecks.Count != 3)
+                throw new InvalidOperationException("Rapid regrab did not produce two independent Undo boundaries");
+            results.Add("DisplayedFeatureRapidRegrabAccumulatesLatestModelWithTwoUndos");
+        }
+        var provider = ReadSelectedSubtitleProvider(profilePath);
+        if (!string.Equals(provider, options.SubtitleProvider, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Requested provider {options.SubtitleProvider}, observed {provider}");
+        File.WriteAllText(resultPath, JsonSerializer.Serialize(new
+        {
+            version = 1, scenario = scenario.Name, passed = true, tests = results,
+            subtitle_provider = provider, canvas = new { width = rect.Width, height = rect.Height },
+            total_timeout_seconds = totalTimeout.TotalSeconds,
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine($"visual_tool_input_contract.scenario={scenario.Name}");
+        Console.WriteLine($"visual_tool_input_contract.passed={string.Join(',', results)}");
+        return 0;
+    }
+    catch (Exception error)
+    {
+        if (process is not null && !process.HasExited && process.MainWindowHandle != 0)
+        {
+            try { RequestCleanClose(process, process.MainWindowHandle, 3); }
+            catch (Exception closeError) { Console.Error.WriteLine("visual_tool_input_contract.failure_close=" + closeError.Message); }
+        }
+        var reportedError = error;
+        if (rapid && rapidAttempted && !rapidWitnessChecked && process is { HasExited: true })
+        {
+            try { AssertRapidRegrabWitness(profilePath, options.Artifacts); }
+            catch (Exception witnessError) { reportedError = witnessError; }
+        }
+        File.WriteAllText(resultPath, JsonSerializer.Serialize(new
+        {
+            version = 1, scenario = scenario.Name, passed = false, completed_tests = results,
+            error = reportedError.Message,
+            failure_kind = reportedError.Message.StartsWith("Rapid regrab prerequisite:", StringComparison.Ordinal)
+                ? "prerequisite-inconclusive" : "contract-or-harness-failure",
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        if (!ReferenceEquals(reportedError, error))
+            throw new InvalidOperationException(reportedError.Message, error);
+        throw;
+    }
+    finally
+    {
+        if (process is not null)
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                if (!process.WaitForExit(5000))
+                    Console.Error.WriteLine("visual_tool_input_contract.cleanup_timeout=true");
+            }
+            process.Dispose();
+        }
+    }
+}
+
+static string ContractDocument(string path)
+{
+    var lines = File.ReadAllLines(path);
+    var start = Array.FindIndex(lines, line => line == "[V4+ Styles]");
+    if (start < 0)
+        throw new InvalidOperationException("Saved ASS lacks its style/event document");
+    return string.Join('\n', lines.Skip(start));
+}
+
+static void AssertContractEqual(string expected, string actual, string label)
+{
+    if (expected == actual)
+        return;
+    var referenceLines = expected.Split('\n');
+    var actualLines = actual.Split('\n');
+    var line = Enumerable.Range(0, Math.Min(referenceLines.Length, actualLines.Length))
+        .FirstOrDefault(index => referenceLines[index] != actualLines[index], -1);
+    throw new InvalidOperationException($"{label}: document differs at line {line + 1}" +
+        (line < 0 ? " (different line count)" : $"; expected [{referenceLines[line]}], actual [{actualLines[line]}]"));
+}
+
+static void AssertContractUnrelated(string initial, string actual, string tagPattern)
+{
+    var expectedTagCount = 0;
+    string Neutral(string document)
+    {
+        var lines = document.Split('\n');
+        var first = Array.FindIndex(lines, line => line.StartsWith("Dialogue:", StringComparison.Ordinal));
+        if (first < 0)
+            throw new InvalidOperationException("Input fixture has no dialogue");
+        var count = Regex.Matches(lines[first], tagPattern, RegexOptions.CultureInvariant).Count;
+        if (count == 0 || (expectedTagCount != 0 && count != expectedTagCount))
+            throw new InvalidOperationException("Edited tag was removed or duplicated");
+        expectedTagCount = count;
+        lines[first] = Regex.Replace(lines[first], tagPattern, "", RegexOptions.CultureInvariant);
+        return string.Join('\n', lines);
+    }
+    AssertContractEqual(Neutral(initial), Neutral(actual), "Unrelated tags, styles, and dialogues are preserved");
+}
+
+static void AssertFreehandEndpoint(string document, double x, double y)
+{
+    var primary = document.Split('\n').First(line => line.StartsWith("Dialogue:", StringComparison.Ordinal));
+    var clip = Regex.Match(primary, @"\\i?clip\((?<path>[^)]*)\)", RegexOptions.CultureInvariant);
+    var numbers = Regex.Matches(clip.Groups["path"].Value, @"-?\d+(?:\.\d+)?", RegexOptions.CultureInvariant)
+        .Select(match => double.Parse(match.Value, CultureInfo.InvariantCulture)).ToArray();
+    if (!clip.Success || numbers.Length < 8 || Math.Abs(numbers[^2] - x) > 1.0 || Math.Abs(numbers[^1] - y) > 1.0)
+        throw new InvalidOperationException($"Freehand release endpoint was omitted: expected ({x:F2},{y:F2}), clip [{clip.Value}]");
+}
+
+static void AssertRapidRegrabWitness(string profilePath, string artifacts)
+{
+    var evidence = new Dictionary<string, object?> { ["passed"] = false };
+    void Publish() => File.WriteAllText(Path.Combine(artifacts, "rapid-witness.json"),
+        JsonSerializer.Serialize(evidence, new JsonSerializerOptions { WriteIndented = true }));
+    void Require(bool condition, string message)
+    {
+        if (condition) return;
+        evidence["error"] = message;
+        Publish();
+        throw new InvalidOperationException("Rapid regrab prerequisite: " + message);
+    }
+    var traces = Directory.GetFiles(Path.Combine(profilePath, "user", "perf-sessions"),
+        "trace.ndjson", SearchOption.AllDirectories);
+    Require(traces.Length == 1, $"expected exactly one trace, found {traces.Length}");
+    var entries = File.ReadLines(traces[0]).Select(line =>
+    {
+        using var document = JsonDocument.Parse(line);
+        var root = document.RootElement;
+        var payload = root.GetProperty("payload");
+        return new RapidTraceEntry
+        {
+            time = root.GetProperty("t_monotonic_ns").GetInt64(),
+            phase = payload.TryGetProperty("phase", out var phase) ? phase.GetString() : null,
+            stage = payload.TryGetProperty("stage", out var stage) ? stage.GetString() : null,
+            interaction = payload.TryGetProperty("interaction_id", out var interaction) ? interaction.GetUInt64() : 0UL,
+            delivery = payload.TryGetProperty("delivery_class", out var delivery) ? delivery.GetInt32() : -1,
+            provider = payload.TryGetProperty("provider_version", out var provider) ? provider.GetUInt64() : 0UL,
+            content = payload.TryGetProperty("content_version", out var content) ? content.GetUInt64() : 0UL,
+            request = payload.TryGetProperty("request_version", out var request) ? request.GetUInt64() : 0UL,
+        };
+    }).ToArray();
+    var downs = entries.Where(entry => entry.phase == "visual_tool.input.down").ToArray();
+    var ups = entries.Where(entry => entry.phase == "visual_tool.input.up").ToArray();
+    evidence["input_down_ns"] = downs.Select(entry => entry.time).ToArray();
+    evidence["input_up_ns"] = ups.Select(entry => entry.time).ToArray();
+    evidence["interaction_begins"] = entries.Count(entry => entry.phase == "visual_tool.interaction_begin");
+    Require(downs.Length == 4 && ups.Length == 4,
+        $"expected two reference and two rapid input gestures, got {downs.Length} downs/{ups.Length} ups");
+    Require(Enumerable.Range(0, 4).All(i => downs[i].time < ups[i].time && (i == 3 || ups[i].time < downs[i + 1].time)),
+        "input gestures were not ordered down/up pairs");
+
+    bool WasPresentedBefore(RapidTraceEntry submitted, long before) => entries.Any(entry =>
+        entry.stage == "display_present" && entry.time >= submitted.time && entry.time < before
+        && entry.interaction == submitted.interaction && entry.delivery == submitted.delivery
+        && entry.provider == submitted.provider && entry.content == submitted.content && entry.request == submitted.request);
+
+    var initialLoad = entries.LastOrDefault(entry => entry.stage == "worker_take" && entry.interaction == 0 && entry.time < downs[0].time);
+    Require(initialLoad is not null, "initial subtitle load has no trace witness");
+    Require(WasPresentedBefore(initialLoad!, downs[0].time), "initial subtitle picture was not presented before the reference press");
+    var referenceFinal = entries.SingleOrDefault(entry => entry.stage == "submit_update" && entry.delivery == 2
+        && entry.interaction != 0 && entry.time > downs[0].time && entry.time < downs[1].time);
+    Require(referenceFinal is not null, "first sequential reference gesture lacks its unique Final submission");
+    evidence["reference_final"] = referenceFinal;
+    Require(WasPresentedBefore(referenceFinal!, downs[1].time), "first sequential Final was not presented before the second reference press");
+    var restoredLoad = entries.LastOrDefault(entry => entry.stage == "submit_load" && entry.time > ups[1].time && entry.time < downs[2].time);
+    Require(restoredLoad is not null, "restored original subtitles lack a load witness before rapid input");
+    var restoredRender = entries.LastOrDefault(entry => entry.stage == "worker_take" && entry.interaction == 0
+        && entry.time >= restoredLoad!.time && entry.time < downs[2].time
+        && entry.provider == restoredLoad.provider && entry.content == restoredLoad.content);
+    Require(restoredRender is not null && WasPresentedBefore(restoredRender, downs[2].time),
+        "restored original picture was not presented before rapid input");
+    var rapidFinal = entries.SingleOrDefault(entry => entry.stage == "submit_update" && entry.delivery == 2
+        && entry.interaction != 0 && entry.time > downs[2].time && entry.time < downs[3].time);
+    Require(rapidFinal is not null, "first rapid gesture lacks its unique Final submission before the fourth input down");
+    evidence["rapid_final"] = rapidFinal;
+    Require(!WasPresentedBefore(rapidFinal!, downs[3].time), "first rapid Final was already presented before the fourth input down");
+    Require(!entries.Any(entry => entry.stage == "display_present" && entry.interaction == rapidFinal!.interaction
+        && entry.time > downs[2].time && entry.time < downs[3].time),
+        "a first rapid Intermediate already moved the displayed feature before the fourth input down");
+    evidence["passed"] = true;
+    Publish();
+    Console.WriteLine($"visual_tool_input_contract.rapid_witness=prior_interaction_{rapidFinal!.interaction}_not_presented_at_fourth_input_down");
+}
 static void PrepareArtifactsDirectory(string artifacts)
 {
     var allowedRoot = Path.GetFullPath(
@@ -545,7 +945,10 @@ static int ConfirmMultiSelection(AutomationElement mainWindow, Process process, 
         $"Multi-selection was not confirmed at {stage}: expected '2 lines selected'; status={status}");
 }
 
-static void SelectDragTool(AutomationElement mainWindow)
+static void SelectDragTool(AutomationElement mainWindow) =>
+    SelectVisualTool(mainWindow, "Drag subtitles");
+
+static void SelectVisualTool(AutomationElement mainWindow, string tooltip)
 {
     var descendants = mainWindow.FindAll(TreeScope.Descendants, Condition.TrueCondition);
     var candidates = new List<string>();
@@ -554,8 +957,7 @@ static void SelectDragTool(AutomationElement mainWindow)
         try
         {
             var name = element.Current.Name ?? string.Empty;
-            if (!name.Contains("Drag subtitles", StringComparison.OrdinalIgnoreCase)
-                && !name.EndsWith("(S)", StringComparison.OrdinalIgnoreCase))
+            if (!name.Contains(tooltip, StringComparison.OrdinalIgnoreCase))
                 continue;
             var patterns = element.GetSupportedPatterns()
                 .Select(pattern => Automation.PatternName(pattern) ?? pattern.Id.ToString(CultureInfo.InvariantCulture))
@@ -569,7 +971,7 @@ static void SelectDragTool(AutomationElement mainWindow)
                 var selection = (SelectionItemPattern)selectionPattern;
                 selection.Select();
                 if (!selection.Current.IsSelected)
-                    throw new InvalidOperationException("Drag subtitles toolbar item did not become selected");
+                    throw new InvalidOperationException($"'{tooltip}' toolbar item did not become selected");
                 return;
             }
             if (element.TryGetCurrentPattern(TogglePattern.Pattern, out var togglePattern))
@@ -585,7 +987,7 @@ static void SelectDragTool(AutomationElement mainWindow)
                         TimeSpan.FromSeconds(5));
                 }
                 if (state != ToggleState.On)
-                    throw new InvalidOperationException("Drag subtitles toolbar item did not toggle on");
+                    throw new InvalidOperationException($"'{tooltip}' toolbar item did not toggle on");
                 return;
             }
             if (element.TryGetCurrentPattern(InvokePattern.Pattern, out var invokePattern))
@@ -601,8 +1003,8 @@ static void SelectDragTool(AutomationElement mainWindow)
     }
     throw new InvalidOperationException(
         candidates.Count == 0
-            ? "Drag subtitles toolbar item was not found"
-            : $"Drag subtitles toolbar item exposes no usable UIA pattern: {string.Join("; ", candidates)}");
+            ? $"'{tooltip}' toolbar item was not found"
+            : $"'{tooltip}' toolbar item exposes no usable UIA pattern: {string.Join("; ", candidates)}");
 }
 
 static IReadOnlyList<PointI> BuildMotionPath(
@@ -771,12 +1173,12 @@ static void WaitForCapture(
     var deadline = Deadline(timeoutSeconds);
     while (Stopwatch.GetTimestamp() < deadline)
     {
-        ThrowIfProcessFailed(process);
         var info = GuiThreadInfo.Create();
         if (!GetGUIThreadInfo(threadId, ref info))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "GetGUIThreadInfo failed");
         if (captured ? info.Capture == videoCanvas : info.Capture == 0)
             return;
+        ThrowIfProcessFailed(process);
         Thread.Sleep(5);
     }
     throw new TimeoutException(captured
@@ -959,7 +1361,8 @@ sealed record DriverOptions(
     int WindowWidth,
     int WindowHeight,
     int DeltaX,
-    int DeltaY)
+    int DeltaY,
+    string InputContract)
 {
     public static DriverOptions Parse(string[] args)
     {
@@ -984,6 +1387,7 @@ sealed record DriverOptions(
         var height = 900;
         var deltaX = 48;
         var deltaY = -24;
+        var inputContract = "none";
 
         for (var index = 0; index < args.Length; ++index)
         {
@@ -1005,6 +1409,7 @@ sealed record DriverOptions(
                 case "--exe": executable = Value(); break;
                 case "--video": video = Value(); break;
                 case "--artifacts": artifacts = Value(); break;
+                case "--input-contract": inputContract = Value(); break;
                 case "--input-mode": inputMode = Choice(Value(), option, "throughput", "paced-hold", "double-click"); break;
                 case "--size": size = Choice(Value(), option, "small", "large"); break;
                 case "--selection": selection = Choice(Value(), option, "single", "multi"); break;
@@ -1072,7 +1477,8 @@ sealed record DriverOptions(
             width,
             height,
             deltaX,
-            deltaY);
+            deltaY,
+            inputContract);
     }
 
     private static string Choice(string value, string option, params string[] choices) =>
@@ -1096,7 +1502,9 @@ sealed record DriverOptions(
 
     private static void PrintHelp()
     {
-        Console.WriteLine("Legacy visual-tool drag GUI benchmark");
+        Console.WriteLine("Legacy visual-tool drag GUI benchmark and native input contracts");
+        Console.WriteLine("  [--input-contract " + string.Join("|", InputContractCase.Names) + "]");
+        Console.WriteLine("  Prefix paired feature contract names with rapid- to test regrab before presentation.");
         Console.WriteLine("  --exe PATH --video PATH --artifacts PATH");
         Console.WriteLine("  [--input-mode throughput|paced-hold|double-click] [--hold-ms N]");
         Console.WriteLine("  [--size small|large] [--selection single|multi] [--trace off|on]");
@@ -1109,6 +1517,64 @@ sealed record DriverOptions(
         Console.WriteLine("  Synthetic PostMessage input does not hold the OS left mouse button down.");
         Console.WriteLine("  Real/system mouse events can interrupt capture and fail a run.");
         Console.WriteLine("  Early capture loss alone does not establish a product regression.");
+    }
+}
+
+sealed record RapidTraceEntry
+{
+    public long time { get; init; }
+    public string? phase { get; init; }
+    public string? stage { get; init; }
+    public ulong interaction { get; init; }
+    public int delivery { get; init; }
+    public ulong provider { get; init; }
+    public ulong content { get; init; }
+    public ulong request { get; init; }
+}
+sealed record InputContractCase(
+    string Name, string Tooltip, string Tags, PointI Start, string TagPattern,
+    bool Hold = false, bool Freehand = false, string? Submode = null)
+{
+    private const string Drag = "Drag subtitles";
+    private const string RotateZ = "Rotate subtitles on their Z axis";
+    private const string RotateXY = "Rotate subtitles on their X and Y axes";
+    private const string Clip = "Clip subtitles to a rectangle";
+    private const string Vector = "Clip subtitles to a vectorial area";
+    private const string Position = @"\\pos\([^)]*\)";
+    private const string Move = @"\\move\([^)]*\)";
+    private const string Origin = @"\\org\([^)]*\)";
+    private const string ClipTag = @"\\i?clip\([^)]*\)";
+    private static readonly InputContractCase[] Cases =
+    [
+        new("drag-pos", Drag, @"\pos(160,120)", new(160, 120), Position),
+        new("drag-move-start", Drag, @"\move(160,120,420,320,0,8000)", new(160, 120), Move),
+        new("drag-move-end", Drag, @"\move(160,120,420,320,0,8000)", new(420, 320), Move),
+        new("drag-org", Drag, @"\pos(280,230)\org(160,120)", new(160, 120), Origin),
+        new("rotate-z-origin", RotateZ, @"\pos(280,230)\org(160,120)", new(160, 120), Origin),
+        new("rotate-xy-origin", RotateXY, @"\pos(280,230)\org(160,120)", new(160, 120), Origin),
+        new("rect-corner", Clip, @"\pos(280,230)\iclip(160,120,460,350)", new(160, 120), ClipTag),
+        new("vector-node", Vector, @"\pos(280,230)\iclip(m 160 120 l 430 110 b 470 150 470 300 410 340 l 120 310)", new(160, 120), ClipTag),
+        new("hold-rotate-z", RotateZ, @"\pos(280,230)\org(280,230)\frz17", new(390, 310), @"\\frz-?[\d.]+", Hold: true),
+        new("hold-rotate-xy", RotateXY, @"\pos(280,230)\org(280,230)\frx10\fry-8", new(390, 310), @"\\fr[xy]-?[\d.]+", Hold: true),
+        new("hold-scale", "Scale subtitles on X and Y axes", @"\pos(280,230)\fscx110\fscy95", new(390, 310), @"\\fsc[xy]-?[\d.]+", Hold: true),
+        new("hold-rect", Clip, @"\pos(280,230)\clip(280,200,500,380)", new(100, 80), ClipTag, Hold: true),
+        new("freehand", Vector, @"\pos(280,230)\iclip(m 160 120 l 430 110 410 340 120 310)", new(80, 90), ClipTag,
+            Freehand: true, Submode: "Draws a freehand shape"),
+        new("freehand-smooth", Vector, @"\pos(280,230)\iclip(m 160 120 l 430 110 410 340 120 310)", new(80, 90), ClipTag,
+            Freehand: true, Submode: "Draws a smoothed freehand shape"),
+    ];
+    public static IEnumerable<string> Names => Cases.Select(value => value.Name);
+    public static InputContractCase Get(string name) => Cases.SingleOrDefault(value => value.Name == name)
+        ?? throw new ArgumentException("--input-contract must be one of: " + string.Join(", ", Names));
+
+    public string BuildFixture()
+    {
+        var lines = Fixture.Build(48, false).Split('\n');
+        var first = Array.FindIndex(lines, line => line.StartsWith("Dialogue:", StringComparison.Ordinal));
+        lines[first] = @"Dialogue: 3,0:00:00.00,0:00:10.00,Default,input-contract,12,23,34,,{" + Tags
+            + @"\bord2.5\shad1.25\1c&H74B2E8&\t(200,1800,\blur1.2)}Primary {\i1}曲線\Ncontrol {\i0}line";
+        lines[first + 1] = @"Dialogue: 1,1:00:00.00,1:00:10.00,Default,unrelated,31,42,53,retained,{\pos(410,330)\frz23\clip(20,30,590,440)\1c&HABCDEF&}Unrelated {\b1}preserved{\b0}";
+        return string.Join('\n', lines);
     }
 }
 

@@ -35,17 +35,35 @@
 #include "video_display.h"
 #include "video_overlay_draw_context.h"
 #include "video_overlay_helpers.h"
+#include "visual_tool_drag_snapshot.h"
 
 #include <libaegisub/format.h>
 #include <libaegisub/make_unique.h>
 
 #include <algorithm>
+#include <optional>
 #include <unordered_set>
 #include <wx/toolbar.h>
 
 static const DraggableFeatureType DRAG_ORIGIN = DRAG_BIG_TRIANGLE;
 static const DraggableFeatureType DRAG_START = DRAG_BIG_SQUARE;
 static const DraggableFeatureType DRAG_END = DRAG_BIG_CIRCLE;
+
+std::shared_ptr<const VisualToolRenderSnapshot> VisualToolDrag::CaptureRenderSnapshot(
+	std::shared_ptr<const VisualToolRenderContext> const& context) const {
+	auto snapshot = std::make_shared<VisualToolDragSnapshot>(context);
+	snapshot->grid_colour = to_wx(line_color_secondary_opt->GetColor()).GetRGB();
+	snapshot->line_colour = to_wx(line_color_primary_opt->GetColor()).GetRGB();
+	auto const base_fill = to_wx(highlight_color_primary_opt->GetColor()).GetRGB();
+	auto const active_fill = to_wx(highlight_color_secondary_opt->GetColor()).GetRGB();
+	for (auto const& feature : features) {
+		auto const fill = &feature == active_feature                            ? active_fill
+						  : sel_features.count(const_cast<Feature *>(&feature)) ? snapshot->line_colour
+																				: base_fill;
+		snapshot->features.push_back({.type = feature.type, .pos = feature.pos, .parent = feature.parent ? std::optional<Vector2D>{feature.parent->pos} : std::nullopt, .fill_colour = fill, .line_id = feature.line->Id, .layer = feature.layer});
+	}
+	return snapshot;
+}
 
 VisualToolDrag::VisualToolDrag(VideoDisplay *parent, agi::Context *context)
 : VisualTool<VisualToolDragDraggableFeature>(parent, context)
@@ -131,6 +149,7 @@ void VisualToolDrag::OnLineChanged() {
 }
 
 void VisualToolDrag::OnFileChanged() {
+	parent->ResetToolPresentation();
 	/// @todo it should be possible to preserve the selection in some cases
 	features.clear();
 	sel_features.clear();
@@ -222,6 +241,7 @@ void VisualToolDrag::AddFeatures(std::vector<AssDialogue *> lines) {
 }
 
 void VisualToolDrag::OnSelectedSetChanged() {
+	parent->ResetToolPresentation();
 	auto core = c->GetCore();
 	auto const& new_sel_set = core.selectionController->GetSelectedSet();
 	perf_trace::VideoUiDurationScope trace(

@@ -3,6 +3,7 @@
 #include "../../src/source_frame.h"
 #include "../../src/video_display_layout.h"
 #include "../../src/video_display_frame_policy.h"
+#include "../../src/deadline_pacing_policy.h"
 #include "../../src/video_render_geometry.h"
 #include "../../src/video_frame.h"
 
@@ -208,4 +209,75 @@ TEST(video_display_frame_policy, inactive_attached_display_ignores_frame_ready) 
 	EXPECT_FALSE(ShouldIgnoreVideoDisplayFrameReady(false, true));
 	EXPECT_FALSE(ShouldIgnoreVideoDisplayFrameReady(true, false));
 	EXPECT_FALSE(ShouldIgnoreVideoDisplayFrameReady(true, true));
+}
+
+TEST(video_display_frame_policy, unchanged_motion_cannot_take_the_next_ready_picture_slot) {
+	using namespace std::chrono_literals;
+	auto const t0 = DeadlinePacingPolicy::TimePoint{};
+	for (auto offset : {-1us, 0us, 1us, 201us, 8000us, 16999us}) {
+		SCOPED_TRACE(offset.count());
+		DeadlinePacingPolicy gated(17ms);
+		gated.Begin(t0);
+		EXPECT_FALSE(gated.Request(t0 + 16ms,
+								   ShouldRenderVideoDisplayInteraction(true, true, false, false, false, false)));
+		EXPECT_FALSE(gated.HasPending());
+		auto const arrival = t0 + 17ms + offset;
+		if (offset >= 0us)
+			EXPECT_FALSE(gated.OnTimer(t0 + 17ms,
+									   ShouldRenderVideoDisplayInteraction(true, true, false, false, false, false)));
+		bool const emitted = gated.Request(arrival,
+										   ShouldRenderVideoDisplayInteraction(true, true, true, false, false, false));
+		EXPECT_EQ(offset >= 0us, emitted);
+		if (offset < 0us) {
+			ASSERT_TRUE(gated.NextDeadline());
+			EXPECT_EQ(t0 + 17ms, *gated.NextDeadline());
+			EXPECT_TRUE(gated.OnTimer(t0 + 17ms));
+		}
+	}
+
+	DeadlinePacingPolicy original(17ms);
+	original.Begin(t0);
+	ASSERT_FALSE(original.Request(t0 + 16ms));
+	ASSERT_TRUE(original.OnTimer(t0 + 17ms));
+	EXPECT_FALSE(original.Request(t0 + 17201us));
+	ASSERT_TRUE(original.NextDeadline());
+	EXPECT_EQ(t0 + 34ms, *original.NextDeadline());
+}
+
+TEST(video_display_frame_policy, visibility_feedback_and_live_tools_keep_their_display_budget) {
+	using namespace std::chrono_literals;
+	auto const t0 = DeadlinePacingPolicy::TimePoint{};
+	for (bool paired : {false, true}) {
+		SCOPED_TRACE(paired);
+		DeadlinePacingPolicy policy(17ms);
+		policy.Begin(t0);
+		ASSERT_FALSE(policy.Request(t0 + 1ms,
+									ShouldRenderVideoDisplayInteraction(paired, true, false, false, paired, false)));
+		ASSERT_TRUE(policy.NextDeadline());
+		EXPECT_EQ(t0 + 17ms, *policy.NextDeadline());
+		EXPECT_TRUE(policy.OnTimer(t0 + 17ms,
+								   ShouldRenderVideoDisplayInteraction(paired, true, false, false, paired, false)));
+		EXPECT_FALSE(policy.Request(t0 + 18ms));
+		ASSERT_TRUE(policy.NextDeadline());
+		EXPECT_EQ(t0 + 34ms, *policy.NextDeadline());
+	}
+}
+
+TEST(video_display_frame_policy, failed_draw_preserves_natural_retry_without_arming_a_loop) {
+	using namespace std::chrono_literals;
+	auto const t0 = DeadlinePacingPolicy::TimePoint{};
+	DeadlinePacingPolicy policy(17ms);
+	policy.Begin(t0);
+	bool const failed_draw = ShouldRenderVideoDisplayInteraction(true, false, false, false, false, false);
+	ASSERT_TRUE(failed_draw);
+	EXPECT_FALSE(policy.OnTimer(t0 + 17ms, failed_draw));
+	EXPECT_FALSE(policy.HasPending());
+	EXPECT_TRUE(policy.Request(t0 + 18ms, failed_draw));
+	EXPECT_FALSE(policy.NextDeadline());
+	EXPECT_FALSE(policy.OnTimer(t0 + 35ms, failed_draw));
+	EXPECT_FALSE(policy.Request(t0 + 36ms,
+								ShouldRenderVideoDisplayInteraction(true, true, false, false, false, false)));
+	EXPECT_FALSE(policy.NextDeadline());
+	EXPECT_TRUE(policy.Request(t0 + 37ms,
+							   ShouldRenderVideoDisplayInteraction(true, true, true, false, false, false)));
 }

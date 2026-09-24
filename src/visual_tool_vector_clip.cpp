@@ -587,7 +587,7 @@ void VisualToolVectorClip::UpdateHold() {
 		// See if distance is enough
 		Vector2D const& last = spline.back().EndPoint();
 		float len = (last - mouse_pos).SquareLen();
-		if ((mode == 6 && len >= 900) || (mode == 7 && len >= 3600)) {
+		if ((!holding && len > 0) || (mode == 6 && len >= 900) || (mode == 7 && len >= 3600)) {
 			spline.emplace_back(last, mouse_pos);
 			MakeFeature(spline.size() - 1);
 		}

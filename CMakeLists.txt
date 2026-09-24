@@ -1285,6 +1285,7 @@ add_executable(Aegisub WIN32
     src/video_renderer_opengl_tile.cpp
     src/video_slider.cpp
     src/visual_feature.cpp
+    src/visual_feature_overlay.cpp
     src/visual_guide_controller.cpp
     src/visual_guide_interaction.cpp
     src/visual_guide_model.cpp
@@ -1293,6 +1294,7 @@ add_executable(Aegisub WIN32
     src/visual_tool_clip.cpp
     src/visual_tool_cross.cpp
     src/visual_tool_drag.cpp
+    src/visual_tool_drag_snapshot.cpp
     src/visual_tool_measure.cpp
     src/visual_tool_motion_track.cpp
     src/visual_tool_rotatexy.cpp

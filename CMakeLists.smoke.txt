@@ -536,11 +536,17 @@ if(WIN32)
     add_executable(detached-visual-tools-smoke EXCLUDE_FROM_ALL
         tests/smoke/detached_visual_tools_smoke.cpp
         tests/smoke/perf_trace_video_stub.cpp
+        src/async_video_provider_host.cpp
+        src/async_video_trace.cpp
+        src/gl_text.cpp
         src/gl_wrap.cpp
+        src/video_overlay_draw_context_legacy_gl.cpp
         src/video_renderer_opengl.cpp
         src/video_renderer_opengl_tile.cpp
         src/vector2d.cpp
         src/visual_feature.cpp
+        src/visual_feature_overlay.cpp
+        src/visual_tool_drag_snapshot.cpp
     )
     target_compile_definitions(detached-visual-tools-smoke PRIVATE CMAKE_BUILD NOMINMAX WIN32_LEAN_AND_MEAN)
     if(MSVC)

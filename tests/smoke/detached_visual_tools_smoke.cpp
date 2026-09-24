@@ -9,15 +9,20 @@
 
 #include <libaegisub/exception.h>
 
+#include "../../src/async_video_provider_host.h"
 #include "../../src/ivideo_renderer.h"
 #include "../../src/gl_wrap.h"
+#include "../../src/gl_text.h"
 #include "../../src/legacy_gl_draw.h"
 #include "../../src/source_frame.h"
 #include "../../src/video_display_layout.h"
 #include "../../src/video_frame.h"
+#include "../../src/video_overlay_draw_context_legacy_gl.h"
 #include "../../src/video_renderer_error.h"
 #include "../../src/video_renderer_opengl.h"
 #include "../../src/visual_feature.h"
+#include "../../src/visual_tool_drag_snapshot.h"
+#include "../../src/visual_tool_presentation.h"
 
 #ifdef WITH_LIBPLACEBO
 #include "../../src/video_renderer_placebo_gl.h"
@@ -52,15 +57,29 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
+
+// The snapshot adapter requires a real OpenGLText object, but these marker
+// checks never measure or draw text. Keep its support linkage narrow.
+wxString to_wx(std::string const& text) {
+	return wxString::FromUTF8(text);
+}
+
+int SmallestPowerOf2(int value) {
+	return static_cast<int>(std::bit_ceil(static_cast<unsigned>(value)));
+}
 
 // vector2d.cpp references this formatting helper, but this smoke does not
 // exercise Vector2D's text formatting paths.
@@ -433,6 +452,285 @@ void SetupWindowRenderTarget(int width, int height) {
 	legacy_gl::ResetCompatibilityState();
 }
 
+void RequireSnapshotPixel(bool condition, std::string const& message) {
+	if (!condition)
+		throw std::runtime_error("drag snapshot pixels: " + message);
+}
+
+template <class Draw>
+std::vector<unsigned char> RenderDragTestPixels(HiddenGLWindow& window, int width, int height, Draw&& draw) {
+	window.MakeCurrent();
+	SetupWindowRenderTarget(width, height);
+	SetupOverlayProjection(width, height);
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glDisable(GL_DEPTH_TEST);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+	OpenGLWrapper gl;
+	draw(gl);
+	auto pixels = window.ReadBackRgbaTopLeft();
+	RequireSnapshotPixel(glGetError() == GL_NO_ERROR, "render/readback generated a GL error");
+	return pixels;
+}
+
+std::vector<unsigned char> RenderLegacyDragGlyph(HiddenGLWindow& window, int width, int height,
+												 DraggableFeatureType type, Vector2D position, wxColour const& line_colour, wxColour const& fill_colour) {
+	return RenderDragTestPixels(window, width, height, [&](OpenGLWrapper& gl) {
+		gl.SetLineColour(line_colour, 1.0f, 1);
+		gl.SetFillColour(fill_colour, 0.3f);
+		VisualDraggableFeature feature;
+		feature.type = type;
+		feature.pos = position;
+		feature.Draw(gl);
+	});
+}
+
+std::vector<unsigned char> RenderDragSnapshot(HiddenGLWindow& window, int width, int height,
+											  std::shared_ptr<const VisualToolRenderSnapshot> const& snapshot) {
+	RequireSnapshotPixel(snapshot != nullptr, "expected a selected snapshot");
+	return RenderDragTestPixels(window, width, height, [&](OpenGLWrapper& gl) {
+		auto deleter = std::make_shared<OpenGLTextTextureDeleter>();
+		OpenGLText text(deleter);
+		LegacyVideoOverlayDrawContext target(gl, text);
+		snapshot->Draw(target);
+	});
+}
+
+std::shared_ptr<const VisualToolDragSnapshot> MakeDragGlyphSnapshot(VisualToolPresentation const& presentation,
+																	DraggableFeatureType type, Vector2D position, wxColour const& line_colour, wxColour const& fill_colour) {
+	auto snapshot = std::make_shared<VisualToolDragSnapshot>(presentation.Context());
+	snapshot->grid_colour = line_colour.GetRGB();
+	snapshot->line_colour = line_colour.GetRGB();
+	snapshot->features.push_back({.type = type, .pos = position, .parent = std::nullopt, .fill_colour = fill_colour.GetRGB()});
+	return snapshot;
+}
+
+void RequireGlyphLocationAndColour(std::vector<unsigned char> const& pixels, int width, int height,
+								   Vector2D position, wxColour const& fill_colour, std::string const& name) {
+	RequireSnapshotPixel(pixels.size() == static_cast<size_t>(width) * height * 4, name + ": wrong raster dimensions");
+	int coloured = 0;
+	int green_outline = 0;
+	for (int y = 0; y < height; ++y) {
+		for (int x = 0; x < width; ++x) {
+			auto const index = static_cast<size_t>(y * width + x) * 4;
+			int const r = pixels[index], g = pixels[index + 1], b = pixels[index + 2];
+			if (r || g || b) {
+				++coloured;
+				RequireSnapshotPixel(std::abs(x - position.X()) <= 18 && std::abs(y - position.Y()) <= 18,
+									 name + ": coloured pixel outside the expected glyph location");
+				if (g > 60 && g > r * 2 && g > b * 2)
+					++green_outline;
+			}
+		}
+	}
+	RequireSnapshotPixel(coloured > 25, name + ": glyph is empty or too small");
+	RequireSnapshotPixel(green_outline > 6, name + ": expected green outline is absent");
+	auto const sample = static_cast<size_t>((static_cast<int>(position.Y()) - 3) * width + static_cast<int>(position.X()) + 3) * 4;
+	std::array<int, 4> const expected{
+		static_cast<int>(std::lround(fill_colour.Red() * 0.3)),
+		static_cast<int>(std::lround(fill_colour.Green() * 0.3)),
+		static_cast<int>(std::lround(fill_colour.Blue() * 0.3)),
+		static_cast<int>(std::lround((0.3 * 0.3 + 0.7) * 255))};
+	for (size_t channel = 0; channel < expected.size(); ++channel)
+		RequireSnapshotPixel(std::abs(static_cast<int>(pixels[sample + channel]) - expected[channel]) <= 2,
+							 name + ": independent interior RGBA colour/alpha mismatch at channel " + std::to_string(channel));
+}
+
+bool ValidateDragSnapshotGlyphPixels() {
+	constexpr int width = 160, height = 128;
+	HiddenGLWindow window(width, height);
+	VisualToolPresentation presentation;
+	wxColour const line_colour(32, 224, 64);
+	wxColour const fill_colour(240, 80, 32);
+	Vector2D const position(48, 64);
+	std::array<std::pair<DraggableFeatureType, char const *>, 3> const cases{{{DRAG_BIG_SQUARE, "square"}, {DRAG_BIG_CIRCLE, "circle"}, {DRAG_BIG_TRIANGLE, "triangle"}}};
+	for (auto const& [type, name] : cases) {
+		auto const reference = RenderLegacyDragGlyph(window, width, height, type, position, line_colour, fill_colour);
+		auto const snapshot = MakeDragGlyphSnapshot(presentation, type, position, line_colour, fill_colour);
+		auto const actual = RenderDragSnapshot(window, width, height, snapshot);
+		RequireGlyphLocationAndColour(reference, width, height, position, fill_colour, std::string(name) + "/legacy");
+		RequireGlyphLocationAndColour(actual, width, height, position, fill_colour, std::string(name) + "/snapshot");
+		RequireSnapshotPixel(actual == reference, std::string(name) + ": snapshot and legacy RGBA rasters differ");
+		std::cout << "drag_snapshot_glyph/" << name << " rgba_exact=1 nonempty_location_colour=1\n";
+	}
+	return true;
+}
+
+bool ValidateDragSnapshotPresentationPixels() {
+	constexpr int width = 192, height = 128;
+	HiddenGLWindow window(width, height);
+	VisualToolPresentation presentation;
+	wxColour const line_colour(32, 224, 64);
+	wxColour const released_colour(240, 80, 32);
+	wxColour const pressed_colour(32, 80, 240);
+	Vector2D const baseline_position(36, 64), displayed_position(84, 64), input_position(144, 64);
+	auto const baseline = MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, baseline_position, line_colour, released_colour);
+	auto const displayed = MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, displayed_position, line_colour, released_colour);
+	auto const newest_input = MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, input_position, line_colour, released_colour);
+	RequireSnapshotPixel(presentation.Begin(41, baseline), "could not begin first interaction");
+	auto const baseline_pixels = RenderDragSnapshot(window, width, height, presentation.Select({}));
+	RequireGlyphLocationAndColour(baseline_pixels, width, height, baseline_position, released_colour, "baseline");
+	auto const selected_pixels = RenderDragSnapshot(window, width, height, presentation.Select(displayed));
+	auto const expected_displayed = RenderLegacyDragGlyph(window, width, height, DRAG_BIG_SQUARE, displayed_position, line_colour, released_colour);
+	auto const input_pixels = RenderDragSnapshot(window, width, height, newest_input);
+	RequireGlyphLocationAndColour(selected_pixels, width, height, displayed_position, released_colour, "displayed_not_input");
+	RequireGlyphLocationAndColour(input_pixels, width, height, input_position, released_colour, "newest_input_control");
+	RequireSnapshotPixel(selected_pixels == expected_displayed, "selected packet did not retain its displayed position");
+	RequireSnapshotPixel(selected_pixels != input_pixels, "fixture did not distinguish displayed and newest-input positions");
+	RequireSnapshotPixel(!presentation.OnFinalPresented(40), "unrelated Final ended the current interaction");
+	RequireSnapshotPixel(RenderDragSnapshot(window, width, height, presentation.Select(displayed)) == selected_pixels,
+						 "unrelated Final changed displayed geometry");
+	auto const final_pixels = RenderDragSnapshot(window, width, height, presentation.Select(newest_input));
+	RequireGlyphLocationAndColour(final_pixels, width, height, input_position, released_colour, "matching_final");
+	RequireSnapshotPixel(presentation.OnFinalPresented(41), "matching Final did not end first interaction");
+	RequireSnapshotPixel(!presentation.Matches(newest_input), "completed Final snapshot context remained reusable");
+	RequireSnapshotPixel(!presentation.Begin(42, newest_input), "new press accepted the old released snapshot as its baseline");
+	auto const new_press = MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, input_position, line_colour, pressed_colour);
+	RequireSnapshotPixel(presentation.Begin(42, new_press), "new press did not accept its fresh feedback snapshot");
+	RequireSnapshotPixel(!presentation.OnFinalPresented(41), "late old Final ended the new press");
+	auto const press_pixels = RenderDragSnapshot(window, width, height, presentation.Select(newest_input));
+	auto const expected_press = RenderLegacyDragGlyph(window, width, height, DRAG_BIG_SQUARE, input_position, line_colour, pressed_colour);
+	RequireGlyphLocationAndColour(press_pixels, width, height, input_position, pressed_colour, "new_press_not_old_release");
+	RequireSnapshotPixel(press_pixels == expected_press, "new press did not draw its independently expected colour");
+	RequireSnapshotPixel(press_pixels != final_pixels, "new press reused the completed Final's released colour");
+	std::cout << "drag_snapshot_presentation displayed_not_input=1 final_retired=1 fresh_press_colour=1\n";
+	return true;
+}
+
+// Use the production main-thread transport, but advance its tasks explicitly.
+// This controls ordering without adding delays or gates to the application.
+class ScopedSnapshotDeliveryQueue {
+	std::deque<agi::dispatch::Thunk> pending;
+
+	public:
+	ScopedSnapshotDeliveryQueue() {
+		agi::dispatch::Init([this](agi::dispatch::Thunk thunk) { pending.push_back(std::move(thunk)); }, [] { return true; });
+	}
+	~ScopedSnapshotDeliveryQueue() {
+		agi::dispatch::Init([](agi::dispatch::Thunk const&) {}, [] { return false; });
+		pending.clear();
+	}
+	ScopedSnapshotDeliveryQueue(ScopedSnapshotDeliveryQueue const&) = delete;
+	ScopedSnapshotDeliveryQueue& operator=(ScopedSnapshotDeliveryQueue const&) = delete;
+	[[nodiscard]] size_t Size() const { return pending.size(); }
+	void PumpOne() {
+		RequireSnapshotPixel(pending.size() == 1, "expected exactly one queued delivery");
+		auto thunk = std::move(pending.front());
+		pending.pop_front();
+		thunk();
+	}
+};
+
+VideoRenderPacket MakeSnapshotPacket(std::shared_ptr<const VisualToolRenderSnapshot> snapshot,
+									 VideoRenderDeliveryClass delivery_class, std::uint64_t interaction, std::uint64_t content) {
+	VideoRenderPacket packet;
+	packet.frame_number = 17;
+	packet.time = 725.0;
+	packet.delivery_version = {.provider = 7, .content = content, .request = 11};
+	packet.delivery_class = delivery_class;
+	packet.visual_interaction_id = interaction;
+	packet.visual_tool_snapshot = std::move(snapshot);
+	return packet;
+}
+
+bool ValidateQueuedDragFinalPixels() {
+	constexpr int width = 224, height = 128;
+	ScopedSnapshotDeliveryQueue queue;
+	HiddenGLWindow window(width, height);
+	VisualToolPresentation presentation;
+	auto lifetime = agi::ui::MakeLifetime();
+	std::optional<VideoRenderPacket> delivered;
+	int callbacks = 0;
+	auto sink = CreateAsyncVideoProviderMainThreadSink(lifetime,
+													   {.on_frame_ready = [&](VideoRenderPacket packet, double time) {
+														   RequireSnapshotPixel(time == 725.0 && packet.time == time && packet.frame_number == 17,
+																				"queued delivery changed frame/time");
+														   ++callbacks;
+														   delivered = std::move(packet);
+													   }},
+													   AsyncVideoFrameDeliveryMode::VisualSubtitleBatches);
+	wxColour const line(32, 224, 64), released(240, 80, 32), pressed(32, 80, 240);
+	Vector2D const old_position(48, 64), final_position(112, 64), new_position(176, 64);
+	auto const displayed = MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, old_position, line, pressed);
+	auto const old_final = MakeSnapshotPacket(
+		MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, final_position, line, released),
+		VideoRenderDeliveryClass::VisualSubtitleFinal, 41, 101);
+	RequireSnapshotPixel(presentation.Begin(41, displayed), "first drag did not start");
+	sink.on_frame_ready(old_final, old_final.time);
+	RequireSnapshotPixel(queue.Size() == 1 && callbacks == 0 && !delivered,
+						 "old Final was not held at the real main-thread boundary");
+	RequireSnapshotPixel(presentation.Begin(42, displayed), "second drag did not start before old Final");
+	auto const before = RenderDragSnapshot(window, width, height, presentation.Select({}));
+	RequireGlyphLocationAndColour(before, width, height, old_position, pressed, "queued_final/baseline");
+
+	queue.PumpOne();
+	RequireSnapshotPixel(callbacks == 1 && delivered.has_value() && queue.Size() == 0,
+						 "old Final did not traverse its queued callback exactly once");
+	RequireSnapshotPixel(delivered->delivery_version == old_final.delivery_version && delivered->delivery_class == VideoRenderDeliveryClass::VisualSubtitleFinal && delivered->visual_interaction_id == 41 && delivered->visual_tool_snapshot == old_final.visual_tool_snapshot,
+						 "old Final identity or snapshot changed in transport");
+	auto const old_pixels = RenderDragSnapshot(window, width, height, presentation.Select(delivered->visual_tool_snapshot));
+	RequireGlyphLocationAndColour(old_pixels, width, height, final_position, released, "queued_final/late_A");
+	RequireSnapshotPixel(old_pixels == RenderLegacyDragGlyph(window, width, height, DRAG_BIG_SQUARE, final_position, line, released),
+						 "late A Final pixels differ from the independent legacy glyph");
+	RequireSnapshotPixel(!presentation.OnFinalPresented(delivered->visual_interaction_id) && presentation.IsActive() && presentation.InteractionId() == 42,
+						 "late A Final retired B");
+
+	for (auto const delivery_class : {VideoRenderDeliveryClass::VisualSubtitleIntermediate, VideoRenderDeliveryClass::VisualSubtitleFinal}) {
+		bool const final = delivery_class == VideoRenderDeliveryClass::VisualSubtitleFinal;
+		auto const colour = final ? released : pressed;
+		auto const packet = MakeSnapshotPacket(
+			MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, new_position, line, colour), delivery_class, 42, final ? 103 : 102);
+		sink.on_frame_ready(packet, packet.time);
+		queue.PumpOne();
+		RequireSnapshotPixel(delivered->delivery_version == packet.delivery_version && delivered->delivery_class == delivery_class && delivered->visual_interaction_id == 42 && delivered->visual_tool_snapshot == packet.visual_tool_snapshot, "B packet identity changed");
+		auto const pixels = RenderDragSnapshot(window, width, height, presentation.Select(delivered->visual_tool_snapshot));
+		RequireGlyphLocationAndColour(pixels, width, height, new_position, colour, final ? "queued_final/B_final" : "queued_final/B_intermediate");
+		RequireSnapshotPixel(pixels == RenderLegacyDragGlyph(window, width, height, DRAG_BIG_SQUARE, new_position, line, colour),
+							 "B pixels differ from the independent legacy glyph");
+		if (final)
+			RequireSnapshotPixel(presentation.OnFinalPresented(42) && !presentation.IsActive(), "B Final did not retire B");
+	}
+	RequireSnapshotPixel(callbacks == 3 && queue.Size() == 0, "unexpected queued Final callback count");
+	std::cout << "drag_snapshot_queued_final old_final_after_next_begin=1 payload_exact=1 old_cannot_retire_new=1 pixels_exact=1\n";
+	return true;
+}
+
+bool ValidateQueuedDragResetPixels() {
+	constexpr int width = 192, height = 128;
+	ScopedSnapshotDeliveryQueue queue;
+	HiddenGLWindow window(width, height);
+	VisualToolPresentation presentation;
+	auto lifetime = agi::ui::MakeLifetime();
+	std::optional<VideoRenderPacket> delivered;
+	int callbacks = 0;
+	auto sink = CreateAsyncVideoProviderMainThreadSink(lifetime,
+													   {.on_frame_ready = [&](VideoRenderPacket packet, double) { ++callbacks; delivered = std::move(packet); }},
+													   AsyncVideoFrameDeliveryMode::VisualSubtitleBatches);
+	wxColour const line(32, 224, 64), old_colour(240, 80, 32), new_colour(32, 80, 240);
+	Vector2D const old_position(48, 64), new_position(144, 64);
+	auto const old_snapshot = MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, old_position, line, old_colour);
+	auto const old_final = MakeSnapshotPacket(old_snapshot, VideoRenderDeliveryClass::VisualSubtitleFinal, 71, 201);
+	RequireSnapshotPixel(presentation.Begin(71, old_snapshot), "old context did not begin");
+	sink.on_frame_ready(old_final, old_final.time);
+	RequireSnapshotPixel(callbacks == 0 && queue.Size() == 1, "reset fixture did not retain old queued packet");
+
+	presentation.Reset();
+	auto const fresh = MakeDragGlyphSnapshot(presentation, DRAG_BIG_SQUARE, new_position, line, new_colour);
+	RequireSnapshotPixel(presentation.Begin(72, fresh), "replacement context did not begin");
+	queue.PumpOne();
+	RequireSnapshotPixel(callbacks == 1 && delivered && delivered->visual_tool_snapshot == old_snapshot && delivered->delivery_version == old_final.delivery_version, "reset lost the actual queued old snapshot");
+	RequireSnapshotPixel(!presentation.Matches(delivered->visual_tool_snapshot), "reset accepted the old context");
+	auto const pixels = RenderDragSnapshot(window, width, height, presentation.Select(delivered->visual_tool_snapshot));
+	RequireGlyphLocationAndColour(pixels, width, height, new_position, new_colour, "queued_reset/fresh_baseline");
+	RequireSnapshotPixel(pixels == RenderLegacyDragGlyph(window, width, height, DRAG_BIG_SQUARE, new_position, line, new_colour),
+						 "old queued snapshot overrode fresh context pixels");
+	RequireSnapshotPixel(!presentation.OnFinalPresented(71) && presentation.InteractionId() == 72,
+						 "old context's Final retired the replacement interaction");
+	RequireSnapshotPixel(queue.Size() == 0, "reset left a queued callback");
+	std::cout << "drag_snapshot_queued_reset old_context_rejected=1 fresh_geometry_colour=1 late_final_ignored=1\n";
+	return true;
+}
+
 template<class RendererFactory>
 bool ValidateSceneCacheVisualToolSequence(
 	RendererFactory const& factory,
@@ -700,6 +998,10 @@ int main() try {
 
 	auto scenarios = BuildScenarios();
 	bool passed = true;
+	passed = ValidateDragSnapshotGlyphPixels() && passed;
+	passed = ValidateDragSnapshotPresentationPixels() && passed;
+	passed = ValidateQueuedDragFinalPixels() && passed;
+	passed = ValidateQueuedDragResetPixels() && passed;
 
 	passed = ValidateRenderer(
 		"opengl",

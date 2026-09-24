@@ -27,36 +27,37 @@
 #include "selection_controller.h"
 #include "video_overlay_draw_context.h"
 #include "video_overlay_helpers.h"
+#include "visual_tool_render_snapshot.h"
 
 #include <libaegisub/format.h>
 
 #include <wx/colour.h>
 
-VisualToolRotateXY::VisualToolRotateXY(VideoDisplay *parent, agi::Context *context)
-: VisualTool<VisualDraggableFeature>(parent, context)
-{
-	org = new Feature;
-	org->type = DRAG_BIG_TRIANGLE;
-	features.push_back(*org);
-}
+namespace {
+struct RotateXYState {
+	Vector2D origin;
+	float angle_x;
+	float angle_y;
+	float angle_z;
+	float fax;
+	float fay;
+	float perspective_z_scale;
+	unsigned long primary_colour;
+	unsigned long secondary_colour;
+	unsigned long feature_fill_colour;
+};
 
-void VisualToolRotateXY::Draw() {
-	if (!active_line) return;
-
-	DrawAllFeatures();
-
-	// Load colors from options
-	wxColour line_color_primary = to_wx(line_color_primary_opt->GetColor());
-	wxColour line_color_secondary = to_wx(line_color_secondary_opt->GetColor());
-
+void DrawRotateXYGeometry(OpenGLWrapper& gl, RotateXYState const& state) {
+	wxColour const line_color_primary(state.primary_colour);
+	wxColour const line_color_secondary(state.secondary_colour);
 	// Transform grid
-	gl.SetOrigin(org->pos);
+	gl.SetOrigin(state.origin);
 	// libass uses camera distance = 20000 * blur_scale_y,
 	// where blur_scale_y = frame_height / LayoutResY.
 	// Compensate for PlayRes ≠ LayoutRes in the OpenGL preview.
-	float const perspective_z_scale = video_overlay_helpers::GetLayoutResAdjustedPerspectiveZScale(script_res, layout_res);
-	gl.SetRotation(angle_x, angle_y, angle_z, perspective_z_scale);
-	gl.SetShear(fax, fay);
+	float const perspective_z_scale = state.perspective_z_scale;
+	gl.SetRotation(state.angle_x, state.angle_y, state.angle_z, perspective_z_scale);
+	gl.SetShear(state.fax, state.fay);
 
 	// Draw grid
 	gl.SetLineColour(line_color_secondary, 0.5f, 2);
@@ -153,6 +154,89 @@ void VisualToolRotateXY::Draw() {
 	gl.DrawLines(3, arrows, 18);
 
 	gl.ResetTransform();
+}
+
+class RotateXYRenderSnapshot final : public VisualToolRenderSnapshot {
+	RotateXYState state;
+
+public:
+	RotateXYRenderSnapshot(std::shared_ptr<const VisualToolRenderContext> context, RotateXYState const& state)
+		: VisualToolRenderSnapshot(std::move(context)), state(state) {}
+
+	[[nodiscard]] std::optional<VisualToolFeatureKey> HitTest(Vector2D const& mouse_pos) const override {
+		VisualDraggableFeature marker;
+		marker.type = DRAG_BIG_TRIANGLE;
+		marker.pos = state.origin;
+		if (marker.IsMouseOver(mouse_pos))
+			return VisualToolFeatureKey{.type = DRAG_BIG_TRIANGLE};
+		return {};
+	}
+
+	void Draw(VideoOverlayDrawContext&) const override {
+		OpenGLWrapper gl;
+		gl.SetLineColour(wxColour(state.secondary_colour), 1.f, 1);
+		gl.SetFillColour(wxColour(state.feature_fill_colour), 0.3f);
+		VisualDraggableFeature feature;
+		feature.type = DRAG_BIG_TRIANGLE;
+		feature.pos = state.origin;
+		feature.Draw(gl);
+		DrawRotateXYGeometry(gl, state);
+	}
+};
+}
+
+VisualToolRotateXY::VisualToolRotateXY(VideoDisplay *parent, agi::Context *context)
+: VisualTool<VisualDraggableFeature>(parent, context)
+{
+	org = new Feature;
+	org->type = DRAG_BIG_TRIANGLE;
+	features.push_back(*org);
+}
+
+void VisualToolRotateXY::Draw() {
+	if (!active_line) return;
+
+	DrawAllFeatures();
+	RotateXYState const state{
+		.origin = org->pos,
+		.angle_x = angle_x,
+		.angle_y = angle_y,
+		.angle_z = angle_z,
+		.fax = fax,
+		.fay = fay,
+		.perspective_z_scale = video_overlay_helpers::GetLayoutResAdjustedPerspectiveZScale(script_res, layout_res),
+		.primary_colour = to_wx(line_color_primary_opt->GetColor()).GetRGB(),
+		.secondary_colour = to_wx(line_color_secondary_opt->GetColor()).GetRGB(),
+		.feature_fill_colour = 0,
+	};
+	DrawRotateXYGeometry(gl, state);
+}
+
+std::shared_ptr<const VisualToolRenderSnapshot> VisualToolRotateXY::CaptureRenderSnapshot(
+	std::shared_ptr<const VisualToolRenderContext> const& context) const {
+	if (!active_line)
+		return {};
+	unsigned long const primary = to_wx(line_color_primary_opt->GetColor()).GetRGB();
+	unsigned long const secondary = to_wx(line_color_secondary_opt->GetColor()).GetRGB();
+	unsigned long const highlight = to_wx(highlight_color_primary_opt->GetColor()).GetRGB();
+	unsigned long feature_fill = highlight;
+	if (org == active_feature)
+		feature_fill = to_wx(highlight_color_secondary_opt->GetColor()).GetRGB();
+	else if (sel_features.count(org))
+		feature_fill = primary;
+	RotateXYState const state{
+		.origin = org->pos,
+		.angle_x = angle_x,
+		.angle_y = angle_y,
+		.angle_z = angle_z,
+		.fax = fax,
+		.fay = fay,
+		.perspective_z_scale = video_overlay_helpers::GetLayoutResAdjustedPerspectiveZScale(script_res, layout_res),
+		.primary_colour = primary,
+		.secondary_colour = secondary,
+		.feature_fill_colour = feature_fill,
+	};
+	return std::make_shared<RotateXYRenderSnapshot>(context, state);
 }
 
 void VisualToolRotateXY::DrawOverlay(VideoOverlayDrawContext &context) {

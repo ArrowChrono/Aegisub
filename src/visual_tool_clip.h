@@ -48,6 +48,8 @@ class VisualToolClip final : public VisualTool<ClipCorner> {
 	void Draw() override;
 	bool SupportsOverlayContext() const override { return true; }
 	void DrawOverlay(VideoOverlayDrawContext &context) override;
+	std::shared_ptr<const VisualToolRenderSnapshot> CaptureRenderSnapshot(
+		std::shared_ptr<const VisualToolRenderContext> const& context) const override;
 public:
 	VisualToolClip(VideoDisplay *parent, agi::Context *context);
 };

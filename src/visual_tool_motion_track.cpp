@@ -291,6 +291,8 @@ VisualToolMotionTrack::RoiGrab VisualToolMotionTrack::HitTest(
 
 void VisualToolMotionTrack::OnMouseEvent(wxMouseEvent& event) {
 	RoiRect roi;
+	wxPoint const point = event.GetPosition();
+	Vector2D const next_mouse_pos(point.x, point.y);
 	bool const have_roi = CurrentRoi(roi);
 	int sw = 0, sh = 0;
 	bool const have_dims = StorageDims(sw, sh);
@@ -301,6 +303,7 @@ void VisualToolMotionTrack::OnMouseEvent(wxMouseEvent& event) {
 		EndRoiDrag();
 
 	if (event.LeftDown() && have_dims) {
+		mouse_pos = next_mouse_pos;
 		// Capture the edit pose: the ride's affine relative to the ROI's
 		// anchor when the pressed box rides a tracked frame, identity
 		// otherwise. A band (drawing anew) always stays axis-aligned — it is
@@ -376,7 +379,14 @@ void VisualToolMotionTrack::OnMouseEvent(wxMouseEvent& event) {
 		return;
 	}
 
-	if (event.Dragging() && grab == RoiGrab::Band) {
+	bool const update = event.Dragging() || (event.LeftUp() && next_mouse_pos != mouse_pos);
+	auto finish_update = [&] {
+		mouse_pos = next_mouse_pos;
+		if (event.LeftUp())
+			EndRoiDrag();
+		event.Skip(false);
+	};
+	if (update && grab == RoiGrab::Band) {
 		Vector2D const p = MouseToStorage(event);
 		Vector2D const a = ClampToFrame(band_start, sw, sh);
 		Vector2D const b = ClampToFrame(p, sw, sh);
@@ -388,14 +398,14 @@ void VisualToolMotionTrack::OnMouseEvent(wxMouseEvent& event) {
 		int const y1 = int(std::lround(std::max(a.Y(), b.Y())));
 		PushRoi(RoiRect{x0, y0, x1 - x0, y1 - y0},
 				/*reanchor=*/true, /*anchor_space=*/false);
-		event.Skip(false);
+		finish_update();
 		return;
 	}
 
-	if (event.Dragging() && grab == RoiGrab::Move && have_roi) {
+	if (update && grab == RoiGrab::Move && have_roi) {
 		auto const p = PoseToSeed(drag_pose, MouseToStorage(event));
 		if (!p) {
-			event.Skip(false);
+			finish_update();
 			return;
 		}
 		// The pushed rectangle is in the anchor's space while a pose is
@@ -407,18 +417,18 @@ void VisualToolMotionTrack::OnMouseEvent(wxMouseEvent& event) {
 						.h = roi.h},
 				/*reanchor=*/drag_pose.identity,
 				/*anchor_space=*/!drag_pose.identity);
-		event.Skip(false);
+		finish_update();
 		return;
 	}
 
-	if (event.Dragging() && IsResize(grab)) {
+	if (update && IsResize(grab)) {
 		// Anchor-space point: the posed grips map onto the axis-aligned dialog
 		// ROI. With a pose active the rectangle lives in that space, so PushRoi
 		// must not clamp it to the frame (anchor_space below); an identity pose
 		// yields plain storage coordinates and clamps as before.
 		auto const p = PoseToSeed(drag_pose, MouseToStorage(event));
 		if (!p) {
-			event.Skip(false);
+			finish_update();
 			return;
 		}
 		bool const follow_l =
@@ -443,7 +453,7 @@ void VisualToolMotionTrack::OnMouseEvent(wxMouseEvent& event) {
 		PushRoi(RoiRect{x0, y0, x1 - x0, y1 - y0},
 				/*reanchor=*/drag_pose.identity,
 				/*anchor_space=*/!drag_pose.identity);
-		event.Skip(false);
+		finish_update();
 		return;
 	}
 

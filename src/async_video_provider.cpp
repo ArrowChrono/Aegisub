@@ -68,6 +68,7 @@ void MergeSubtitleUpdateOptions(
 	pending.delivery_class = incoming.delivery_class;
 	pending.visual_interaction_id = incoming.visual_interaction_id;
 	pending.force_current_frame_render |= incoming.force_current_frame_render;
+	pending.visual_tool_snapshot = std::move(incoming.visual_tool_snapshot);
 }
 
 std::vector<std::pair<const AssDialogue*, int>> CaptureSubtitleSourceLines(AssFile const& file) {
@@ -1113,6 +1114,25 @@ void AsyncVideoProvider::CancelPendingFrameRequests() noexcept {
 	}
 }
 
+bool AsyncVideoProvider::TryAdoptCachedFrame(VideoRenderPacket& packet, int frame, double time) noexcept {
+	{
+		std::scoped_lock lock(pending_mutex);
+		if (packet.frame_number != frame || packet.time != time || packet.delivery_version.provider != provider_version || packet.delivery_version.content != content_version.load(std::memory_order_relaxed))
+			return false;
+
+		pending_frame_kind = PendingFrameKind::CurrentContext;
+		pending_frame_number = frame;
+		pending_time = time;
+		pending_check_updated = false;
+		packet.delivery_version.request = ++request_version;
+		packet.delivery_class = VideoRenderDeliveryClass::EveryFrame;
+		packet.visual_interaction_id = 0;
+		packet.visual_tool_snapshot.reset();
+	}
+	ScheduleProcessing();
+	return true;
+}
+
 void AsyncVideoProvider::PrefetchFrames(int first_frame, int count) noexcept {
 	{
 		std::lock_guard<std::mutex> lock(pending_mutex);
@@ -1329,6 +1349,7 @@ bool AsyncVideoProvider::ProcessPending() {
 		pending_subtitle_update_options = {};
 		PendingFrameKind const pending_kind = pending_frame_kind;
 		if (pending_kind == PendingFrameKind::Request) {
+			work.subtitle_update_options.visual_tool_snapshot.reset();
 			work.has_frame = true;
 			work.frame_number = pending_frame_number;
 			work.time = pending_time;
@@ -1471,6 +1492,7 @@ bool AsyncVideoProvider::ProcessPending() {
 			packet.delivery_version = work.delivery_version;
 			packet.delivery_class = work.delivery_class;
 			packet.visual_interaction_id = work.visual_interaction_id;
+			packet.visual_tool_snapshot = std::move(work.subtitle_update_options.visual_tool_snapshot);
 			DeliverFrameReady(std::move(packet), time);
 		}
 		else {
@@ -1994,13 +2016,21 @@ bool AsyncVideoProvider::ReconfigureSourceOutputMode() {
 		compatibility_requires_bgra8);
 
 	auto applied = selected;
-	if (!source_provider->SetOutputMode(applied)) {
-		applied = SourceFrameOutputMode::Bgra8;
-		if (!source_provider->SetOutputMode(applied))
-			return false;
+	bool mode_changed;
+	{
+		std::scoped_lock lock(pending_mutex);
+		if (!source_provider->SetOutputMode(applied)) {
+			applied = SourceFrameOutputMode::Bgra8;
+			if (!source_provider->SetOutputMode(applied))
+				return false;
+		}
+		mode_changed = selected_source_mode != applied;
+		if (mode_changed) {
+			selected_source_mode = applied;
+			++content_version;
+		}
 	}
 
-	bool const mode_changed = selected_source_mode != applied;
 	if (!has_logged_source_mode || mode_changed) {
 		auto source_format = source_provider->GetNativeFormatDescription();
 		auto render_color = source_provider->GetColorMetadata();
@@ -2021,8 +2051,6 @@ bool AsyncVideoProvider::ReconfigureSourceOutputMode() {
 	if (!mode_changed)
 		return false;
 
-	selected_source_mode = applied;
-	++content_version;
 	last_rendered = -1;
 	last_lines.clear();
 	ResetCachedSourceFrame();
@@ -2037,8 +2065,17 @@ VideoRenderPacket AsyncVideoProvider::GetRenderPacket(int frame, double time, bo
 	worker->Sync([&]{
 		WorkerSyncTracker sync_tracker(*this);
 		auto const render_begin = std::chrono::steady_clock::now();
+		VideoRenderDeliveryVersion version;
+		{
+			std::scoped_lock lock(pending_mutex);
+			version = {
+				.provider = provider_version,
+				.content = content_version.load(std::memory_order_relaxed),
+				.request = request_version.load(std::memory_order_relaxed)};
+		}
 		while (ProcessPending()) { }
 		ret = ProcRenderPacket(frame, time, raw);
+		ret.delivery_version = version;
 		auto const render_duration_ms =
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - render_begin).count();
 		aegisub::async_video_trace::ObserveVideoFrameRenderDuration(frame, time, true, true, render_duration_ms);
@@ -2064,8 +2101,11 @@ void AsyncVideoProvider::SetSubtitlesTimecodes(agi::vfr::Framerate timecodes) {
 	worker->Sync([&] {
 		WorkerSyncTracker sync_tracker(*this);
 		while (ProcessPending()) { }
+		{
+			std::scoped_lock lock(pending_mutex);
+			++content_version;
+		}
 		subtitles_timecodes = std::move(timecodes);
-		++content_version;
 		single_frame = NEW_SUBS_FILE;
 		last_rendered = -1;
 		last_lines.clear();
@@ -2092,8 +2132,13 @@ void AsyncVideoProvider::ReplaceSubtitlesProvider(std::unique_ptr<SubtitlesProvi
 	worker->Sync([&] {
 		WorkerSyncTracker sync_tracker(*this);
 		while (ProcessPending()) { }
-		auto old_provider = std::move(subs_provider);
-		subs_provider = std::move(provider);
+		std::unique_ptr<SubtitlesProvider> old_provider;
+		{
+			std::scoped_lock lock(pending_mutex);
+			old_provider = std::move(subs_provider);
+			subs_provider = std::move(provider);
+			++content_version;
+		}
 		if (subs_provider) {
 			LOG_I(kSubtitleProviderUseLogTag) << "Activated subtitles provider: "
 				<< subs_provider->GetDebugName()

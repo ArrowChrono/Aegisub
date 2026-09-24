@@ -73,6 +73,7 @@ class VideoController final {
 	agi::signal::Signal<int> PlaybackFrameAdvanced;
 	/// A render packet is ready to be presented.
 	agi::signal::Signal<VideoRenderPacket const&, double> FrameReady;
+	agi::signal::Signal<VideoSubtitleUpdateOptions&> PrepareVisualSubtitleUpdate;
 	/// A frame was presented by the video display (new frame number).
 	agi::signal::Signal<int> FramePresented;
 	/// Aspect ratio was changed (type, value)
@@ -234,7 +235,7 @@ public:
 	/// Drop cached render packets after external video render pipeline changes
 	void InvalidateRenderPacketCache();
 	/// Begin coalescing subtitle-provider updates produced by a legacy visual tool.
-	void BeginVisualSubtitleInteraction();
+	std::uint64_t BeginVisualSubtitleInteraction();
 	/// Submit the final state; return its interaction id, or zero if none was submitted.
 	std::uint64_t EndVisualSubtitleInteraction();
 
@@ -302,6 +303,7 @@ public:
 	DEFINE_SIGNAL_ADDERS(Seek, AddSeekListener)
 	DEFINE_SIGNAL_ADDERS(PlaybackFrameAdvanced, AddPlaybackFrameAdvancedListener)
 	DEFINE_SIGNAL_ADDERS(FrameReady, AddFrameReadyListener)
+	DEFINE_SIGNAL_ADDERS(PrepareVisualSubtitleUpdate, AddPrepareVisualSubtitleUpdateListener)
 	DEFINE_SIGNAL_ADDERS(FramePresented, AddFramePresentedListener)
 	DEFINE_SIGNAL_ADDERS(ARChange, AddARChangeListener)
 	agi::ui::WeakLifetime GetAsyncUiLifetime() const { return ui_activation.GetLifetime(); }

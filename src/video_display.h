@@ -40,6 +40,7 @@
 #include "video_render_packet.h"
 #include "video_subtitle_scene_cache.h"
 #include "video_tool_release_feedback.h"
+#include "visual_tool_presentation.h"
 
 #include "vector2d.h"
 
@@ -198,6 +199,9 @@ class VideoDisplay final : public wxGLCanvas {
 	/// Last packet successfully uploaded to the current renderer set; reused across backend reloads.
 	VideoRenderPacket displayed_packet;
 	bool has_displayed_packet = false;
+	bool last_render_succeeded = false;
+	VisualToolPresentation tool_presentation;
+	void PrepareToolPresentation(VideoSubtitleUpdateOptions& options);
 
 	std::unique_ptr<RetinaHelper> retina_helper;
 	int scale_factor;
@@ -387,6 +391,10 @@ public:
 	void Render();
 	/// @brief Render immediately on the UI thread; used for high-frequency tool feedback
 	void RenderNow();
+	void BeginToolPresentation(std::uint64_t interaction_id);
+	void ResetToolPresentation();
+	std::shared_ptr<const VisualToolRenderSnapshot> GetToolPresentationSnapshot() const;
+	bool NeedsInteractionRender() const;
 	/// @brief Request a repaint for per-mouse-event visual tool state changes
 	void RenderToolFeedback();
 	/// Let a submitted Final share the release/hover feedback draw for one interval.
