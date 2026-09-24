@@ -58,6 +58,32 @@ jobs:
       run: |
         & "$env:PROJECT_VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
 
+    - name: show build environment
+      shell: pwsh
+      run: |
+        Write-Host "=== GitHub runner ==="
+        Write-Host "ImageOS=$env:ImageOS"
+        Write-Host "ImageVersion=$env:ImageVersion"
+
+        Write-Host "`n=== Visual Studio ==="
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vswhere -latest -products * -property installationPath
+        & $vswhere -latest -products * -property catalog_productDisplayVersion
+        Write-Host $vsPath
+
+        Write-Host "`n=== MSVC toolsets ==="
+        Get-ChildItem "$vsPath\VC\Tools\MSVC" -Directory |
+          Select-Object -ExpandProperty Name
+
+        Write-Host "`n=== CMake ==="
+        cmake --version
+
+        Write-Host "`n=== PowerShell ==="
+        Write-Host $PSVersionTable.PSVersion
+
+        Write-Host "`n=== vcpkg ==="
+        & "$env:PROJECT_VCPKG_ROOT\vcpkg.exe" version
+
     - name: configure nuget credentials
       shell: pwsh
       run: |
@@ -69,7 +95,7 @@ jobs:
       id: build
       shell: pwsh
       run: |
-        ./build/build-win-vcpkg.ps1 -Mode build -VcpkgRoot $env:PROJECT_VCPKG_ROOT -VcpkgInstalledRoot $env:PROJECT_VCPKG_INSTALLED_ROOT
+        ./build/build-win-vcpkg.ps1 -Mode build -VcpkgRoot $env:PROJECT_VCPKG_ROOT -VcpkgInstalledRoot $env:PROJECT_VCPKG_INSTALLED_ROOT -VcpkgInstallOptions '--x-abi-tools-use-exact-versions'
 
     - name: test
       id: test
