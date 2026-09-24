@@ -148,15 +148,15 @@ DialogMotionTrack::DialogMotionTrack(agi::Context *c)
 
 	track_grid->Add(new wxStaticText(track_box, -1, _("Model")),
 					0, wxALIGN_CENTRE_VERTICAL);
-	model = new wxComboBox(track_box, -1, _("Translation"),
+	model = new wxComboBox(track_box, -1, _("Position only"),
 						   wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY);
-	model->Append(_("Translation"));
+	model->Append(_("Position only"));
 	model->Append(_("Similarity (rotation+scale)"));
 	model->Append(_("Affine (shear+non-uniform scale)"));
 	model->Append(_("Perspective (four corners)"));
 	model->SetSelection(std::clamp(
 		static_cast<int>(OPT_GET("Tool/Motion Track/Model")->GetInt()), 0, 3));
-	model->SetToolTip(_("Track translation, rotation and scale, affine deformation, "
+	model->SetToolTip(_("Track position, rotation and scale, affine deformation, "
 						"or a perspective plane. Compact fits the written ASS geometry in video pixels."));
 	track_grid->Add(model, 1, wxEXPAND);
 
