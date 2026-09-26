@@ -959,6 +959,8 @@ set(AEGISUB_CORE_SOURCES
     src/automation/automation_lua_runtime.cpp
     src/automation/automation_mutation_journal.cpp
     src/automation/automation_runtime_journal.cpp
+    src/automation/karaoke_line_classifier.cpp
+    src/automation/lua_source_tools.cpp
     src/automation/engine/automation_engine_registry.cpp
     # CSRI bridge (renderer discovery + native library bridge)
     src/csri_renderer_discovery.cpp

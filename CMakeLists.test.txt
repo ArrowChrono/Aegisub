@@ -15,6 +15,24 @@ else()
     add_custom_target(test-automation)
 endif()
 
+add_executable(lua-workspace-source-e2e EXCLUDE_FROM_ALL
+    tests/gui-automation/lua-workspace/source_roundtrip.cpp
+)
+target_compile_features(lua-workspace-source-e2e PRIVATE cxx_std_20)
+target_link_libraries(lua-workspace-source-e2e PRIVATE aegisub_core luajit)
+if(BUILD_TESTING)
+    add_test(NAME lua_workspace_source_roundtrip
+        COMMAND lua-workspace-source-e2e
+            tests/gui-automation/lua-workspace/fixtures
+            "${PROJECT_BINARY_DIR}/artifacts/lua-workspace/source-roundtrip"
+    )
+    set_tests_properties(lua_workspace_source_roundtrip PROPERTIES
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        TIMEOUT 60
+        LABELS "e2e;lua-workspace"
+    )
+endif()
+
 find_package(GTest)
 if(GTEST_FOUND)
     set(AEGISUB_GTEST_SOURCES
