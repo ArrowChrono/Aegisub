@@ -13,9 +13,16 @@
 class wxButton;
 class wxStaticText;
 class wxStyledTextCtrl;
+class wxTextCtrl;
 namespace agi {
 struct Context;
 }
+namespace Automation4 {
+struct AutomationInvocation;
+class AutomationInvocationObserver;
+}
+
+struct LuaWorkspaceRuntimeObservation;
 
 class LuaWorkspaceFrame : public wxFrame {
 	agi::Context *context;
@@ -27,6 +34,11 @@ class LuaWorkspaceFrame : public wxFrame {
 	wxButton *format = nullptr;
 	wxButton *reload = nullptr;
 	wxStaticText *diagnostics = nullptr;
+	wxTextCtrl *runtime_context = nullptr;
+	wxTextCtrl *generated_output = nullptr;
+	std::shared_ptr<void> observation_lifetime = std::make_shared<char>();
+	std::shared_ptr<LuaWorkspaceRuntimeObservation> active_observation;
+	std::uint64_t invocation_sequence = 0;
 	bool loading = false;
 	std::optional<Automation4::LuaSourceDiagnostic> source_diagnostic;
 	std::string action_message;
@@ -42,6 +54,8 @@ class LuaWorkspaceFrame : public wxFrame {
 	void FormatDocument();
 	void CopySource();
 	bool FinishOpen(std::unique_ptr<Automation4::LuaWorkspaceDocument> candidate, Automation4::LuaWorkspaceDocumentResult const& result);
+	void ClearRuntimeObservation();
+	void RenderRuntimeObservation(std::uint64_t sequence, std::weak_ptr<LuaWorkspaceRuntimeObservation> const& observation);
 
 	public:
 	explicit LuaWorkspaceFrame(agi::Context *context);
@@ -53,4 +67,5 @@ class LuaWorkspaceFrame : public wxFrame {
 	void FinishPendingDiscard(bool commit);
 	bool IsDirty() const;
 	void DetachContext();
+	std::shared_ptr<Automation4::AutomationInvocationObserver> BeginInvocationObservation(Automation4::AutomationInvocation const& invocation);
 };

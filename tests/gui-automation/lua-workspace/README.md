@@ -28,3 +28,26 @@ The driver has a 120-second supervising process timeout and per-discovery deadli
 `applied.ass` is frozen immediately after Apply and main Undo/Redo, before later lifecycle scenarios mutate the test document. Use that artifact, not the final `output.ass`, as the subtitle input for `verify-editor-save.json`; the real headless Automation macro in `fixtures/verify-editor-save.lua` checks the persisted code-once business result `38` and the untouched surrounding lines.
 
 The GUI driver requires Windows, .NET 10, the currently built English application UI, and an unlocked interactive desktop. Do not use the keyboard, mouse, or clipboard concurrently with a run. TaskDialog button aliases cover only the English and Simplified Chinese labels observed during development; another localization fails closed rather than assuming button positions. The file-conflict branches exercise the real choice dialog, including a second external file revision between conflict display and overwrite confirmation. These desktop-global input and clipboard constraints are prerequisites, not a claim of safety under concurrent human or automation activity.
+
+## S3 runtime-observation GUI E2E
+
+`runtime-uia.cs` drives the real Automation menu and the Workspace's read-only Context and Generated panes. It copies `fixtures/runtime.ass`, `fixtures/runtime-actions.lua`, `automation/autoload/kara-templater.lua`, and the repository's `automation/include` tree into an isolated artifact directory so the copied template script resolves its normal Lua includes. The independent `fixtures/runtime.expected.json` defines the physical generated ASS events; the driver reads its count and compares each saved line's business fields, rather than hard-coding a count in the UI test. It also covers completion, cancellation, error, rollback, no-output, menu validation, hidden-window isolation, reopening, and one main Undo.
+
+Before Workspace is opened, a real dialog-acknowledged macro verifies that a macro run does not create it implicitly. After reopening, four separate real karaoke-template failure scenarios prepare invalid code or expressions and physically save that precise one-field source change, run the production templater, require the corresponding parse/runtime diagnostic and failed observation, verify live ASS rollback with an independent Automation macro, then undo the preparation and physically save the unchanged event baseline. The final one-step main Undo still applies to the original successful template run. An additional lifecycle case queues an OS `WM_CLOSE` to the verified Workspace HWND while a modal progress run is active, confirms the Workspace hides without ending the run, then cancels that run once; this is not a claim that a user can click a disabled modal parent. The driver finally closes the main window through UIA `WindowPattern.Close` and verifies normal process exit rather than relying on forced cleanup.
+
+The real karaoke templater iterates syllables from index 0 through `kara.n` for the default syllable template. Each of the two karaoke lines therefore produces two line-loop outputs and three syllables (including blank index 0) times two syllable-loop outputs, for 16 generated lines. The explicit `noblank` fixture omits index 0 and expects 12; the `runtime-furi` fixture exercises furigana with an independent 24-line expectation and final `furi` scope. `verify-runtime.ps1` is the separate PowerShell 7 headless E2E for all three variants: it checks every generated event's text, layer, timing, style, and effect, the original event transitions, and each generated-line trace against independent expected data. Run it from the repository root with a fresh artifact directory:
+
+```powershell
+pwsh -File tests/gui-automation/lua-workspace/verify-runtime.ps1 -Artifacts build-dir/artifacts/lua-workspace/runtime-headless
+```
+
+From the repository root, after building the GUI target:
+
+```powershell
+dotnet build tests/gui-automation/lua-workspace/runtime-uia.cs -nologo -v:q
+dotnet run tests/gui-automation/lua-workspace/runtime-uia.cs -- --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/runtime-uia
+```
+
+This separate scenario has a 180-second supervising limit because it invokes a template macro and a matrix of real outcome macros, including a bounded progress-cancellation case. Each operation also has its own deadline. It retains the input and saved/restored ASS, source and expected hashes, manifest steps, Context/Generated text, UIA trees, screenshots, and supervisor status. As with S2, a compiled driver or a `not-run` step is not a pass. The run requires the same unlocked Windows/.NET 10 interactive desktop and no concurrent keyboard, mouse, or clipboard activity; only the English application labels and observed system-dialog aliases are covered.
+
+Pass a fresh artifact directory for every GUI run. The supervisor refuses to overwrite an existing directory. Runtime-pane text is read from the strictly identified native Edit control with one bounded, Unicode `WM_GETTEXT` operation, because the UIA TextPattern range can change while a macro updates the pane; an overlong or truncated result is a failure, not a partial observation.

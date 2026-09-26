@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "lua-workspace-runtime-templater",
+  "hosts": ["headless"],
+  "default_timeout_ms": 30000,
+  "resources": {
+    "script": "../../../automation/autoload/kara-templater.lua",
+    "subtitle": "fixtures/runtime.ass",
+    "output": ""
+  },
+  "steps": [
+    {
+      "action": "run_automation",
+      "script": "script",
+      "subtitle": "subtitle",
+      "output_subtitle": "output",
+      "macro": "Apply karaoke template"
+    }
+  ]
+}

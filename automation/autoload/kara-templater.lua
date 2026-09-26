@@ -994,12 +994,13 @@ function apply_line(meta, styles, subs, line, templates, tenv)
 					end
 				end
 				newline.effect = "fx"
+				subs.append(newline)
 				template_debug_record_generated_line(tenv, newline, {
 					template_debug_id = t.debug_info and t.debug_info.template_debug_id or nil,
 					template_kind = t.debug_info and t.debug_info.template_kind or nil,
 					scope_kind = "line",
 				})
-				subs.append(newline)
+				update_template_debug_context("generated-line", t, tenv)
 				template_debug_leave(tenv, run_restore)
 			end
 		end
@@ -1261,6 +1262,7 @@ function apply_one_syllable_template(syl, line, template, tenv, varctx, subs, sk
 			end
 			newline.effect = "fx"
 			aegisub.debug.out(5, "Generated line with text: %s\n", newline.text)
+			subs.append(newline)
 			template_debug_record_generated_line(tenv, newline, {
 				template_debug_id = t.debug_info and t.debug_info.template_debug_id or nil,
 				template_kind = t.debug_info and t.debug_info.template_kind or nil,
@@ -1269,7 +1271,7 @@ function apply_one_syllable_template(syl, line, template, tenv, varctx, subs, sk
 				highlight_i = tenv.__aegi_template_debug and tenv.__aegi_template_debug.highlight_index or nil,
 				char_i = tenv.__aegi_template_debug and tenv.__aegi_template_debug.char_index or nil,
 			})
-			subs.append(newline)
+			update_template_debug_context("generated-line", t, tenv)
 			applied = applied + 1
 			template_debug_leave(tenv, run_restore)
 		end

@@ -1,0 +1,17 @@
+{
+  "generated_count": 12,
+  "generated": [
+    {"text":"L1:ALPHA;L1:BETA;", "layer":1, "start_ms":1000, "end_ms":2000},
+    {"text":"L2:ALPHA;L2:BETA;", "layer":1, "start_ms":1000, "end_ms":2000},
+    {"text":"S1:ALPHA", "layer":2, "start_ms":1000, "end_ms":1500},
+    {"text":"S2:ALPHA", "layer":2, "start_ms":1000, "end_ms":1500},
+    {"text":"S1:BETA", "layer":2, "start_ms":1500, "end_ms":2000},
+    {"text":"S2:BETA", "layer":2, "start_ms":1500, "end_ms":2000},
+    {"text":"L1:GAMMA;L1:DELTA;", "layer":1, "start_ms":3000, "end_ms":4500},
+    {"text":"L2:GAMMA;L2:DELTA;", "layer":1, "start_ms":3000, "end_ms":4500},
+    {"text":"S1:GAMMA", "layer":2, "start_ms":3000, "end_ms":3750},
+    {"text":"S2:GAMMA", "layer":2, "start_ms":3000, "end_ms":3750},
+    {"text":"S1:DELTA", "layer":2, "start_ms":3750, "end_ms":4500},
+    {"text":"S2:DELTA", "layer":2, "start_ms":3750, "end_ms":4500}
+  ]
+}

@@ -41,6 +41,7 @@
 #include "automation/automation_edit_box_request_policy.h"
 #include "automation/automation_debug_session.h"
 #include "automation/automation_debug_service.h"
+#include "automation/automation_invocation_observer.h"
 #include "automation/automation_live_host.h"
 #include "automation/automation_lua_debug_backend.h"
 #include "automation/automation_lua_runtime.h"
@@ -66,6 +67,7 @@
 
 #include <libaegisub/dispatch.h>
 #include <libaegisub/format.h>
+#include <libaegisub/log.h>
 #include <libaegisub/lua/ffi.h>
 #include <libaegisub/lua/modules.h>
 #include <libaegisub/lua/script_reader.h>
@@ -77,6 +79,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <exception>
 #include <unordered_set>
 #include <wx/clipbrd.h>
 #include <wx/log.h>
@@ -341,6 +344,23 @@ namespace {
 		throw error_tag();
 	}
 
+	int observed_stack_trace(lua_State *L) {
+		auto *cancelled = static_cast<bool *>(lua_touserdata(L, lua_upvalueindex(1)));
+		if (lua_isnil(L, 1)) {
+			lua_Debug frame;
+			for (int level = 1; lua_getstack(L, level, &frame); ++level) {
+				lua_getinfo(L, "f", &frame);
+				bool matches = lua_tocfunction(L, -1) == exception_wrapper<cancel_script>;
+				lua_pop(L, 1);
+				if (matches) {
+					*cancelled = true;
+					break;
+				}
+			}
+		}
+		return add_stack_trace(L);
+	}
+
 	int lua_set_debug_template_context(lua_State *L)
 	{
 		LuaSetAutomationTemplateDebugContext(L, lua_gettop(L) >= 1 ? 1 : 0);
@@ -539,7 +559,7 @@ namespace {
 	/// @param bsr Background script runner to use for the progress dialog
 	/// @param invocation Structured invocation metadata for the current feature call.
 	/// @throws agi::UserCancelException if the function fails to run to completion (either due to cancelling or errors)
-	void LuaThreadedCall(lua_State *L, int nargs, int nresults, BackgroundScriptRunner &bsr, AutomationInvocation const& invocation);
+	void LuaThreadedCall(lua_State *L, int nargs, int nresults, BackgroundScriptRunner& bsr, AutomationInvocation const& invocation, AutomationInvocationOutcome *outcome = nullptr);
 
 	class LuaCommand final : public cmd::Command, private LuaFeature {
 		std::string cmd_name;
@@ -615,6 +635,7 @@ namespace {
 
 		static LuaScript* GetScriptObject(lua_State *L);
 		std::shared_ptr<AutomationHost> GetAutomationHost() const { return automation_host; }
+		[[nodiscard]] AutomationRuntimeTraceSink *GetRuntimeTraceSink() const { return runtime_trace_sink; }
 		bool MatchesAutomationHostContext(agi::Context const* context) const
 		{
 			return automation_host && automation_host_identity == context;
@@ -643,6 +664,58 @@ namespace {
 
 	private:
 		void UpdateTemplateDebugEnabledFlag();
+	};
+
+	class ScopedInvocationObservation final : public AutomationRuntimeTraceSink {
+		LuaScript *script;
+		AutomationRuntimeTraceSink *previous;
+		std::shared_ptr<AutomationInvocationObserver> observer;
+		AutomationInvocationOutcome outcome = AutomationInvocationOutcome::Failed;
+		bool template_failed = false;
+		bool observer_failed = false;
+
+		public:
+		ScopedInvocationObservation(LuaScript *script, std::shared_ptr<AutomationInvocationObserver> observer)
+			: script(script), previous(script->GetRuntimeTraceSink()), observer(std::move(observer)) {
+			if (this->observer)
+				script->SetRuntimeTraceSink(this);
+		}
+
+		~ScopedInvocationObservation() override {
+			if (!observer)
+				return;
+			script->SetRuntimeTraceSink(previous);
+			if (outcome == AutomationInvocationOutcome::Cancelled && template_failed)
+				outcome = AutomationInvocationOutcome::Failed;
+			try {
+				observer->OnInvocationFinished(outcome);
+			}
+			catch (...) {
+				LOG_E("automation/observer") << "Invocation observer failed while publishing its final state";
+			}
+		}
+
+		void SetOutcome(AutomationInvocationOutcome value) { outcome = value; }
+
+		void OnRuntimeStateSnapshot(AutomationRuntimeStateSnapshot const& snapshot) override {
+			if (previous)
+				previous->OnRuntimeStateSnapshot(snapshot);
+			if (snapshot.invocation.kind != AutomationInvocationKind::MacroRun)
+				return;
+			if (snapshot.template_debug) {
+				auto const& state = *snapshot.template_debug;
+				template_failed = state.parse_error.has_value() || state.runtime_error.has_value() || state.kind == "code-parse" || state.kind == "code-error" || state.kind == "expression-parse" || state.kind == "expression-error";
+			}
+			if (observer_failed)
+				return;
+			try {
+				observer->OnRuntimeStateSnapshot(snapshot);
+			}
+			catch (...) {
+				observer_failed = true;
+				LOG_E("automation/observer") << "Invocation observer failed while receiving a runtime snapshot";
+			}
+		}
 	};
 
 	LuaScript::LuaScript(agi::fs::path const& filename)
@@ -1028,33 +1101,91 @@ namespace {
 		return lua_gettop(L) - pretop;
 	}
 
-	void LuaThreadedCall(lua_State *L, int nargs, int nresults, BackgroundScriptRunner &bsr, AutomationInvocation const& invocation)
-	{
+	void LuaThreadedCall(lua_State *L, int nargs, int nresults, BackgroundScriptRunner& bsr, AutomationInvocation const& invocation, AutomationInvocationOutcome *outcome) {
 		bool failed = false;
-		bsr.Run([&](ProgressSink *ps) {
-			LuaProgressSink lps(L, ps, invocation);
-			ScopedAutomationDebugInvocation debug_invocation(
-				LuaScript::GetScriptObject(L)->GetDebugBackend(),
-				invocation);
-
-			// Insert our error handler under the function to call
-			lua_pushcclosure(L, add_stack_trace, 0);
-			lua_insert(L, -nargs - 2);
-
-			if (lua_pcall(L, nargs, nresults, -nargs - 2)) {
-				if (!lua_isnil(L, -1)) {
-					// if the call failed, log the error here
-					ps->Log("\n\nLua reported a runtime error:\n");
-					ps->Log(get_string_or_default(L, -1));
-				}
-				lua_pop(L, 2);
-				failed = true;
-			}
-			else
-				lua_remove(L, -nresults - 1);
-
-			lua_gc(L, LUA_GCCOLLECT, 0);
+		bool failure_recorded = false;
+		auto result = AutomationInvocationOutcome::Failed;
+		std::exception_ptr worker_exception;
+		int stack_base = lua_gettop(L) - nargs - 1;
+		auto publish_outcome = agi::make_scope_exit([&] {
+			if (outcome)
+				*outcome = result;
 		});
+		try {
+			bsr.Run([&](ProgressSink *ps) {
+				try {
+					LuaProgressSink lps(L, ps, invocation);
+					ScopedAutomationDebugInvocation debug_invocation(
+						LuaScript::GetScriptObject(L)->GetDebugBackend(),
+						invocation);
+					bool cancelled = false;
+					if (outcome) {
+						lua_pushlightuserdata(L, &cancelled);
+						lua_pushcclosure(L, observed_stack_trace, 1);
+					}
+					else
+						lua_pushcclosure(L, add_stack_trace, 0);
+					lua_insert(L, -nargs - 2);
+
+					int status = lua_pcall(L, nargs, nresults, -nargs - 2);
+					if (status) {
+						failed = true;
+						result = status == LUA_ERRRUN && cancelled ? AutomationInvocationOutcome::Cancelled : AutomationInvocationOutcome::Failed;
+						failure_recorded = result == AutomationInvocationOutcome::Failed;
+						if (!lua_isnil(L, -1)) {
+							ps->Log("\n\nLua reported a runtime error:\n");
+							ps->Log(get_string_or_default(L, -1));
+						}
+						else if (outcome && !cancelled)
+							ps->Log("\n\nLua reported a runtime error with a nil error value.\n");
+						lua_pop(L, 2);
+					}
+					else {
+						result = AutomationInvocationOutcome::Completed;
+						lua_remove(L, -nresults - 1);
+					}
+
+					if (outcome) {
+						auto *sink = LuaScript::GetScriptObject(L)->GetRuntimeTraceSink();
+						auto snapshot = LuaGetAutomationRuntimeStateSnapshot(L);
+						if (sink && snapshot)
+							sink->OnRuntimeStateSnapshot(*snapshot);
+					}
+					lua_gc(L, LUA_GCCOLLECT, 0);
+				}
+				catch (agi::UserCancelException const&) {
+					if (!outcome)
+						throw;
+					if (!failure_recorded)
+						result = AutomationInvocationOutcome::Cancelled;
+					worker_exception = std::current_exception();
+					lua_settop(L, stack_base);
+				}
+				catch (...) {
+					if (!outcome)
+						throw;
+					result = AutomationInvocationOutcome::Failed;
+					failure_recorded = true;
+					worker_exception = std::current_exception();
+					lua_settop(L, stack_base);
+				}
+			});
+		}
+		catch (agi::UserCancelException const&) {
+			if (!failure_recorded)
+				result = AutomationInvocationOutcome::Cancelled;
+			if (outcome)
+				lua_settop(L, stack_base);
+			throw;
+		}
+		catch (...) {
+			result = AutomationInvocationOutcome::Failed;
+			if (outcome)
+				lua_settop(L, stack_base);
+			throw;
+		}
+		if (worker_exception)
+			std::rethrow_exception(worker_exception);
 		if (failed)
 			throw agi::UserCancelException("Script threw an error");
 	}
@@ -1215,6 +1346,8 @@ namespace {
 		if (auto active_line = core.selectionController->GetActiveLine())
 			original_active = active_line->Row + original_offset;
 		auto host = EnsureLuaScriptHost(L, c);
+		auto observer = host ? host->Ui().BeginInvocationObservation(invocation) : nullptr;
+		ScopedInvocationObservation observation(LuaScript::GetScriptObject(L), observer);
 		auto debug_session = PrepareLuaDebugSession(L, invocation);
 		auto clear_debug_session = agi::make_scope_exit([&] {
 			FinalizeLuaDebugSession(L, debug_session);
@@ -1236,14 +1369,21 @@ namespace {
 		if (!runner)
 			throw AutomationError("Automation background runner unavailable");
 
+		auto call_outcome = AutomationInvocationOutcome::Failed;
 		try {
-			LuaThreadedCall(L, 3, 2, *runner, invocation);
+			LuaThreadedCall(L, 3, 2, *runner, invocation, observer ? &call_outcome : nullptr);
 		}
 		catch (agi::UserCancelException const&) {
+			observation.SetOutcome(call_outcome);
 			subsobj->Cancel();
 			clear_pending_edit_box_request(L);
 			stackcheck.check_stack(0);
 			return;
+		}
+		catch (...) {
+			subsobj->Cancel();
+			clear_pending_edit_box_request(L);
+			throw;
 		}
 
 		auto lines = subsobj->ProcessingComplete(StrDisplay(c));
@@ -1327,6 +1467,7 @@ namespace {
 
 		apply_pending_edit_box_request(L, host.get());
 		stackcheck.check_stack(0);
+		observation.SetOutcome(AutomationInvocationOutcome::Completed);
 	}
 
 	bool LuaCommand::IsActive(const agi::Context *c)

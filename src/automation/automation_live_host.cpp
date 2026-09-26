@@ -25,6 +25,9 @@
 #include "../audio_timing.h"
 #include "../auto4_base.h"
 #include "../frame_main.h"
+#ifdef WITH_WXSTC
+#include "../lua_workspace_frame.h"
+#endif
 #include "../include/aegisub/context.h"
 #include "../include/aegisub/context_ui.h"
 #include "../options.h"
@@ -182,8 +185,24 @@ public:
 	: context(context) {
 	}
 
-	void ShowStatus(std::string const& message, int timeout_ms) override
-	{
+	[[nodiscard]] std::shared_ptr<AutomationInvocationObserver> BeginInvocationObservation(AutomationInvocation const& invocation) const override {
+#ifdef WITH_WXSTC
+		return agi::ui::MainInvoke([this, &invocation]() -> std::shared_ptr<AutomationInvocationObserver> {
+			if (!context)
+				return {};
+			auto *frame = context->GetUI().frame;
+			if (!frame || frame->GetAsyncUiLifetime().expired())
+				return {};
+			auto *workspace = frame->GetLuaWorkspace(false);
+			return workspace ? workspace->BeginInvocationObservation(invocation) : nullptr;
+		});
+#else
+		(void)invocation;
+		return {};
+#endif
+	}
+
+	void ShowStatus(std::string const& message, int timeout_ms) override {
 		if (context)
 			context->ShowStatus(message, timeout_ms);
 	}

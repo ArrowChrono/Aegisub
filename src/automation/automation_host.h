@@ -33,6 +33,8 @@ namespace Automation4 {
 	class AutomationMutationJournal;
 	class ProgressSink;
 	class ScriptDialog;
+	class AutomationInvocationObserver;
+	struct AutomationInvocation;
 	struct AutomationOpenFileDialogRequest;
 	struct AutomationSaveFileDialogRequest;
 
@@ -90,6 +92,7 @@ namespace Automation4 {
 	class AutomationUiProxy {
 	public:
 		virtual ~AutomationUiProxy() = default;
+		[[nodiscard]] virtual std::shared_ptr<AutomationInvocationObserver> BeginInvocationObservation(AutomationInvocation const&) const { return {}; }
 		virtual void ShowStatus(std::string const& message, int timeout_ms = 10000) = 0;
 		virtual bool SupportsInteractiveDialogs() const = 0;
 		virtual std::unique_ptr<BackgroundScriptRunner> CreateBackgroundScriptRunner(std::string const& title, AutomationUiAnchor anchor = {}) const = 0;

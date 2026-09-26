@@ -1,0 +1,29 @@
+{
+  "generated_count": 24,
+  "generated": [
+    {"text":"L1:ALPHA;L1:BETA;", "layer":1, "start_ms":1000, "end_ms":2000, "style":"Default", "scope":"line"},
+    {"text":"L2:ALPHA;L2:BETA;", "layer":1, "start_ms":1000, "end_ms":2000, "style":"Default", "scope":"line"},
+    {"text":"S1:", "layer":2, "start_ms":1000, "end_ms":1000, "style":"Default", "scope":"syl"},
+    {"text":"S2:", "layer":2, "start_ms":1000, "end_ms":1000, "style":"Default", "scope":"syl"},
+    {"text":"S1:ALPHA", "layer":2, "start_ms":1000, "end_ms":1500, "style":"Default", "scope":"syl"},
+    {"text":"S2:ALPHA", "layer":2, "start_ms":1000, "end_ms":1500, "style":"Default", "scope":"syl"},
+    {"text":"S1:BETA", "layer":2, "start_ms":1500, "end_ms":2000, "style":"Default", "scope":"syl"},
+    {"text":"S2:BETA", "layer":2, "start_ms":1500, "end_ms":2000, "style":"Default", "scope":"syl"},
+    {"text":"F1:A", "layer":3, "start_ms":1000, "end_ms":1500, "style":"Default-furigana", "scope":"furi"},
+    {"text":"F2:A", "layer":3, "start_ms":1000, "end_ms":1500, "style":"Default-furigana", "scope":"furi"},
+    {"text":"F1:B", "layer":3, "start_ms":1500, "end_ms":2000, "style":"Default-furigana", "scope":"furi"},
+    {"text":"F2:B", "layer":3, "start_ms":1500, "end_ms":2000, "style":"Default-furigana", "scope":"furi"},
+    {"text":"L1:GAMMA;L1:DELTA;", "layer":1, "start_ms":3000, "end_ms":4500, "style":"Default", "scope":"line"},
+    {"text":"L2:GAMMA;L2:DELTA;", "layer":1, "start_ms":3000, "end_ms":4500, "style":"Default", "scope":"line"},
+    {"text":"S1:", "layer":2, "start_ms":3000, "end_ms":3000, "style":"Default", "scope":"syl"},
+    {"text":"S2:", "layer":2, "start_ms":3000, "end_ms":3000, "style":"Default", "scope":"syl"},
+    {"text":"S1:GAMMA", "layer":2, "start_ms":3000, "end_ms":3750, "style":"Default", "scope":"syl"},
+    {"text":"S2:GAMMA", "layer":2, "start_ms":3000, "end_ms":3750, "style":"Default", "scope":"syl"},
+    {"text":"S1:DELTA", "layer":2, "start_ms":3750, "end_ms":4500, "style":"Default", "scope":"syl"},
+    {"text":"S2:DELTA", "layer":2, "start_ms":3750, "end_ms":4500, "style":"Default", "scope":"syl"},
+    {"text":"F1:G", "layer":3, "start_ms":3000, "end_ms":3750, "style":"Default-furigana", "scope":"furi"},
+    {"text":"F2:G", "layer":3, "start_ms":3000, "end_ms":3750, "style":"Default-furigana", "scope":"furi"},
+    {"text":"F1:D", "layer":3, "start_ms":3750, "end_ms":4500, "style":"Default-furigana", "scope":"furi"},
+    {"text":"F2:D", "layer":3, "start_ms":3750, "end_ms":4500, "style":"Default-furigana", "scope":"furi"}
+  ]
+}
