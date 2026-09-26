@@ -1607,6 +1607,10 @@ endfunction()
 aegisub_enable_wx_utf8_guard(Aegisub)
 if(WITH_WXSTC)
     target_compile_definitions(Aegisub PRIVATE "WITH_WXSTC")
+    target_sources(Aegisub PRIVATE
+        src/lua_workspace_frame.cpp
+        src/automation/lua_workspace_document.cpp
+    )
     target_sources(Aegisub PRIVATE src/subs_edit_ctrl_stc.cpp)
 endif()
 include(${wxWidgets_USE_FILE})

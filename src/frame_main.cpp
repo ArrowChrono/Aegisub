@@ -53,6 +53,9 @@
 #include "font_family_catalog_cache.h"
 #include "libresrc/libresrc.h"
 #include "main.h"
+#ifdef WITH_WXSTC
+#include "lua_workspace_frame.h"
+#endif
 #include "options.h"
 #include "pgs_sup_packet_stream.h"
 #include "project.h"
@@ -75,6 +78,7 @@
 #include <libaegisub/fs.h>
 #include <libaegisub/log.h>
 #include <libaegisub/make_unique.h>
+#include <libaegisub/scope_exit.h>
 #include <libaegisub/string_utils.h>
 
 #include <algorithm>
@@ -451,6 +455,13 @@ FrameMain::FrameMain()
 
 FrameMain::~FrameMain () {
 	ui_activation.Deactivate();
+#ifdef WITH_WXSTC
+	if (lua_workspace) {
+		lua_workspace->DetachContext();
+		delete lua_workspace;
+		lua_workspace = nullptr;
+	}
+#endif
 	auto core = context->GetCore();
 #ifdef _WIN32
 	FontChangeDebounce.Stop();
@@ -469,6 +480,41 @@ FrameMain::~FrameMain () {
 	core.project->CloseVideo();
 
 	DestroyChildren();
+}
+
+LuaWorkspaceFrame *FrameMain::GetLuaWorkspace(bool create) {
+#ifdef WITH_WXSTC
+	if (create && !lua_workspace)
+		lua_workspace = new LuaWorkspaceFrame(context.get());
+#else
+	(void)create;
+#endif
+	return lua_workspace;
+}
+
+bool FrameMain::PrepareLuaWorkspaceForClose() {
+#ifdef WITH_WXSTC
+	return !lua_workspace || lua_workspace->PrepareToClose(true);
+#else
+	return true;
+#endif
+}
+
+void FrameMain::FinishLuaWorkspaceClose(bool discard) {
+#ifdef WITH_WXSTC
+	if (lua_workspace)
+		lua_workspace->FinishPendingDiscard(discard);
+#else
+	(void)discard;
+#endif
+}
+
+bool FrameMain::NeedsLuaWorkspaceCloseDecision() const {
+#ifdef WITH_WXSTC
+	return lua_workspace && lua_workspace->IsDirty() && !lua_workspace->HasPendingDiscard();
+#else
+	return false;
+#endif
 }
 
 void FrameMain::EnableToolBar(agi::OptionValue const& opt) {
@@ -881,6 +927,7 @@ BEGIN_EVENT_TABLE(FrameMain, wxFrame)
 END_EVENT_TABLE()
 
 void FrameMain::OnCloseWindow(wxCloseEvent &event) {
+	auto workspace_close = agi::make_scope_exit([this] { FinishLuaWorkspaceClose(false); });
 	wxEventBlocker blocker(this, wxEVT_CLOSE_WINDOW);
 	auto core = context->GetCore();
 	auto ui = context->GetUI();

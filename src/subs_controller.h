@@ -175,6 +175,7 @@ class SubsController {
 
 	/// The filename of the currently open file, if any
 	agi::fs::path filename;
+	std::uint64_t document_generation = 0;
 
 	/// Set the filename, updating things like the MRU and last used path
 	void SetFileName(agi::fs::path const& file);
@@ -249,6 +250,7 @@ public:
 	bool IsModified() const { return commit_id != saved_commit_id; };
 	/// Current subtitle document revision used by snapshot/transaction clients.
 	int64_t GetDocumentRevision() const { return commit_id; }
+	[[nodiscard]] std::uint64_t GetDocumentGeneration() const { return document_generation; }
 
 	/// @brief Load from a file
 	/// @param file File name

@@ -40,6 +40,12 @@
 #include "../include/aegisub/context_ui.h"
 #include "../libresrc/libresrc.h"
 #include "../options.h"
+#include "../ass_dialogue.h"
+#include "../selection_controller.h"
+#include "../automation/karaoke_line_classifier.h"
+#ifdef WITH_WXSTC
+#include "../lua_workspace_frame.h"
+#endif
 
 #include <libaegisub/make_unique.h>
 
@@ -119,6 +125,25 @@ struct toggle_debug_mode final : public Command {
 	}
 };
 
+#ifdef WITH_WXSTC
+struct open_lua_workspace final : public Command {
+	CMD_NAME("automation/lua/open-current-line")
+	STR_MENU("Open Code Line in Lua &Workspace...")
+	STR_DISP("Open Code Line in Lua Workspace")
+	STR_HELP("Edit the current karaoke code line as multiline Lua")
+	CMD_TYPE(COMMAND_VALIDATE)
+
+	bool Validate(agi::Context const *c) override {
+		auto const *line = c->GetCore().selectionController->GetActiveLine();
+		return line && Automation4::IsKaraokeCodeLine(line->Comment, line->Effect.get());
+	}
+
+	void operator()(agi::Context *c) override {
+		if (Validate(c))
+			c->GetUI().frame->GetLuaWorkspace()->OpenCurrentLine();
+	}
+};
+#endif
 }
 
 namespace cmd {
@@ -128,5 +153,8 @@ namespace cmd {
 		reg(agi::make_unique<reload_all>());
 		reg(agi::make_unique<reload_autoload>());
 		reg(agi::make_unique<toggle_debug_mode>());
+#ifdef WITH_WXSTC
+		reg(agi::make_unique<open_lua_workspace>());
+#endif
 	}
 }

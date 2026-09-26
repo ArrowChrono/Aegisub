@@ -59,6 +59,7 @@
 #include <libaegisub/charset_conv.h>
 #include <libaegisub/fs.h>
 #include <libaegisub/make_unique.h>
+#include <libaegisub/scope_exit.h>
 
 #include <wx/choicdlg.h>
 namespace {
@@ -297,6 +298,7 @@ struct subtitle_new final : public Command {
 	STR_HELP("New subtitles")
 
 	void operator()(agi::Context *c) override {
+		auto workspace_close = agi::make_scope_exit([frame = c->GetUI().frame] { if (frame) frame->FinishLuaWorkspaceClose(false); });
 		aegisub::project_session_ops::ExecuteSubtitleSessionAction(
 			resolve_subtitle_session_target(c),
 			[&] { c->GetCore().project->CloseSubtitles(); },
@@ -324,6 +326,7 @@ struct subtitle_open final : public Command {
 	STR_HELP("Open a subtitles file")
 
 	void operator()(agi::Context *c) override {
+		auto workspace_close = agi::make_scope_exit([frame = c->GetUI().frame] { if (frame) frame->FinishLuaWorkspaceClose(false); });
 		auto target = resolve_subtitle_session_target(c);
 		if (target == aegisub::project_session_ops::SubtitleSessionTarget::Cancel) return;
 
@@ -339,6 +342,7 @@ struct subtitle_open_autosave final : public Command {
 	STR_HELP("Open a previous version of a file which was autosaved by Aegisub")
 
 	void operator()(agi::Context *c) override {
+		auto workspace_close = agi::make_scope_exit([frame = c->GetUI().frame] { if (frame) frame->FinishLuaWorkspaceClose(false); });
 		auto target = resolve_subtitle_session_target(c);
 		if (target == aegisub::project_session_ops::SubtitleSessionTarget::Cancel) return;
 
@@ -355,6 +359,7 @@ struct subtitle_open_charset final : public Command {
 	STR_HELP("Open a subtitles file with a specific file encoding")
 
 	void operator()(agi::Context *c) override {
+		auto workspace_close = agi::make_scope_exit([frame = c->GetUI().frame] { if (frame) frame->FinishLuaWorkspaceClose(false); });
 		auto target = resolve_subtitle_session_target(c);
 		if (target == aegisub::project_session_ops::SubtitleSessionTarget::Cancel) return;
 
@@ -379,6 +384,7 @@ struct subtitle_open_video final : public Command {
 
 	void operator()(agi::Context *c) override {
 		auto core = c->GetCore();
+		auto workspace_close = agi::make_scope_exit([frame = c->GetUI().frame] { if (frame) frame->FinishLuaWorkspaceClose(false); });
 		if (core.subsController->TryToClose() == wxCANCEL) return;
 		core.project->LoadSubtitles(core.project->VideoName(), "binary", false);
 	}

@@ -334,12 +334,22 @@ void SubsController::SetSelectionController(SelectionController *selection_contr
 }
 
 ProjectProperties SubsController::Load(agi::fs::path const& filename, std::string charset, bool is_reload) {
+	auto *frame = context->GetUI().frame;
+	auto workspace_close = agi::make_scope_exit([frame] {
+		if (frame)
+			frame->FinishLuaWorkspaceClose(false);
+	});
+	if (frame && frame->NeedsLuaWorkspaceCloseDecision() && TryToClose() == wxCANCEL)
+		throw agi::UserCancelException("Subtitle change cancelled in Lua Workspace");
 	WaitForSaveEveryChangeWrites(true);
 	AssFile temp;
 	auto core = context->GetCore();
 
 	SubtitleFormat::GetReader(filename, charset)->ReadFile(&temp, filename, core.project->Timecodes(), charset, context->GetSingleChoiceInteractionSink(), core.backgroundRunnerFactory);
 
+	if (frame)
+		frame->FinishLuaWorkspaceClose(true);
+	++document_generation;
 	core.ass->swap(temp);
 	auto props = core.ass->Properties;
 
@@ -416,6 +426,13 @@ void SubsController::Save(agi::fs::path const& filename, std::string const& enco
 }
 
 void SubsController::Close() {
+	auto *frame = context->GetUI().frame;
+	auto workspace_close = agi::make_scope_exit([frame] {
+		if (frame)
+			frame->FinishLuaWorkspaceClose(false);
+	});
+	if (frame && frame->NeedsLuaWorkspaceCloseDecision() && TryToClose() == wxCANCEL)
+		throw agi::UserCancelException("Subtitle change cancelled in Lua Workspace");
 	WaitForSaveEveryChangeWrites(true);
 	undo_stack.clear();
 	redo_stack.clear();
@@ -423,6 +440,9 @@ void SubsController::Close() {
 	filename.clear();
 	AssFile blank;
 	auto core = context->GetCore();
+	if (frame)
+		frame->FinishLuaWorkspaceClose(true);
+	++document_generation;
 	blank.swap(*core.ass);
 	LoadDefaultAssFileWithAppOptions(*core.ass, true, OPT_GET("Subtitle Format/ASS/Default Style Catalog")->GetString());
 	core.ass->Commit("", AssFile::COMMIT_NEW);
@@ -431,6 +451,9 @@ void SubsController::Close() {
 }
 
 int SubsController::TryToClose(bool allow_cancel) {
+	auto *frame = context->GetUI().frame;
+	if (frame && !frame->PrepareLuaWorkspaceForClose())
+		return wxCANCEL;
 	// Preserve the old synchronous option semantics: if the latest automatic
 	// write succeeds, closing should not briefly prompt for already-saved work.
 	WaitForSaveEveryChangeWrites(false);

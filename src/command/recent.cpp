@@ -29,6 +29,7 @@
 
 #include "command.h"
 
+#include "../frame_main.h"
 #include "../include/aegisub/context.h"
 #include "../include/aegisub/context_ui.h"
 #include "../libresrc/libresrc.h"
@@ -39,6 +40,7 @@
 #include "../subs_controller.h"
 
 #include <libaegisub/make_unique.h>
+#include <libaegisub/scope_exit.h>
 
 namespace {
 	using cmd::Command;
@@ -78,6 +80,7 @@ struct recent_subtitle_entry : public Command {
 	STR_HELP("Open recent subtitles")
 
 	void operator()(agi::Context *c, int id) {
+		auto workspace_close = agi::make_scope_exit([frame = c->GetUI().frame] { if (frame) frame->FinishLuaWorkspaceClose(false); });
 		auto path = config::mru->GetEntry("Subtitle", id);
 		auto target = aegisub::project_session_ops::ResolveSubtitleSessionTarget(
 #ifdef __APPLE__

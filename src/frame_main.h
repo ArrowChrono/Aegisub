@@ -41,6 +41,7 @@ class AegisubApp;
 class AsyncVideoProvider;
 class AudioBox;
 class VideoBox;
+class LuaWorkspaceFrame;
 class wxPanel;
 class wxSplitterWindow;
 class wxToolBar;
@@ -51,6 +52,7 @@ class FrameMain : public wxFrame {
 	friend class AegisubApp;
 
 	std::unique_ptr<agi::Context> context;
+	LuaWorkspaceFrame *lua_workspace = nullptr;
 	agi::ui::UiActivationScope ui_activation;
 
     // XXX: Make Freeze()/Thaw() noops on GTK, this seems to be buggy
@@ -147,6 +149,10 @@ public:
 
 	/// Update the window title to reflect current filename and modified state
 	void UpdateTitle();
+	LuaWorkspaceFrame *GetLuaWorkspace(bool create = true);
+	bool PrepareLuaWorkspaceForClose();
+	[[nodiscard]] bool NeedsLuaWorkspaceCloseDecision() const;
+	void FinishLuaWorkspaceClose(bool discard);
 
 	bool IsVideoShown() const { return showVideo; }
 	bool IsAudioShown() const { return showAudio; }

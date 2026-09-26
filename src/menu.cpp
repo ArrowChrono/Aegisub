@@ -618,6 +618,9 @@ public:
 	, local_slot(c->GetCore().local_scripts->AddScriptChangeListener(&AutomationMenu::Regenerate, this))
 	{
 		cm->AddCommand(cmd::get("am/meta"), this);
+#ifdef WITH_WXSTC
+		cm->AddCommand(cmd::get("automation/lua/open-current-line"), this);
+#endif
 		// Plugin macros (including DependencyControl) register themselves when
 		// their plugin payload loads successfully, the same way auto4 scripts do.
 		AppendSeparator();

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "lua-workspace-persisted-source",
+  "hosts": ["headless"],
+  "default_timeout_ms": 10000,
+  "resources": {
+    "script": "fixtures/verify-editor-save.lua",
+    "subtitle": "",
+    "output": ""
+  },
+  "steps": [
+    {
+      "action": "run_automation",
+      "script": "script",
+      "subtitle": "subtitle",
+      "output_subtitle": "output",
+      "macro": "Verify Lua Workspace persisted source"
+    }
+  ]
+}

@@ -41,6 +41,11 @@
 #include "libresrc/libresrc.h"
 #include "options.h"
 #include "ui_services.h"
+#ifdef WITH_WXSTC
+#include "frame_main.h"
+#include "lua_workspace_frame.h"
+#include <libaegisub/string_utils.h>
+#endif
 
 #include <libaegisub/fs.h>
 #include <libaegisub/signal.h>
@@ -145,6 +150,10 @@ class DialogAutomation final : public wxDialog {
 
 	/// Reload a script
 	wxButton *reload_button;
+#ifdef WITH_WXSTC
+	wxButton *workspace_button;
+	void OnOpenWorkspace(wxCommandEvent&);
+#endif
 
 	/// Toggle live automation debug mode
 	wxButton *debug_mode_button;
@@ -182,6 +191,10 @@ DialogAutomation::DialogAutomation(agi::Context *c)
 	wxButton *add_button = new wxButton(this, -1, _("&Add"));
 	remove_button = new wxButton(this, -1, _("&Remove"));
 	reload_button = new wxButton(this, -1, _("Re&load"));
+#ifdef WITH_WXSTC
+	workspace_button = new wxButton(this, -1, _("Edit in Lua &Workspace"));
+	workspace_button->Bind(wxEVT_BUTTON, &DialogAutomation::OnOpenWorkspace, this);
+#endif
 	debug_mode_button = new wxButton(this, -1, _("Enable Debug Mode"));
 	wxButton *info_button = new wxButton(this, -1, _("Show &Info"));
 	wxButton *reload_autoload_button = new wxButton(this, -1, _("Re&scan Autoload Dir"));
@@ -209,6 +222,9 @@ DialogAutomation::DialogAutomation(agi::Context *c)
 	button_box->Add(remove_button, 0);
 	button_box->AddSpacer(10);
 	button_box->Add(reload_button, 0);
+#ifdef WITH_WXSTC
+	button_box->Add(workspace_button, 0);
+#endif
 	button_box->Add(debug_mode_button, 0);
 	button_box->Add(info_button, 0);
 	button_box->AddSpacer(10);
@@ -275,8 +291,22 @@ void DialogAutomation::UpdateDisplay()
 	bool local = selected && !script_info[list->GetItemData(i)].is_global;
 	remove_button->Enable(local);
 	reload_button->Enable(selected);
+#ifdef WITH_WXSTC
+	workspace_button->Enable(selected && agi::util::strings::iequals(
+											 agi::fs::PathToString(script_info[list->GetItemData(i)].script->GetFilename().extension()), ".lua"));
+#endif
 	UpdateDebugModeButton();
 }
+
+#ifdef WITH_WXSTC
+void DialogAutomation::OnOpenWorkspace(wxCommandEvent&) {
+	int index = list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+	if (index < 0)
+		return;
+	auto const filename = script_info[list->GetItemData(index)].script->GetFilename();
+	context->GetUI().frame->GetLuaWorkspace()->OpenFile(filename);
+}
+#endif
 
 void DialogAutomation::UpdateDebugModeButton()
 {
