@@ -16,6 +16,7 @@
 
 #include "automation_context_snapshot.h"
 #include "automation_host.h"
+#include "lua_workspace_run.h"
 
 #include <libaegisub/lua/utils.h>
 
@@ -33,6 +34,15 @@ namespace {
 	constexpr char kContextSnapshotRegistryKey[] = "automation_context_snapshot";
 	constexpr char kTemplateDebugContextRegistryKey[] = "automation_template_debug_context";
 	constexpr char kRuntimeTraceSinkRegistryKey[] = "automation_runtime_trace_sink";
+	constexpr char kWorkspaceRunRegistryKey[] = "automation_workspace_run";
+	constexpr char kWorkspaceRunMetatable[] = "automation_workspace_run_metatable";
+	char workspace_cancel_token;
+
+	int destroy_workspace_run(lua_State *L) {
+		using Request = std::shared_ptr<LuaWorkspaceRunRequest const>;
+		static_cast<Request *>(lua_touserdata(L, 1))->~Request();
+		return 0;
+	}
 
 	int absolute_index(lua_State *L, int index)
 	{
@@ -820,6 +830,40 @@ namespace {
 }
 
 namespace Automation4 {
+void LuaSetWorkspaceRunRequest(lua_State *L, std::shared_ptr<LuaWorkspaceRunRequest const> request) {
+	if (request) {
+		using Request = std::shared_ptr<LuaWorkspaceRunRequest const>;
+		auto *storage = static_cast<Request *>(lua_newuserdata(L, sizeof(Request)));
+		new (storage) Request(std::move(request));
+		if (luaL_newmetatable(L, kWorkspaceRunMetatable)) {
+			lua_pushcfunction(L, destroy_workspace_run);
+			lua_setfield(L, -2, "__gc");
+		}
+		lua_setmetatable(L, -2);
+	}
+	else
+		lua_pushnil(L);
+	lua_setfield(L, LUA_REGISTRYINDEX, kWorkspaceRunRegistryKey);
+}
+
+std::shared_ptr<LuaWorkspaceRunRequest const> LuaGetWorkspaceRunRequest(lua_State *L) {
+	lua_getfield(L, LUA_REGISTRYINDEX, kWorkspaceRunRegistryKey);
+	std::shared_ptr<LuaWorkspaceRunRequest const> request;
+	if (lua_isuserdata(L, -1))
+		request = *static_cast<std::shared_ptr<LuaWorkspaceRunRequest const> *>(lua_touserdata(L, -1));
+	lua_pop(L, 1);
+	return request;
+}
+
+int LuaRaiseWorkspaceCancellation(lua_State *L) {
+	lua_pushlightuserdata(L, &workspace_cancel_token);
+	return lua_error(L);
+}
+
+bool LuaIsWorkspaceCancellation(lua_State *L, int index) {
+	return lua_islightuserdata(L, index) && lua_touserdata(L, index) == &workspace_cancel_token;
+}
+
 	void LuaSetAutomationHost(lua_State *L, std::shared_ptr<AutomationHost> host)
 	{
 		store_automation_host(L, std::move(host));

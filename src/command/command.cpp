@@ -12,12 +12,14 @@
 // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+#include "../automation/automation_debug_service.h"
 #include "command.h"
 
 #include "../compat.h"
 #include "../format.h"
 #include "../include/aegisub/context.h"
 #include "../status_sink.h"
+#include "../options.h"
 
 #include <libaegisub/log.h>
 
@@ -52,6 +54,10 @@ namespace cmd {
 	}
 
 	void call(std::string const& name, agi::Context*c) {
+		if (c && (c->lua_workspace_invocation_active || (config::automation_debug_service && config::automation_debug_service->HasLocalSession()))) {
+			c->ShowStatus("A Lua Workspace invocation is active. Use its Stop or Detach controls.");
+			return;
+		}
 		Command &cmd = *find_command(name)->second;
 		if (cmd.Validate(c)) {
 			auto sink = c->GetStatusSink();

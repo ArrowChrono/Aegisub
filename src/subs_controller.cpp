@@ -334,6 +334,8 @@ void SubsController::SetSelectionController(SelectionController *selection_contr
 }
 
 ProjectProperties SubsController::Load(agi::fs::path const& filename, std::string charset, bool is_reload) {
+	if (context->lua_workspace_invocation_active)
+		throw agi::UserCancelException("Wait for the Lua Workspace invocation to finish before changing subtitles");
 	auto *frame = context->GetUI().frame;
 	auto workspace_close = agi::make_scope_exit([frame] {
 		if (frame)
@@ -426,6 +428,8 @@ void SubsController::Save(agi::fs::path const& filename, std::string const& enco
 }
 
 void SubsController::Close() {
+	if (context->lua_workspace_invocation_active)
+		throw agi::UserCancelException("Wait for the Lua Workspace invocation to finish before changing subtitles");
 	auto *frame = context->GetUI().frame;
 	auto workspace_close = agi::make_scope_exit([frame] {
 		if (frame)
@@ -451,6 +455,10 @@ void SubsController::Close() {
 }
 
 int SubsController::TryToClose(bool allow_cancel) {
+	if (context->lua_workspace_invocation_active) {
+		context->ShowStatus("Wait for the Lua Workspace invocation to finish before closing subtitles.");
+		return wxCANCEL;
+	}
 	auto *frame = context->GetUI().frame;
 	if (frame && !frame->PrepareLuaWorkspaceForClose())
 		return wxCANCEL;
@@ -842,6 +850,10 @@ bool SubsController::HasFileChangedOnDisk() const {
 }
 
 void SubsController::OnWatchedFileChanged(agi::fs::path const&) {
+	if (context->lua_workspace_invocation_active) {
+		external_file_change_pending = true;
+		return;
+	}
 	ApplyCompletedSaveEveryChangeWrites();
 	if (filename.empty())
 		return;
@@ -902,6 +914,11 @@ void SubsController::OnWatchedFileChanged(agi::fs::path const&) {
 			return;
 		}
 	}
+}
+
+void SubsController::ProcessPendingExternalChange() {
+	if (external_file_change_pending && !context->lua_workspace_invocation_active)
+		OnWatchedFileChanged(filename);
 }
 
 void SubsController::OnFileWatchError(std::string const& message) {

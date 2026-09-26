@@ -3,14 +3,20 @@
 #include "ass_dialogue.h"
 #include "ass_file.h"
 #include "automation/automation_invocation_observer.h"
+#include "automation/automation_breakpoint_store.h"
+#include "automation/automation_debug_service.h"
+#include "auto4_base.h"
+#include "command/command.h"
 #include "compat.h"
 #include "include/aegisub/context.h"
 #include "include/aegisub/context_ui.h"
+#include "options.h"
 #include "selection_controller.h"
 #include "subs_controller.h"
 #include "ui_dispatch.h"
 
 #include <libaegisub/fs.h>
+#include <libaegisub/log.h>
 #include <libaegisub/scope_exit.h>
 
 #include <wx/button.h>
@@ -20,6 +26,7 @@
 #include <wx/filedlg.h>
 #include <wx/font.h>
 #include <wx/intl.h>
+#include <wx/listbox.h>
 #include <wx/msgdlg.h>
 #include <wx/notebook.h>
 #include <wx/panel.h>
@@ -27,10 +34,13 @@
 #include <wx/stattext.h>
 #include <wx/stc/stc.h>
 #include <wx/textctrl.h>
+#include <wx/timer.h>
+#include <wx/utils.h>
 
 #include <algorithm>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <string_view>
 #include <utility>
 
@@ -174,7 +184,9 @@ struct LuaWorkspaceRuntimeObservation {
 	std::mutex mutex;
 	RuntimeView view;
 	bool queued = false;
+	bool workspace_run = false;
 	LuaWorkspaceDocument const *document = nullptr;
+	std::uint64_t generation = 0;
 	std::uint64_t revision = 0;
 };
 
@@ -254,6 +266,7 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	auto layout = new wxBoxSizer(wxVERTICAL);
 	auto actions = new wxBoxSizer(wxHORIZONTAL);
 	auto open = new wxButton(panel, wxID_OPEN, _("Open File"));
+	open_button = open;
 	apply = new wxButton(panel, wxID_SAVE, _("Apply"));
 	format = new wxButton(panel, wxID_ANY, _("Format"));
 	reload = new wxButton(panel, wxID_ANY, _("Reload"));
@@ -266,6 +279,32 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	for (auto button : {open, apply, format, reload, copy})
 		actions->Add(button, 0, wxRIGHT, 6);
 	layout->Add(actions, 0, wxEXPAND | wxALL, 8);
+	auto run_actions = new wxBoxSizer(wxHORIZONTAL);
+	run_button = new wxButton(panel, wxID_ANY, _("Run"));
+	debug_button = new wxButton(panel, wxID_ANY, _("Debug"));
+	continue_button = new wxButton(panel, wxID_ANY, _("Continue"));
+	pause_button = new wxButton(panel, wxID_ANY, _("Pause"));
+	stop_button = new wxButton(panel, wxID_ANY, _("Stop"));
+	detach_button = new wxButton(panel, wxID_ANY, _("Detach"));
+	for (auto button : {run_button, debug_button, continue_button, pause_button, stop_button, detach_button}) {
+		button->SetName(button->GetLabel());
+		run_actions->Add(button, 0, wxRIGHT, 6);
+	}
+	layout->Add(run_actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+	auto step_actions = new wxBoxSizer(wxHORIZONTAL);
+	step_in_button = new wxButton(panel, wxID_ANY, _("Step In"));
+	step_over_button = new wxButton(panel, wxID_ANY, _("Step Over"));
+	step_out_button = new wxButton(panel, wxID_ANY, _("Step Out"));
+	auto toggle_breakpoint = new wxButton(panel, wxID_ANY, _("Toggle Breakpoint"));
+	auto clear_breakpoints = new wxButton(panel, wxID_ANY, _("Clear Breakpoints"));
+	for (auto button : {step_in_button, step_over_button, step_out_button, toggle_breakpoint, clear_breakpoints}) {
+		button->SetName(button->GetLabel());
+		step_actions->Add(button, 0, wxRIGHT, 6);
+	}
+	layout->Add(step_actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+	run_status = new wxStaticText(panel, wxID_ANY, _("No Workspace invocation."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
+	run_status->SetName(wxS("Lua run status"));
+	layout->Add(run_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
 	editor = new wxStyledTextCtrl(panel, wxID_ANY);
 	editor->SetName(wxS("Lua source"));
 	editor->SetCodePage(wxSTC_CP_UTF8);
@@ -288,14 +327,18 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	editor->SetEOLMode(wxSTC_EOL_LF);
 	editor->SetMarginType(0, wxSTC_MARGIN_NUMBER);
 	editor->SetMarginWidth(0, 52);
-	editor->SetMarginWidth(1, 0);
+	editor->SetMarginType(1, wxSTC_MARGIN_SYMBOL);
+	editor->SetMarginMask(1, 1 << 1);
+	editor->SetMarginWidth(1, 18);
+	editor->SetMarginSensitive(1, true);
+	editor->MarkerDefine(1, wxSTC_MARK_CIRCLE, wxColour(180, 30, 30), wxColour(180, 30, 30));
 	editor->IndicatorSetStyle(diagnostic_indicator, wxSTC_INDIC_SQUIGGLE);
 	editor->IndicatorSetForeground(diagnostic_indicator, wxColour(200, 40, 40));
 	editor->IndicatorSetUnder(diagnostic_indicator, true);
 	editor->SetReadOnly(true);
 	auto body = new wxBoxSizer(wxHORIZONTAL);
-	body->Add(editor, 3, wxEXPAND | wxLEFT | wxRIGHT, 8);
-	auto runtime_tabs = new wxNotebook(panel, wxID_ANY);
+	body->Add(editor, 1, wxEXPAND | wxLEFT | wxRIGHT, 8);
+	runtime_tabs = new wxNotebook(panel, wxID_ANY);
 	runtime_tabs->SetMinSize(wxSize(280, -1));
 	runtime_context = new wxTextCtrl(runtime_tabs, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
 	generated_output = new wxTextCtrl(runtime_tabs, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
@@ -303,11 +346,40 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	generated_output->SetName(wxS("Lua generated output"));
 	runtime_tabs->AddPage(runtime_context, _("Context"));
 	runtime_tabs->AddPage(generated_output, _("Generated"));
+	auto execution_panel = new wxPanel(runtime_tabs);
+	auto execution_layout = new wxBoxSizer(wxVERTICAL);
+	execution_identity = new wxStaticText(execution_panel, wxID_ANY, _("No paused source."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
+	execution_identity->SetName(wxS("Lua execution identity"));
+	execution_source = new wxStyledTextCtrl(execution_panel, wxID_ANY);
+	execution_source->SetName(wxS("Lua execution source"));
+	execution_source->SetCodePage(wxSTC_CP_UTF8);
+	execution_source->SetLexer(wxSTC_LEX_LUA);
+	execution_source->SetMarginType(0, wxSTC_MARGIN_NUMBER);
+	execution_source->SetMarginWidth(0, 42);
+	execution_source->MarkerDefine(2, wxSTC_MARK_ARROW, wxColour(35, 70, 180), wxColour(35, 70, 180));
+	execution_source->SetReadOnly(true);
+	execution_layout->Add(execution_identity, 0, wxEXPAND | wxALL, 4);
+	execution_layout->Add(execution_source, 1, wxEXPAND | wxALL, 4);
+	execution_panel->SetSizer(execution_layout);
+	runtime_tabs->AddPage(execution_panel, _("Execution Source"));
+	auto stack_panel = new wxPanel(runtime_tabs);
+	auto stack_layout = new wxBoxSizer(wxVERTICAL);
+	stack_frames = new wxListBox(stack_panel, wxID_ANY);
+	stack_frames->SetName(wxS("Lua stack frames"));
+	debug_variables = new wxTextCtrl(stack_panel, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
+	debug_variables->SetName(wxS("Lua variables"));
+	stack_layout->Add(stack_frames, 1, wxEXPAND | wxALL, 4);
+	stack_layout->Add(debug_variables, 2, wxEXPAND | wxALL, 4);
+	stack_panel->SetSizer(stack_layout);
+	runtime_tabs->AddPage(stack_panel, _("Stack and Variables"));
 	body->Add(runtime_tabs, 1, wxEXPAND | wxRIGHT, 8);
 	layout->Add(body, 1, wxEXPAND);
 	diagnostics = new wxStaticText(panel, wxID_ANY, _("Open a karaoke code line or a Lua source file."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
 	diagnostics->SetName(wxS("Lua diagnostics"));
 	layout->Add(diagnostics, 0, wxEXPAND | wxALL, 8);
+	run_log = new wxTextCtrl(panel, wxID_ANY, {}, wxDefaultPosition, wxSize(-1, 82), wxTE_MULTILINE | wxTE_READONLY);
+	run_log->SetName(wxS("Lua run log"));
+	layout->Add(run_log, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
 	panel->SetSizer(layout);
 	ClearRuntimeObservation();
 	auto frame_layout = new wxBoxSizer(wxVERTICAL);
@@ -324,6 +396,36 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	format->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { FormatDocument(); });
 	reload->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ReloadDocument(); });
 	copy->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { CopySource(); });
+	run_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { StartRun(false); });
+	debug_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { StartRun(true); });
+	continue_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (active_session) active_session->Resume(AutomationDebugResumeAction::Continue); });
+	pause_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (active_session) active_session->RequestPause(); });
+	step_in_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (active_session) active_session->Resume(AutomationDebugResumeAction::StepIn); });
+	step_over_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (active_session) active_session->Resume(AutomationDebugResumeAction::Next); });
+	step_out_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (active_session) active_session->Resume(AutomationDebugResumeAction::StepOut); });
+	stop_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+		if (active_run_request) {
+			active_run_request->stop_requested->store(true);
+			if (active_session)
+				active_session->Detach();
+			run_status->SetLabel(_("Stopping at the next safe Lua checkpoint..."));
+		}
+	});
+	detach_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+		if (active_session)
+			active_session->Detach();
+		run_status->SetLabel(_("Detached; the invocation is still running and may commit subtitles."));
+		UpdateRunControls();
+	});
+	toggle_breakpoint->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ToggleBreakpoint(editor->GetCurrentLine() + 1); });
+	clear_breakpoints->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editor->MarkerDeleteAll(1); });
+	editor->Bind(wxEVT_STC_MARGINCLICK, [this](wxStyledTextEvent& event) {
+		if (event.GetMargin() == 1)
+			ToggleBreakpoint(editor->LineFromPosition(event.GetPosition()) + 1);
+	});
+	stack_frames->Bind(wxEVT_LISTBOX, [this](wxCommandEvent&) { ShowSelectedFrame(); });
+	debug_timer = new wxTimer(this);
+	Bind(wxEVT_TIMER, [this](wxTimerEvent&) { PollDebugState(); }, debug_timer->GetId());
 	editor->Bind(wxEVT_STC_CHANGE, [this](wxStyledTextEvent&) {
 		if (loading || !document)
 			return;
@@ -331,7 +433,13 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 		source_diagnostic.reset();
 		action_message.clear();
 		document->SetSource(from_wx(editor->GetText()));
-		ClearRuntimeObservation();
+		if (active_observation) {
+			if (active_observation->workspace_run)
+				RenderRuntimeObservation(invocation_sequence, active_observation);
+			else
+				ClearRuntimeObservation();
+		}
+		UpdateRunControls();
 		RefreshDocument(false);
 	});
 	editor->Bind(wxEVT_STC_CHARADDED, [this](wxStyledTextEvent& event) {
@@ -359,6 +467,27 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent& event) {
 		if (event.ControlDown() && !event.AltDown()) {
 			int key = event.GetKeyCode();
+			auto *focused = wxWindow::FindFocus();
+			if (focused == editor || focused == execution_source) {
+				auto *source = static_cast<wxStyledTextCtrl *>(focused);
+				if (key == 'A') {
+					source->SelectAll();
+					return;
+				}
+				if (key == 'C') {
+					source->Copy();
+					return;
+				}
+				if (key == 'X' || key == 'V') {
+					if (source == editor) {
+						if (key == 'X')
+							source->Cut();
+						else
+							source->Paste();
+					}
+					return;
+				}
+			}
 			if (key == 'S') {
 				SaveDocument();
 				return;
@@ -398,11 +527,18 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 		});
 	}
 	RefreshDocument(false);
+	UpdateRunControls();
 }
 
-LuaWorkspaceFrame::~LuaWorkspaceFrame() { DetachContext(); }
+LuaWorkspaceFrame::~LuaWorkspaceFrame() {
+	DetachContext();
+	debug_timer->Stop();
+	delete debug_timer;
+}
 
 void LuaWorkspaceFrame::DetachContext() {
+	if (IsInvocationRunning())
+		return;
 	FinishPendingDiscard(false);
 	ClearRuntimeObservation();
 	observation_lifetime.reset();
@@ -413,12 +549,469 @@ void LuaWorkspaceFrame::DetachContext() {
 		document->DetachContext();
 }
 
+std::shared_ptr<LuaWorkspaceRunRequest const> LuaWorkspaceFrame::GetWorkspaceRunRequest(AutomationInvocation const& invocation) const {
+	agi::ui::VerifyAccess();
+	if (!context || !active_run_request || invocation.kind != AutomationInvocationKind::MacroRun || invocation.feature_name != active_run_request->macro_command)
+		return {};
+	return active_run_request;
+}
+
+std::shared_ptr<LuaWorkspaceRunRequest const> LuaWorkspaceFrame::GetActiveRunRequest() const {
+	agi::ui::VerifyAccess();
+	return active_run_request;
+}
+
+bool LuaWorkspaceFrame::IsInvocationRunning() const { return static_cast<bool>(active_run_request); }
+
+void LuaWorkspaceFrame::ReportRunProgress(std::uint64_t invocation_id, std::string const& text) {
+	agi::ui::VerifyAccess();
+	if (active_run_request && active_run_request->invocation_id == invocation_id)
+		run_log->ChangeValue(to_wx(text));
+}
+
+void LuaWorkspaceFrame::ToggleBreakpoint(int line) {
+	if (line < 1 || line > editor->GetLineCount())
+		return;
+	int index = line - 1;
+	if (editor->MarkerGet(index) & (1 << 1))
+		editor->MarkerDelete(index, 1);
+	else
+		editor->MarkerAdd(index, 1);
+}
+
+std::vector<AutomationDebugBreakpoint> LuaWorkspaceFrame::CaptureBreakpoints(std::string const& source_uri) const {
+	std::vector<AutomationDebugBreakpoint> values;
+	for (int line = 0; line < editor->GetLineCount(); ++line) {
+		if (editor->MarkerGet(line) & (1 << 1))
+			values.push_back({.source_path = source_uri, .line = line + 1, .enabled = true});
+	}
+	return values;
+}
+
+void LuaWorkspaceFrame::UpdateRunControls() {
+	if (!run_button)
+		return;
+	bool busy = IsInvocationRunning();
+	bool available = context && document && target_state.state == LuaWorkspaceDocumentState::Ready && no_macro_revision != document->GetRevision();
+	run_button->Enable(!busy && available);
+	debug_button->Enable(!busy && available);
+	open_button->Enable(!busy);
+	bool paused = false;
+	bool attached = false;
+	if (busy && active_session) {
+		auto state = active_session->GetStateSnapshot();
+		paused = state.state == AutomationDebugSessionState::Paused;
+		attached = state.attached;
+	}
+	continue_button->Enable(busy && paused && attached);
+	step_in_button->Enable(busy && paused && attached);
+	step_over_button->Enable(busy && paused && attached);
+	step_out_button->Enable(busy && paused && attached);
+	pause_button->Enable(busy && active_run_request->debug_session && attached && !paused);
+	stop_button->Enable(busy && !active_run_request->stop_requested->load());
+	detach_button->Enable(busy && active_run_request->debug_session && attached);
+	if (apply)
+		apply->Enable(!busy && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
+	if (reload)
+		reload->Enable(!busy && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
+}
+
+void LuaWorkspaceFrame::PollDebugState() {
+	if (!active_session)
+		return;
+	auto state = active_session->GetStateSnapshot();
+	if (state.version == last_debug_version)
+		return;
+	last_debug_version = state.version;
+	if (state.current_pause) {
+		last_debug_snapshot = state;
+		stack_frames->Clear();
+		for (auto const& frame : state.current_pause->frames) {
+			wxString label = to_wx(frame.function_name.empty() ? frame.kind : frame.function_name);
+			label += wxS(" - ") + to_wx(frame.location.display_name);
+			label += wxString::Format(wxS(":%d"), frame.location.line);
+			stack_frames->Append(label);
+		}
+		if (!state.current_pause->frames.empty()) {
+			stack_frames->SetSelection(0);
+			ShowSelectedFrame();
+		}
+	}
+	if (active_run_request && active_run_request->stop_requested->load())
+		run_status->SetLabel(_("Stopping at the next safe Lua checkpoint; subtitle commit is still locked."));
+	else if (!state.attached && IsInvocationRunning())
+		run_status->SetLabel(_("Detached; the invocation is still running and may commit subtitles."));
+	else if (state.current_pause) {
+		auto const& pause = *state.current_pause;
+		run_status->SetLabel(wxS("Debug: paused [") + to_wx(ToString(pause.reason)) + wxString::Format(wxS(" #%llu] "), static_cast<unsigned long long>(pause.sequence)) + to_wx(pause.location.source_path) + wxString::Format(wxS(":%d"), pause.location.line));
+	}
+	else
+		run_status->SetLabel(wxS("Debug: ") + to_wx(ToString(state.state)) + wxS(" - ") + to_wx(state.message));
+	run_status->SetToolTip(run_status->GetLabel());
+	UpdateRunControls();
+}
+
+void LuaWorkspaceFrame::ShowSelectedFrame() {
+	auto current = active_session ? active_session->GetStateSnapshot() : AutomationDebugStateSnapshot{};
+	bool is_current_pause = current.current_pause.has_value();
+	auto state = is_current_pause ? current : last_debug_snapshot.value_or(AutomationDebugStateSnapshot{});
+	if (!state.current_pause)
+		return;
+	int selected = stack_frames->GetSelection();
+	if (selected == wxNOT_FOUND || static_cast<std::size_t>(selected) >= state.current_pause->frames.size())
+		return;
+	auto const& frame = state.current_pause->frames[selected];
+	auto source = last_sources ? last_sources->Find(frame.location.source_path) : nullptr;
+	execution_source->SetReadOnly(false);
+	execution_source->MarkerDeleteAll(2);
+	execution_source->SetText(source ? to_wx(source->text) : wxString{});
+	execution_source->SetReadOnly(true);
+	if (source) {
+		bool stale = document && (document->GetSourceIdentity() != source->source_identity || document->GetRevision() != source->revision);
+		auto identity = to_wx(source->source_identity) + wxString::Format(wxS(" / revision %llu"), static_cast<unsigned long long>(source->revision));
+		if (stale)
+			identity += wxS(" [stale editor revision]");
+		if (!is_current_pause)
+			identity += wxS(" [last pause, not current]");
+		execution_identity->SetLabel(identity);
+		execution_identity->SetToolTip(execution_identity->GetLabel());
+		if (frame.location.line > 0 && frame.location.line <= execution_source->GetLineCount()) {
+			execution_source->MarkerAdd(frame.location.line - 1, 2);
+			execution_source->ScrollToLine(frame.location.line - 1);
+		}
+	}
+	else
+		execution_identity->SetLabel(_("Source is not in the immutable invocation registry."));
+	wxString values;
+	auto append_values = [&values](auto const& entries, wxString const& title) {
+		values += title + wxS("\n");
+		for (auto const& variable : entries) {
+			values += wxS("  ") + to_wx(variable.name) + wxS(" = ") + to_wx(variable.value) + wxS("\n");
+			for (auto const& child : variable.children) {
+				values += wxS("    ") + to_wx(child.name) + wxS(" = ") + to_wx(child.value) + wxS("\n");
+				if (!child.children.empty())
+					values += wxS("      [deeper children omitted]\n");
+			}
+		}
+	};
+	append_values(frame.locals, wxS("Locals"));
+	append_values(frame.upvalues, wxS("Upvalues"));
+	for (auto const& scope : state.current_pause->scopes)
+		append_values(scope.variables, to_wx(scope.name));
+	if (values.size() > 32768)
+		values = values.Left(32752) + wxS("\n[truncated]\n");
+	values += wxS("Nested variables are shown one level deep; deeper children are omitted.\n");
+	debug_variables->ChangeValue(values);
+}
+
+void LuaWorkspaceFrame::StartRun(bool debug) {
+	agi::ui::VerifyAccess();
+	auto reject = [this](std::string message) {
+		run_status->SetLabel(to_wx(message));
+		ShowResult({.state = LuaWorkspaceDocumentState::Error, .message = std::move(message)});
+	};
+	if (!context || !document || IsInvocationRunning()) {
+		reject("A Workspace invocation is already active or no source is open");
+		return;
+	}
+	if (no_macro_revision == document->GetRevision()) {
+		reject("This Lua source has no registered macro; edit or reload it before Run/Debug");
+		return;
+	}
+	auto check = document->Check();
+	if (!check.Succeeded()) {
+		run_status->SetLabel(to_wx(check.message));
+		ShowResult(check);
+		return;
+	}
+	if (!config::automation_debug_service) {
+		reject("The local Automation debug service is unavailable");
+		return;
+	}
+	{
+		std::optional<wxWindowDisabler> disabled_windows;
+		auto *service = config::automation_debug_service;
+		AutomationDebugLaunchRequest launch;
+		launch.enabled = debug;
+		launch.stop_on_entry = debug;
+		launch.nonblocking = false;
+		std::shared_ptr<AutomationDebugSession> lease;
+		try {
+			lease = service->PrepareLocalSession({.engine_name = "Lua", .script_file = document->GetKind() == LuaWorkspaceDocumentKind::LuaFile ? document->GetFilename() : agi::fs::path{}, .feature_name = {}}, std::move(launch));
+		}
+		catch (std::exception const& error) {
+			reject(error.what());
+			return;
+		}
+		if (!lease) {
+			reject("A local or remote Automation controller already owns this invocation");
+			return;
+		}
+		auto release_session = [service, lease] {
+			service->ClearSession(lease);
+			try {
+				if (config::global_scripts)
+					config::global_scripts->ProcessPendingReload();
+			}
+			catch (agi::Exception const& error) {
+				LOG_E("automation/workspace") << "Could not schedule deferred script reload: " << error.GetMessage();
+			}
+			catch (std::exception const& error) {
+				LOG_E("automation/workspace") << "Could not schedule deferred script reload: " << error.what();
+			}
+		};
+		auto release_lease = agi::make_scope_exit([&] { release_session(); });
+		auto autosave_guard = context->subsController->InhibitAutosave();
+		auto const document_generation = context->subsController->GetDocumentGeneration();
+		std::unique_ptr<Script> local_script;
+		Script *script = nullptr;
+		cmd::Command *command = nullptr;
+		if (document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode) {
+			constexpr char template_command[] = "automation/lua/kara-templater/Apply karaoke template";
+			std::vector<std::pair<Script *, cmd::Command *>> matches;
+			for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
+				if (!manager)
+					continue;
+				for (auto const& candidate : manager->GetScripts()) {
+					if (!candidate || !candidate->GetLoadedState())
+						continue;
+					for (auto *macro : candidate->GetMacros()) {
+						if (macro && std::string_view(macro->name()) == template_command)
+							matches.emplace_back(candidate.get(), macro);
+					}
+				}
+			}
+			if (matches.size() != 1) {
+				reject("Exactly one loaded karaoke templater macro is required for Workspace Run/Debug");
+				return;
+			}
+			script = matches.front().first;
+			command = matches.front().second;
+		}
+		else {
+			if (!SaveDocument()) {
+				reject("Save the Lua file successfully before Run/Debug");
+				return;
+			}
+			ScriptManager *managed = nullptr;
+			for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
+				if (!manager)
+					continue;
+				for (auto const& candidate : manager->GetScripts()) {
+					if (candidate && candidate->GetFilename() == document->GetFilename()) {
+						if (script) {
+							reject("The Lua file has more than one managed script identity");
+							return;
+						}
+						managed = manager;
+						script = candidate.get();
+					}
+				}
+			}
+			try {
+				if (managed)
+					managed->Reload(script, lease);
+				else {
+					local_script = ScriptFactory::CreateFromFile(document->GetFilename(), false);
+					script = local_script.get();
+				}
+			}
+			catch (agi::Exception const& error) {
+				reject(error.GetMessage());
+				return;
+			}
+			catch (std::exception const& error) {
+				reject(error.what());
+				return;
+			}
+			if (!script || !script->GetLoadedState() || script->GetEngineName() != "Lua") {
+				reject("The saved Lua file did not reload as an Automation Lua script");
+				return;
+			}
+			auto macros = script->GetMacros();
+			if (macros.empty()) {
+				no_macro_revision = document->GetRevision();
+				UpdateRunControls();
+				reject("The reloaded Lua file has no registered macro to run");
+				return;
+			}
+			wxArrayString names;
+			std::vector<std::string> command_names;
+			for (auto *macro : macros) {
+				names.Add(macro->StrDisplay(context));
+				command_names.emplace_back(macro->name());
+			}
+			int chosen = 0;
+			if (macros.size() > 1) {
+				wxSingleChoiceDialog choice(this, _("Select a macro from the saved and reloaded Lua file"), _("Lua Workspace macro"), names);
+				if (choice.ShowModal() != wxID_OK)
+					return;
+				chosen = choice.GetSelection();
+			}
+			if (chosen < 0 || static_cast<std::size_t>(chosen) >= macros.size()) {
+				reject("The selected Lua macro is no longer available");
+				return;
+			}
+			auto const& chosen_name = command_names[chosen];
+			if (managed) {
+				script = nullptr;
+				for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
+					if (!manager)
+						continue;
+					for (auto const& candidate : manager->GetScripts()) {
+						if (candidate && candidate->GetFilename() == document->GetFilename()) {
+							if (script) {
+								reject("The Lua file acquired multiple managed script identities");
+								return;
+							}
+							script = candidate.get();
+						}
+					}
+				}
+			}
+			if (script && script->GetLoadedState()) {
+				for (auto *macro : script->GetMacros()) {
+					if (macro && std::string_view(macro->name()) == chosen_name) {
+						if (command) {
+							reject("The reloaded Lua file has a duplicate macro command identity");
+							return;
+						}
+						command = macro;
+					}
+				}
+			}
+		}
+		if (context->subsController->GetDocumentGeneration() != document_generation) {
+			reject("The subtitle document changed while preparing this Workspace invocation");
+			return;
+		}
+		check = document->Check();
+		if (!check.Succeeded()) {
+			reject(check.message);
+			return;
+		}
+		if (!script || !command || script->GetEngineName() != "Lua" || !command->Validate(context)) {
+			reject("The selected Automation macro is not available for this subtitle document");
+			return;
+		}
+		auto request = std::make_shared<LuaWorkspaceRunRequest>();
+		request->invocation_id = ++next_run_id;
+		request->macro_command = command->name();
+		request->sources = std::make_shared<LuaWorkspaceSourceRegistry>();
+		request->stop_requested = std::make_shared<std::atomic<bool>>(false);
+		LuaWorkspaceSource source;
+		source.source_identity = document->GetSourceIdentity();
+		source.revision = document->GetRevision();
+		source.display_name = document->GetDisplayName();
+		source.text = document->GetSource();
+		source.uri = document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode
+						 ? MakeLuaWorkspaceSourceUri(request->invocation_id, source.source_identity, source.revision)
+						 : NormalizeAutomationDebugSource(agi::fs::PathToString(document->GetFilename()));
+		request->sources->Register(source);
+		if (document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode)
+			request->source_override = LuaWorkspaceSourceOverride{.document_generation = document->GetDocumentGeneration(), .dialogue_id = document->GetDialogueId(), .source = source};
+		else
+			request->file_source = source;
+		lease->SetTarget({.engine_name = script->GetEngineName(), .script_file = script->GetFilename(), .feature_name = request->macro_command});
+		lease->SetBreakpoints(CaptureBreakpoints(source.uri));
+		lease->SetSourceRegistry(request->sources);
+		if (debug) {
+			request->debug_session = lease;
+			script->SetDebugSession(lease.get());
+		}
+		active_run_request = request;
+		active_session = lease;
+		last_sources = request->sources;
+		last_debug_snapshot.reset();
+		last_debug_version = 0;
+		stack_frames->Clear();
+		debug_variables->Clear();
+		execution_source->SetReadOnly(false);
+		execution_source->SetText(wxString{});
+		execution_source->SetReadOnly(true);
+		execution_identity->SetLabel(_("No paused source."));
+		context->lua_workspace_invocation_active = true;
+		run_status->SetLabel(debug ? _("Debug running; source and breakpoints are frozen for this invocation.")
+								   : _("Run active; unapplied source may still commit generated subtitles."));
+		run_log->Clear();
+		RefreshDocument();
+		UpdateRunControls();
+		debug_timer->Start(100);
+		std::string failure;
+		auto finish = agi::make_scope_exit([this, script, debug, lease, request, &failure, &release_session, &release_lease] {
+			debug_timer->Stop();
+			PollDebugState();
+			if (auto final_state = lease->GetStateSnapshot(); final_state.current_pause)
+				last_debug_snapshot = std::move(final_state);
+			std::optional<AutomationInvocationOutcome> outcome;
+			if (active_observation) {
+				std::scoped_lock lock(active_observation->mutex);
+				if (active_observation->workspace_run)
+					outcome = active_observation->view.outcome;
+			}
+			lease->MarkCompleted(failure.empty() && outcome == AutomationInvocationOutcome::Completed ? 0 : 1,
+								 !failure.empty() ? failure : outcome == AutomationInvocationOutcome::Completed ? "completed"
+														  : outcome == AutomationInvocationOutcome::Cancelled   ? "cancelled"
+																												: "failed");
+			if (debug)
+				script->SetDebugSession(nullptr);
+			release_session();
+			release_lease.release();
+			context->lua_workspace_invocation_active = false;
+			active_run_request.reset();
+			active_session.reset();
+			if (!failure.empty())
+				run_status->SetLabel(to_wx("Invocation failed: " + failure));
+			else if (outcome == AutomationInvocationOutcome::Failed)
+				run_status->SetLabel(_("Invocation failed; inspect Runtime Context and the run log."));
+			else if (outcome == AutomationInvocationOutcome::Cancelled || request->stop_requested->load())
+				run_status->SetLabel(_("Invocation cancelled after reaching a safe terminal state."));
+			else if (outcome == AutomationInvocationOutcome::Completed)
+				run_status->SetLabel(_("Invocation completed."));
+			else
+				run_status->SetLabel(_("Invocation ended without an observed terminal result."));
+			RefreshDocument();
+			UpdateRunControls();
+			if (close_after_run) {
+				close_after_run = false;
+				CallAfter([this] { if (PrepareToClose()) Hide(); });
+			}
+		});
+		{
+			disabled_windows.emplace(this);
+			try {
+				(*command)(context);
+			}
+			catch (agi::Exception const& error) {
+				failure = error.GetMessage();
+			}
+			catch (std::exception const& error) {
+				failure = error.what();
+			}
+		}
+	}
+	std::weak_ptr<void> lifetime = observation_lifetime;
+	agi::ui::MainAsyncIfAlive(lifetime, [this] {
+		if (context && !IsInvocationRunning()) {
+			try {
+				context->subsController->ProcessPendingExternalChange();
+			}
+			catch (agi::Exception const& error) {
+				run_status->SetLabel(to_wx(error.GetMessage()));
+			}
+			catch (std::exception const& error) {
+				run_status->SetLabel(to_wx(error.what()));
+			}
+		}
+	});
+}
+
 void LuaWorkspaceFrame::ClearRuntimeObservation() {
 	agi::ui::VerifyAccess();
 	++invocation_sequence;
 	active_observation.reset();
 	if (runtime_context)
-		runtime_context->ChangeValue(_("No observed macro run. Runtime context comes from saved ASS/template execution, not unapplied Workspace edits."));
+		runtime_context->ChangeValue(_("No observed macro run. Workspace Run/Debug can use a captured editor revision; regular Automation runs use saved source."));
 	if (generated_output)
 		generated_output->ChangeValue(_("No generated output observed."));
 }
@@ -428,7 +1021,11 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 	auto state = observation.lock();
 	if (!state || !context || sequence != invocation_sequence || active_observation != state)
 		return;
-	if (document.get() != state->document || (document && document->GetRevision() != state->revision)) {
+	if (document.get() != state->document || context->subsController->GetDocumentGeneration() != state->generation) {
+		ClearRuntimeObservation();
+		return;
+	}
+	if (document && !state->workspace_run && document->GetRevision() != state->revision) {
 		ClearRuntimeObservation();
 		return;
 	}
@@ -438,10 +1035,16 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 		view = state->view;
 		state->queued = false;
 	}
-	wxString status = run_status(view.outcome);
+	wxString status = ::run_status(view.outcome);
 	wxString context_text = wxS("Invocation: macro_run\nStatus: ") + status + wxS("\n");
 	context_text += wxS("Feature: ") + to_wx(view.feature_name) + wxS("\n\n");
-	context_text += _("Runtime observes saved ASS/template execution. Unapplied Workspace edits are not executed.");
+	if (document && document->GetRevision() != state->revision)
+		context_text += wxString::Format(wxS("Observed revision %llu; editor revision %llu (stale)\n\n"),
+										 static_cast<unsigned long long>(state->revision), static_cast<unsigned long long>(document->GetRevision()));
+	if (state->workspace_run)
+		context_text += _("Workspace Run/Debug used the captured source revision; later editor edits affect only the next invocation.");
+	else
+		context_text += _("Runtime observes saved ASS/template execution. Unapplied Workspace edits are not executed.");
 	context_text += wxS("\n");
 	context_text += _("Text previews are limited to 2048 UTF-8 bytes; longer values are marked [truncated].");
 	context_text += wxS("\n\n");
@@ -502,7 +1105,14 @@ std::shared_ptr<AutomationInvocationObserver> LuaWorkspaceFrame::BeginInvocation
 	ClearRuntimeObservation();
 	auto state = std::make_shared<LuaWorkspaceRuntimeObservation>();
 	state->document = document.get();
-	state->revision = document ? document->GetRevision() : 0;
+	state->generation = context->subsController->GetDocumentGeneration();
+	state->workspace_run = active_run_request && invocation.feature_name == active_run_request->macro_command;
+	state->revision = state->workspace_run && active_run_request->source_override
+						  ? active_run_request->source_override->source.revision
+					  : state->workspace_run && active_run_request->file_source
+						  ? active_run_request->file_source->revision
+					  : document ? document->GetRevision()
+								 : 0;
 	state->view.feature_name = bounded(invocation.feature_name);
 	active_observation = state;
 	std::weak_ptr<LuaWorkspaceRuntimeObservation> weak_state = state;
@@ -536,6 +1146,7 @@ void LuaWorkspaceFrame::FinishPendingDiscard(bool commit) {
 void LuaWorkspaceFrame::SetEditorSource() {
 	FinishPendingDiscard(false);
 	ClearRuntimeObservation();
+	editor->MarkerDeleteAll(1);
 	loading = true;
 	editor->SetReadOnly(false);
 	editor->SetText(document ? to_wx(document->GetSource()) : wxString{});
@@ -578,9 +1189,9 @@ void LuaWorkspaceFrame::ShowResult(LuaWorkspaceDocumentResult const& result, boo
 void LuaWorkspaceFrame::RefreshDocument(bool check_target) {
 	if (document && check_target)
 		target_state = document->Check();
-	apply->Enable(document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
+	apply->Enable(!IsInvocationRunning() && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
 	format->Enable(document != nullptr);
-	reload->Enable(document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
+	reload->Enable(!IsInvocationRunning() && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
 	apply->SetLabel(document && document->GetKind() == LuaWorkspaceDocumentKind::LuaFile ? _("Save") : _("Apply"));
 	wxString title = wxS("Lua Workspace");
 	if (document) {
@@ -595,6 +1206,9 @@ void LuaWorkspaceFrame::RefreshDocument(bool check_target) {
 	}
 	SetTitle(title);
 	ShowResult(target_state, false);
+	UpdateRunControls();
+	if (last_debug_snapshot && last_debug_snapshot->current_pause)
+		ShowSelectedFrame();
 }
 
 bool LuaWorkspaceFrame::FinishOpen(std::unique_ptr<LuaWorkspaceDocument> candidate, LuaWorkspaceDocumentResult const& result) {
@@ -606,6 +1220,7 @@ bool LuaWorkspaceFrame::FinishOpen(std::unique_ptr<LuaWorkspaceDocument> candida
 		return false;
 	}
 	document = std::move(candidate);
+	no_macro_revision.reset();
 	source_diagnostic.reset();
 	action_message.clear();
 	target_state = {};
@@ -619,6 +1234,10 @@ bool LuaWorkspaceFrame::FinishOpen(std::unique_ptr<LuaWorkspaceDocument> candida
 }
 
 bool LuaWorkspaceFrame::OpenCurrentLine() {
+	if (IsInvocationRunning()) {
+		run_status->SetLabel(_("Cannot switch the Workspace target during an active invocation."));
+		return false;
+	}
 	auto discard = agi::make_scope_exit([this] { FinishPendingDiscard(false); });
 	if (!context)
 		return false;
@@ -636,6 +1255,10 @@ bool LuaWorkspaceFrame::OpenCurrentLine() {
 }
 
 bool LuaWorkspaceFrame::OpenFile(agi::fs::path const& filename) {
+	if (IsInvocationRunning()) {
+		run_status->SetLabel(_("Cannot open a different Lua file during an active invocation."));
+		return false;
+	}
 	auto discard = agi::make_scope_exit([this] { FinishPendingDiscard(false); });
 	if (!PrepareToClose(true))
 		return false;
@@ -645,6 +1268,26 @@ bool LuaWorkspaceFrame::OpenFile(agi::fs::path const& filename) {
 }
 
 bool LuaWorkspaceFrame::PrepareToClose(bool defer_discard) {
+	if (IsInvocationRunning()) {
+		wxMessageDialog dialog(this, _("A Workspace invocation is still active. Stop and close after it ends, detach and hide while it continues, or cancel closing."),
+							   _("Active Lua Workspace invocation"), wxYES_NO | wxCANCEL | wxICON_WARNING);
+		dialog.SetYesNoCancelLabels(_("Stop then close"), _("Detach and hide"), _("Cancel"));
+		int choice = dialog.ShowModal();
+		if (choice == wxID_YES) {
+			close_after_run = true;
+			active_run_request->stop_requested->store(true);
+			if (active_session)
+				active_session->Detach();
+			run_status->SetLabel(_("Stopping; Workspace will close after the invocation ends."));
+		}
+		else if (choice == wxID_NO) {
+			if (active_session)
+				active_session->Detach();
+			Hide();
+			run_status->SetLabel(_("Detached and hidden; the invocation may still commit subtitles."));
+		}
+		return false;
+	}
 	if (defer_discard && HasPendingDiscard())
 		return true;
 	FinishPendingDiscard(false);
@@ -665,6 +1308,10 @@ bool LuaWorkspaceFrame::PrepareToClose(bool defer_discard) {
 }
 
 bool LuaWorkspaceFrame::SaveDocument() {
+	if (IsInvocationRunning()) {
+		run_status->SetLabel(_("Apply/Save is unavailable until the invocation and its ASS commit finish."));
+		return false;
+	}
 	if (!document)
 		return false;
 	FinishPendingDiscard(false);
@@ -709,12 +1356,17 @@ bool LuaWorkspaceFrame::SaveDocument() {
 }
 
 bool LuaWorkspaceFrame::ReloadDocument() {
+	if (IsInvocationRunning()) {
+		run_status->SetLabel(_("Reload is unavailable during an active invocation."));
+		return false;
+	}
 	if (!document)
 		return false;
 	if (IsDirty() && wxMessageBox(_("Discard editor changes and reload the current target?"), _("Reload Lua source"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION, this) != wxYES)
 		return false;
 	auto result = document->Reload();
 	if (result.Succeeded()) {
+		no_macro_revision.reset();
 		source_diagnostic.reset();
 		SetEditorSource();
 	}

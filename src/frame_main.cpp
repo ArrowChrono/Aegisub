@@ -31,6 +31,7 @@
 /// @brief Main window creation and control management
 /// @ingroup main_ui
 
+#include "automation/automation_debug_service.h"
 #include "frame_main.h"
 
 #include "include/aegisub/context.h"
@@ -927,6 +928,12 @@ BEGIN_EVENT_TABLE(FrameMain, wxFrame)
 END_EVENT_TABLE()
 
 void FrameMain::OnCloseWindow(wxCloseEvent &event) {
+	if (context->lua_workspace_invocation_active || (config::automation_debug_service && config::automation_debug_service->HasLocalSession())) {
+		context->ShowStatus("Stop the Lua Workspace invocation and wait for it to finish before closing.");
+		if (event.CanVeto())
+			event.Veto();
+		return;
+	}
 	auto workspace_close = agi::make_scope_exit([this] { FinishLuaWorkspaceClose(false); });
 	wxEventBlocker blocker(this, wxEVT_CLOSE_WINDOW);
 	auto core = context->GetCore();

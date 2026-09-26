@@ -16,10 +16,12 @@
 /// @brief Dynamic menu toolbar generator.
 /// @ingroup toolbar menu
 
+#include "automation/automation_debug_service.h"
 #include "include/aegisub/toolbar.h"
 
 #include "command/command.h"
 #include "compat.h"
+#include "include/aegisub/context.h"
 #include "include/aegisub/hotkey.h"
 #include "libresrc/libresrc.h"
 #include "options.h"
@@ -220,6 +222,8 @@ namespace {
 
 		/// Enable/disable the toolbar buttons
 		void OnIdle(wxIdleEvent &) {
+			if (context->lua_workspace_invocation_active || (config::automation_debug_service && config::automation_debug_service->HasLocalSession()))
+				return;
 			for (size_t i = 0; i < commands.size(); ++i) {
 				int const id = TOOL_ID_BASE + static_cast<int>(i);
 				if (commands[i]->Type() & cmd::COMMAND_VALIDATE) {
@@ -237,6 +241,8 @@ namespace {
 
 		/// Toolbar button click handler
 		void OnClick(wxCommandEvent &evt) {
+			if (context->lua_workspace_invocation_active || (config::automation_debug_service && config::automation_debug_service->HasLocalSession()))
+				return;
 			auto *cmd = commands[evt.GetId() - TOOL_ID_BASE];
 			if (cmd->Type() & cmd::COMMAND_VALIDATE && !cmd->Validate(context))
 				return;
@@ -450,6 +456,8 @@ namespace {
 		void OnIdle(wxIdleEvent &) {
 			for (size_t i = 0; i < commands.size(); ++i) {
 				auto *btn = buttons[i];
+				if (context->lua_workspace_invocation_active || (config::automation_debug_service && config::automation_debug_service->HasLocalSession()))
+					return;
 				if (!btn) continue;
 
 				if (commands[i]->Type() & cmd::COMMAND_VALIDATE) {
@@ -472,6 +480,8 @@ namespace {
 		}
 
 		void OnCommandEvent(wxCommandEvent &evt) {
+			if (context->lua_workspace_invocation_active || (config::automation_debug_service && config::automation_debug_service->HasLocalSession()))
+				return;
 			auto idx = evt.GetId() - CMD_ID_BASE;
 			if (idx < 0 || static_cast<size_t>(idx) >= commands.size())
 				return;

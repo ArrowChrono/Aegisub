@@ -35,6 +35,7 @@ namespace Automation4 {
 	class ScriptDialog;
 	class AutomationInvocationObserver;
 	struct AutomationInvocation;
+	struct LuaWorkspaceRunRequest;
 	struct AutomationOpenFileDialogRequest;
 	struct AutomationSaveFileDialogRequest;
 
@@ -93,6 +94,9 @@ namespace Automation4 {
 	public:
 		virtual ~AutomationUiProxy() = default;
 		[[nodiscard]] virtual std::shared_ptr<AutomationInvocationObserver> BeginInvocationObservation(AutomationInvocation const&) const { return {}; }
+		[[nodiscard]] virtual std::shared_ptr<LuaWorkspaceRunRequest const> GetWorkspaceRunRequest(AutomationInvocation const&) const { return {}; }
+		virtual std::unique_ptr<BackgroundScriptRunner> CreateWorkspaceBackgroundScriptRunner(
+			std::shared_ptr<LuaWorkspaceRunRequest const> const&, std::string const&) const;
 		virtual void ShowStatus(std::string const& message, int timeout_ms = 10000) = 0;
 		virtual bool SupportsInteractiveDialogs() const = 0;
 		virtual std::unique_ptr<BackgroundScriptRunner> CreateBackgroundScriptRunner(std::string const& title, AutomationUiAnchor anchor = {}) const = 0;

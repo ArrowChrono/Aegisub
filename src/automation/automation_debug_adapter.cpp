@@ -17,6 +17,7 @@
 #include "automation_breakpoint_store.h"
 #include "automation_debug_service.h"
 #include "automation_debug_session.h"
+#include "lua_workspace_run.h"
 
 #include <libaegisub/cajun/elements.h>
 #include <libaegisub/cajun/reader.h>
@@ -27,6 +28,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -458,7 +460,9 @@ class AutomationDebugAdapter::Impl final {
 			session->SetBreakpoints(service.GetLaunchConfiguration().breakpoints);
 	}
 
-	void ResetPauseArtifactsLocked(AutomationDebugPauseRecord const& pause)
+	void ResetPauseArtifactsLocked(
+		AutomationDebugPauseRecord const& pause,
+		std::shared_ptr<LuaWorkspaceSourceRegistry> const& registry)
 	{
 		variable_handles.clear();
 		source_references.clear();
@@ -466,7 +470,20 @@ class AutomationDebugAdapter::Impl final {
 		next_source_reference = 1;
 		next_variables_reference = 1;
 
-		if (pause.location.source_kind == "template") {
+		if (registry) {
+			for (auto const& frame : pause.frames) {
+				auto const& path = frame.location.source_path;
+				if (source_references.contains(path))
+					continue;
+				if (auto source = registry->Find(path)) {
+					int const source_reference = next_source_reference++;
+					source_references[path] = source_reference;
+					source_contents[source_reference] = source->text;
+				}
+			}
+		}
+
+		if (pause.location.source_kind == "template" && !source_references.contains(pause.location.source_path)) {
 			auto content = BuildTemplateSourceContent(pause);
 			if (!content.empty()) {
 				int const source_reference = next_source_reference++;
@@ -532,8 +549,11 @@ class AutomationDebugAdapter::Impl final {
 			max_pauses = 512;
 		request.max_pauses = static_cast<size_t>(max_pauses);
 
+		if (!service.ReportClientState(true, false)) {
+			SendErrorResponse(request_seq, command, "a local automation debug session is active");
+			return;
+		}
 		service.SetLaunchConfiguration(std::move(request));
-		service.ReportClientState(true, false);
 
 		{
 			std::lock_guard<std::mutex> lock(mutex);
@@ -594,9 +614,15 @@ class AutomationDebugAdapter::Impl final {
 				SendErrorResponse(request_seq, command, "configurationDone received before attach");
 				return;
 			}
+		}
+		if (!service.ReportClientState(true, true)) {
+			SendErrorResponse(request_seq, command, "a local automation debug session is active");
+			return;
+		}
+		{
+			std::scoped_lock lock(mutex);
 			configuration_done = true;
 		}
-		service.ReportClientState(true, true);
 		cv.notify_all();
 
 		SendResponse(request_seq, command, json::Object{});
@@ -823,6 +849,10 @@ class AutomationDebugAdapter::Impl final {
 			HandleInitialize(request_seq, command);
 			return;
 		}
+		if (service.HasLocalSession() && command != "disconnect" && command != "terminate") {
+			SendErrorResponse(request_seq, command, "a local automation debug session is active");
+			return;
+		}
 		if (command == "attach") {
 			HandleAttach(request_seq, command, arguments ? **arguments : empty_arguments);
 			return;
@@ -996,9 +1026,10 @@ class AutomationDebugAdapter::Impl final {
 
 			if (snapshot.current_pause && snapshot.state == AutomationDebugSessionState::Paused) {
 				if (snapshot.current_pause->sequence != last_pause_sequence) {
+					auto registry = observed_session->GetSourceRegistry();
 					{
 						std::lock_guard<std::mutex> lock(mutex);
-						ResetPauseArtifactsLocked(*snapshot.current_pause);
+						ResetPauseArtifactsLocked(*snapshot.current_pause, registry);
 					}
 					last_pause_sequence = snapshot.current_pause->sequence;
 					SendStopped(*snapshot.current_pause);
@@ -1039,8 +1070,8 @@ public:
 
 	void Run()
 	{
-		service.SetLaunchConfiguration({});
-		service.ReportClientState(true, false);
+		if (service.ReportClientState(true, false))
+			service.SetLaunchConfiguration({});
 
 		event_thread = std::thread([this] { EventLoop(); });
 		InputLoop();

@@ -16,6 +16,7 @@
 
 #include "../auto4_lua.h"
 #include "automation_lua_runtime.h"
+#include "lua_workspace_run.h"
 
 #include <libaegisub/fs.h>
 #include <libaegisub/lua/utils.h>
@@ -1370,12 +1371,19 @@ void AutomationLuaDebugBackend::OnDebugStateChanged()
 	UpdateHookState();
 }
 
+void AutomationLuaDebugBackend::SetWorkspaceRunRequest(std::shared_ptr<LuaWorkspaceRunRequest const> request) {
+	workspace_request = std::move(request);
+	UpdateHookState();
+}
+
 void AutomationLuaDebugBackend::UpdateHookState()
 {
 	if (!L)
 		return;
 
-	if (DebugActive())
+	if (workspace_request)
+		lua_sethook(L, &AutomationLuaDebugBackend::Hook, LUA_MASKLINE | LUA_MASKCOUNT, 1000);
+	else if (DebugActive())
 		lua_sethook(L, &AutomationLuaDebugBackend::Hook, LUA_MASKLINE, 0);
 	else
 		lua_sethook(L, nullptr, 0, 0);
@@ -1388,6 +1396,18 @@ AutomationDebugLocation AutomationLuaDebugBackend::BuildLocation(lua_Debug const
 	location.column = 0;
 
 	std::string source = ar.source ? ar.source : "";
+	if (workspace_request) {
+		if (auto recorded = workspace_request->sources->Find(source)) {
+			location.source_path = recorded->uri;
+			location.display_name = recorded->display_name;
+			location.source_kind = recorded->uri.starts_with("aegisub-workspace://") ? "template" : "script";
+			return location;
+		}
+		location.source_path = NormalizeAutomationDebugSource(source);
+		location.display_name = ar.short_src;
+		location.source_kind = "chunk";
+		return location;
+	}
 	location.source_path = NormalizeAutomationDebugSource(source);
 	location.display_name = ar.short_src ? ar.short_src : "";
 	auto runtime_snapshot = LuaGetAutomationRuntimeStateSnapshot(L);
@@ -1488,21 +1508,27 @@ void AutomationLuaDebugBackend::Hook(lua_State *L, lua_Debug *ar)
 
 void AutomationLuaDebugBackend::OnHook(lua_Debug *ar)
 {
+	if (workspace_request && workspace_request->stop_requested->load())
+		LuaRaiseWorkspaceCancellation(L);
 	auto *session = GetSession();
 	if (!session || !InvocationActive() || !ar || ar->event != LUA_HOOKLINE)
 		return;
 
-	lua_getinfo(L, "nSlu", ar);
-	auto location = BuildLocation(*ar);
-	session->HandleHookPause(
-		std::move(location),
-		CaptureStackDepth(),
-		[this] {
-			AutomationDebugCapturedState captured;
-			captured.frames = CaptureFrames();
-			captured.scopes = CaptureLuaScopes(L);
-			captured.runtime_snapshot = LuaGetAutomationRuntimeStateSnapshot(L);
-			return captured;
-		});
+	{
+		lua_getinfo(L, "nSlu", ar);
+		auto location = BuildLocation(*ar);
+		session->HandleHookPause(
+			std::move(location),
+			CaptureStackDepth(),
+			[this] {
+				AutomationDebugCapturedState captured;
+				captured.frames = CaptureFrames();
+				captured.scopes = CaptureLuaScopes(L);
+				captured.runtime_snapshot = LuaGetAutomationRuntimeStateSnapshot(L);
+				return captured;
+			});
+	}
+	if (workspace_request && workspace_request->stop_requested->load())
+		LuaRaiseWorkspaceCancellation(L);
 }
 }

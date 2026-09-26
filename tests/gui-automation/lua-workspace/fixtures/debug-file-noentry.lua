@@ -1,0 +1,5 @@
+local source = debug.getinfo(1, "S").source:gsub("\\", "/"):gsub("^@", "")
+local root = assert(source:match("^(.+/)"), "No-entry fixture has no compiled file path")
+local marker = assert(io.open(root .. "debug-noentry-loads.txt", "a"))
+marker:write("loaded\n")
+marker:close()

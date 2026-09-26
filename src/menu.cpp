@@ -16,6 +16,7 @@
 /// @brief Dynamic menu and toolbar generator.
 /// @ingroup menu
 
+#include "automation/automation_debug_service.h"
 #include "include/aegisub/menu.h"
 
 #include "include/aegisub/context.h"
@@ -195,6 +196,8 @@ class CommandManager {
 
 	/// Update a single dynamic menu item
 	void UpdateItem(std::pair<std::string, wxMenuItem*> const& item) {
+		if (context && (context->lua_workspace_invocation_active || (config::automation_debug_service && config::automation_debug_service->HasLocalSession())))
+			return;
 		cmd::Command *c = cmd::get_if(item.first);
 		if (!c)
 			return;

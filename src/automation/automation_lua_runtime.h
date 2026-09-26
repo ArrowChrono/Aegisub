@@ -28,6 +28,12 @@ struct lua_State;
 
 namespace Automation4 {
 	class AutomationHost;
+	struct LuaWorkspaceRunRequest;
+
+	void LuaSetWorkspaceRunRequest(lua_State *L, std::shared_ptr<LuaWorkspaceRunRequest const> request);
+	std::shared_ptr<LuaWorkspaceRunRequest const> LuaGetWorkspaceRunRequest(lua_State *L);
+	int LuaRaiseWorkspaceCancellation(lua_State *L);
+	bool LuaIsWorkspaceCancellation(lua_State *L, int index);
 
 	void LuaSetAutomationRuntimeState(
 		lua_State *L,

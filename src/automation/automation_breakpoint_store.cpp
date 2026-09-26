@@ -84,6 +84,8 @@ bool AutomationBreakpointStore::Matches(std::string const& source_path, int line
 
 		if (breakpoint.source_path == normalized_source)
 			return true;
+		if (normalized_source.find("://") != std::string::npos || breakpoint.source_path.find("://") != std::string::npos)
+			continue;
 
 		if (!source_filename.empty() && breakpoint.source_path == source_filename)
 			return true;

@@ -43,6 +43,7 @@
 #include "automation/automation_host.h"
 #include "automation/automation_lua_runtime.h"
 #include "automation/automation_mutation_journal.h"
+#include "automation/lua_workspace_run.h"
 #include "compat.h"
 
 #include <libaegisub/exception.h>
@@ -903,7 +904,52 @@ namespace Automation4 {
 		lua_getglobal(L, "aegisub");
 		set_field<closure_wrapper<&LuaAssFile::LuaParseKaraokeData>>(L, "parse_karaoke_data");
 		set_field<closure_wrapper_v<&LuaAssFile::LuaSetUndoPoint, false>>(L, "set_undo_point");
+		set_field<closure_wrapper<&LuaAssFile::LuaWorkspaceSourceIdentity>>(L, "__workspace_source_identity");
+		set_field<closure_wrapper<&LuaAssFile::LuaWorkspaceCodeSource>>(L, "__workspace_code_source");
 		lua_pop(L, 1); // pop "aegisub" table
+	}
+
+	int LuaAssFile::LuaWorkspaceSourceIdentity(lua_State *L) {
+		auto request = LuaGetWorkspaceRunRequest(L);
+		if (!request)
+			return 0;
+		int index = luaL_checkinteger(L, 1);
+		CheckBounds(index);
+		auto *entry = lines[index - 1];
+		auto *line = entry ? check_cast_constptr<AssDialogue>(entry) : nullptr;
+		if (!line)
+			throw AutomationError("Workspace template source is not a dialogue line");
+		auto identity = request->source_override
+							? "aegisub://lua/" + std::to_string(request->source_override->document_generation) + "/" + std::to_string(line->Id)
+							: "aegisub://lua/invocation/" + std::to_string(request->invocation_id) + "/" + std::to_string(line->Id);
+		push_value(L, identity);
+		return 1;
+	}
+
+	int LuaAssFile::LuaWorkspaceCodeSource(lua_State *L) {
+		auto request = LuaGetWorkspaceRunRequest(L);
+		if (!request)
+			return 0;
+		LuaWorkspaceSourceIdentity(L);
+		auto identity = get_string(L, -1);
+		lua_pop(L, 1);
+		auto *line = check_cast_constptr<AssDialogue>(lines[lua_tointeger(L, 1) - 1]);
+		LuaWorkspaceSource source;
+		if (request->source_override && line->Id == request->source_override->dialogue_id) {
+			source = request->source_override->source;
+			workspace_override_applied = true;
+		}
+		else {
+			source = {
+				.uri = MakeLuaWorkspaceSourceUri(request->invocation_id, identity, 0),
+				.source_identity = identity,
+				.display_name = "Code line ID " + std::to_string(line->Id),
+				.text = line->Text.get()};
+		}
+		auto recorded = request->sources->Register(std::move(source));
+		push_value(L, recorded->text);
+		push_value(L, "=" + recorded->uri);
+		return 2;
 	}
 
 	LuaAssFile::LuaAssFile(lua_State *L, AssFile *ass, bool can_modify, bool can_set_undo)

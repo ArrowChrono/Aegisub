@@ -26,6 +26,39 @@
 #include <lauxlib.h>
 
 namespace agi { namespace lua {
+namespace {
+constexpr char source_observer_key[] = "aegisub.script_source_observer";
+constexpr char source_observer_metatable[] = "aegisub.script_source_observer.metatable";
+
+int destroy_source_observer(lua_State *L) {
+	static_cast<ScriptSourceObserver *>(lua_touserdata(L, 1))->~ScriptSourceObserver();
+	return 0;
+}
+
+void notify_source_observer(lua_State *L, fs::path const& filename, std::string_view source) {
+	lua_getfield(L, LUA_REGISTRYINDEX, source_observer_key);
+	auto *observer = lua_isuserdata(L, -1) ? static_cast<ScriptSourceObserver *>(lua_touserdata(L, -1)) : nullptr;
+	lua_pop(L, 1);
+	if (observer)
+		(*observer)(filename, source);
+}
+}
+
+void SetScriptSourceObserver(lua_State *L, ScriptSourceObserver observer) {
+	if (observer) {
+		auto *storage = static_cast<ScriptSourceObserver *>(lua_newuserdata(L, sizeof(ScriptSourceObserver)));
+		new (storage) ScriptSourceObserver(std::move(observer));
+		if (luaL_newmetatable(L, source_observer_metatable)) {
+			lua_pushcfunction(L, destroy_source_observer);
+			lua_setfield(L, -2, "__gc");
+		}
+		lua_setmetatable(L, -2);
+	}
+	else
+		lua_pushnil(L);
+	lua_setfield(L, LUA_REGISTRYINDEX, source_observer_key);
+}
+
 	static bool ensure_moonscript_loader(lua_State *L) {
 		lua_getfield(L, LUA_REGISTRYINDEX, "moonscript");
 		if (lua_isfunction(L, -1))
@@ -60,8 +93,12 @@ namespace agi { namespace lua {
 		}
 
 		auto const filename_utf8 = agi::fs::PathToString(filename);
-		if (!agi::fs::HasExtension(filename, "moon"))
-			return luaL_loadbuffer(L, buff, size, filename_utf8.c_str()) == 0;
+		if (!agi::fs::HasExtension(filename, "moon")) {
+			if (luaL_loadbuffer(L, buff, size, filename_utf8.c_str()) != 0)
+				return false;
+			notify_source_observer(L, filename, {buff, size});
+			return true;
+		}
 
 		// We have a MoonScript file, so we need to load it with that
 		// It might be nice to have a dedicated lua state for compiling
@@ -86,6 +123,7 @@ namespace agi { namespace lua {
 		}
 
 		lua_pop(L, 1); // Remove the extra nil for the stackchecker
+		notify_source_observer(L, filename, {buff, size});
 		return true;
 	}
 

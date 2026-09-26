@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -29,6 +30,8 @@
 #include <vector>
 
 namespace Automation4 {
+	class LuaWorkspaceSourceRegistry;
+
 	enum class AutomationDebugPauseReason {
 		Entry,
 		Breakpoint,
@@ -140,6 +143,7 @@ namespace Automation4 {
 		AutomationDebugLaunchRequest request;
 		AutomationBreakpointStore breakpoints;
 		AutomationDebugTarget target;
+		std::shared_ptr<LuaWorkspaceSourceRegistry> source_registry;
 		std::deque<AutomationDebugPauseRecord> pauses;
 		std::optional<AutomationDebugPauseRecord> current_pause;
 		std::optional<AutomationDebugLocation> resume_skip_location;
@@ -174,6 +178,8 @@ namespace Automation4 {
 		bool Enabled() const;
 		void SetTarget(AutomationDebugTarget target);
 		AutomationDebugTarget GetTarget() const;
+		void SetSourceRegistry(std::shared_ptr<LuaWorkspaceSourceRegistry> registry);
+		std::shared_ptr<LuaWorkspaceSourceRegistry> GetSourceRegistry() const;
 		void SetBreakpoints(std::vector<AutomationDebugBreakpoint> values);
 		std::vector<AutomationDebugBreakpoint> GetBreakpoints() const;
 		void BeginInvocation(AutomationInvocation const& invocation);

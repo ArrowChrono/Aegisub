@@ -264,7 +264,7 @@ namespace Automation4 {
 		/// Reload all scripts managed
 		virtual void Reload() = 0;
 		/// Reload a single managed script
-		virtual void Reload(Script *script);
+		virtual void Reload(Script *script, std::shared_ptr<AutomationDebugSession> const& owner = {});
 
 		/// Get all managed scripts (both loaded and invalid)
 		const std::vector<std::unique_ptr<Script>>& GetScripts() const { return scripts; }
@@ -293,6 +293,7 @@ namespace Automation4 {
 		agi::fs::path managed_plugin_root;
 		std::shared_ptr<char> reload_lifetime = std::make_shared<char>();
 		std::shared_ptr<std::atomic<uint64_t>> reload_generation = std::make_shared<std::atomic<uint64_t>>(0);
+		bool pending_reload = false;
 
 		void ApplyReloadedScripts(
 			std::vector<std::unique_ptr<Script>> loaded_scripts,
@@ -304,6 +305,7 @@ namespace Automation4 {
 			agi::fs::path managed_plugin_root = {});
 		void Reload() override;
 		void ReloadAsync();
+		void ProcessPendingReload();
 	};
 
 	class ScriptFactory {

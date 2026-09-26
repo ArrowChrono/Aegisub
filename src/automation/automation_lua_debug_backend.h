@@ -19,6 +19,7 @@
 #include <libaegisub/fs_fwd.h>
 
 #include <set>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -27,26 +28,29 @@ struct lua_State;
 struct lua_Debug;
 
 namespace Automation4 {
-	class AutomationLuaDebugBackend final : public AutomationDebugBackend {
-		lua_State *L = nullptr;
-		agi::fs::path script_file;
-		std::set<std::string> runtime_globals_baseline;
+struct LuaWorkspaceRunRequest;
+class AutomationLuaDebugBackend final : public AutomationDebugBackend {
+	lua_State *L = nullptr;
+	agi::fs::path script_file;
+	std::set<std::string> runtime_globals_baseline;
+	std::shared_ptr<LuaWorkspaceRunRequest const> workspace_request;
 
-		void UpdateHookState();
-		void OnHook(lua_Debug *ar);
-		void OnDebugStateChanged() override;
+	void UpdateHookState();
+	void OnHook(lua_Debug *ar);
+	void OnDebugStateChanged() override;
 
-		AutomationDebugLocation BuildLocation(lua_Debug const& ar) const;
-		size_t CaptureStackDepth() const;
-		std::vector<AutomationDebugFrame> CaptureFrames() const;
+	AutomationDebugLocation BuildLocation(lua_Debug const& ar) const;
+	size_t CaptureStackDepth() const;
+	std::vector<AutomationDebugFrame> CaptureFrames() const;
 
-		static void Hook(lua_State *L, lua_Debug *ar);
+	static void Hook(lua_State *L, lua_Debug *ar);
 
 	public:
 		AutomationLuaDebugBackend(lua_State *L, agi::fs::path script_file);
 		~AutomationLuaDebugBackend();
+		void SetWorkspaceRunRequest(std::shared_ptr<LuaWorkspaceRunRequest const> request);
 
 		void CaptureRuntimeBaseline() override;
 		bool IsRuntimeGlobal(std::string_view name) const;
-	};
+};
 }

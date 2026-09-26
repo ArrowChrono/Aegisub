@@ -235,6 +235,7 @@ public:
 	/// Temporarily prevent the periodic autosave timer from snapshotting
 	/// transient document state. Nested inhibitors are supported.
 	AutosaveInhibitor InhibitAutosave();
+	void ProcessPendingExternalChange();
 
 	/// Set the selection controller to use
 	///

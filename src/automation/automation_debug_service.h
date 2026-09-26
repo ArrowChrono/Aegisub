@@ -50,6 +50,7 @@ namespace Automation4 {
 		size_t state_version = 0;
 		size_t session_generation = 0;
 		std::shared_ptr<AutomationDebugSession> current_session;
+		std::shared_ptr<AutomationDebugSession> local_session;
 		AutomationDebugLiveEndpoint endpoint;
 		AutomationDebugLaunchRequest launch_configuration;
 		std::unique_ptr<Impl> impl;
@@ -70,9 +71,14 @@ namespace Automation4 {
 		AutomationDebugServiceStateSnapshot WaitForStateChange(size_t after_version) const;
 		AutomationDebugLaunchRequest GetLaunchConfiguration() const;
 		void SetLaunchConfiguration(AutomationDebugLaunchRequest request);
-		void ReportClientState(bool connected, bool configured);
+		bool ReportClientState(bool connected, bool configured);
 		void NotifyStateChange();
 		std::shared_ptr<AutomationDebugSession> GetCurrentSession() const;
+		bool HasLocalSession() const;
+		[[nodiscard]] bool OwnsLocalSession(std::shared_ptr<AutomationDebugSession> const& session) const;
+		std::shared_ptr<AutomationDebugSession> PrepareLocalSession(
+			AutomationDebugTarget target,
+			AutomationDebugLaunchRequest request);
 		std::shared_ptr<AutomationDebugSession> PrepareSession(
 			AutomationDebugTarget target,
 			AutomationDebugLaunchRequest request = {});

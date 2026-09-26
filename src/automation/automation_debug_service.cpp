@@ -31,6 +31,7 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -540,16 +541,19 @@ void AutomationDebugService::SetLaunchConfiguration(AutomationDebugLaunchRequest
 	launch_configuration = std::move(request);
 }
 
-void AutomationDebugService::ReportClientState(bool connected, bool configured)
+bool AutomationDebugService::ReportClientState(bool connected, bool configured)
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	if (connected && local_session)
+		return false;
 	if (client_connected == connected && client_configured == configured)
-		return;
+		return true;
 
 	client_connected = connected;
 	client_configured = configured;
 	++state_version;
 	cv.notify_all();
+	return true;
 }
 
 void AutomationDebugService::NotifyStateChange()
@@ -565,6 +569,40 @@ std::shared_ptr<AutomationDebugSession> AutomationDebugService::GetCurrentSessio
 	return current_session;
 }
 
+bool AutomationDebugService::HasLocalSession() const
+{
+	std::scoped_lock lock(mutex);
+	return static_cast<bool>(local_session);
+}
+
+bool AutomationDebugService::OwnsLocalSession(std::shared_ptr<AutomationDebugSession> const& session) const
+{
+	std::scoped_lock lock(mutex);
+	return session && local_session == session;
+}
+
+std::shared_ptr<AutomationDebugSession> AutomationDebugService::PrepareLocalSession(
+	AutomationDebugTarget target,
+	AutomationDebugLaunchRequest request)
+{
+	std::scoped_lock lock(mutex);
+	if (local_session)
+		throw std::runtime_error("a local automation debug session is already active");
+	if (client_connected)
+		throw std::runtime_error("a remote automation debug client is connected");
+	if (current_session && current_session->GetStateSnapshot().invocation_active)
+		throw std::runtime_error("a remote automation debug session is active");
+
+	request.nonblocking = false;
+	auto session = std::make_shared<AutomationDebugSession>(std::move(request));
+	session->SetTarget(std::move(target));
+	local_session = session;
+	++session_generation;
+	++state_version;
+	cv.notify_all();
+	return session;
+}
+
 std::shared_ptr<AutomationDebugSession> AutomationDebugService::PrepareSession(
 	AutomationDebugTarget target,
 	AutomationDebugLaunchRequest request)
@@ -574,6 +612,10 @@ std::shared_ptr<AutomationDebugSession> AutomationDebugService::PrepareSession(
 
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		if (local_session)
+			throw std::runtime_error("a local automation debug session is active");
+		if (current_session && current_session->GetStateSnapshot().invocation_active)
+			throw std::runtime_error("a remote automation debug session is active");
 		if (!enabled || !client_configured)
 			return {};
 
@@ -605,7 +647,14 @@ void AutomationDebugService::ClearSession(std::shared_ptr<AutomationDebugSession
 
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		if (current_session == session) {
+		if (session && local_session == session) {
+			detached_session = local_session;
+			local_session.reset();
+			++session_generation;
+			++state_version;
+			cv.notify_all();
+		}
+		else if (session && current_session == session) {
 			detached_session = current_session;
 			current_session.reset();
 			++session_generation;

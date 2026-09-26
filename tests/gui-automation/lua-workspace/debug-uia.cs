@@ -1,0 +1,2264 @@
+#:property TargetFramework=net10.0-windows
+#:property UseWPF=true
+#:property ImplicitUsings=enable
+#:property Nullable=enable
+#:property PublishAot=false
+#:property InvariantGlobalization=false
+#:project ../driver/Aegisub.GuiAutomation.Driver.csproj
+
+using System.Collections.Specialized;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Windows.Automation;
+using System.Windows.Forms;
+using Aegisub.GuiAutomation.Driver;
+
+const string workerFlag = "--debug-worker";
+try
+{
+    return args.Contains(workerFlag) ? Run(args.Where(arg => arg != workerFlag).ToArray()) : Supervise(args);
+}
+catch (Exception error)
+{
+    Console.Error.WriteLine($"debug-uia.error={error.GetType().Name}:{error.Message}");
+    return 1;
+}
+
+static int Supervise(string[] args)
+{
+    var timer = Stopwatch.StartNew();
+    var artifactIndex = Array.IndexOf(args, "--artifacts");
+    var exeIndex = Array.IndexOf(args, "--exe");
+    if (artifactIndex < 0 || artifactIndex + 1 >= args.Length || exeIndex < 0 || exeIndex + 1 >= args.Length)
+        throw new ArgumentException("--exe and --artifacts are required");
+    var artifacts = Path.GetFullPath(args[artifactIndex + 1]);
+    var expectedExe = Path.GetFullPath(args[exeIndex + 1]);
+    if (Directory.Exists(artifacts) || File.Exists(artifacts))
+        throw new InvalidOperationException("Use a fresh debug UIA artifact directory; existing evidence is never overwritten");
+    Directory.CreateDirectory(artifacts);
+    var originalSequence = Native.ClipboardSequence();
+    var originalClipboard = ClipboardSafety.OnSta(ClipboardSafety.Capture);
+    Ensure(Native.ClipboardSequence() == originalSequence, "Clipboard changed during its materialized snapshot");
+    var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Driver process path is unavailable");
+    var start = new ProcessStartInfo(executable) { UseShellExecute = false };
+    if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+        start.ArgumentList.Add(Assembly.GetEntryAssembly()?.Location ?? throw new InvalidOperationException("Executed assembly is unavailable"));
+    start.ArgumentList.Add(workerFlag);
+    start.Environment["AEGISUB_DEBUG_CLIPBOARD_SEQUENCE"] = originalSequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    foreach (var argument in args) start.ArgumentList.Add(argument);
+    using var worker = Process.Start(start) ?? throw new InvalidOperationException("Could not start debug UIA worker");
+    var timedOut = false;
+    var workerBudget = TimeSpan.FromSeconds(230) - timer.Elapsed;
+    if (workerBudget <= TimeSpan.Zero || !worker.WaitForExit(workerBudget))
+    {
+        timedOut = true;
+        worker.Kill(entireProcessTree: true);
+        if (!worker.WaitForExit(TimeSpan.FromSeconds(5))) throw new TimeoutException("Debug UIA worker did not stop after timeout");
+    }
+    var hostLeftRunning = false;
+    var readyPath = Path.Combine(artifacts, "ready.json");
+    var identityPath = Path.Combine(artifacts, "host-identity.json");
+    if (File.Exists(readyPath))
+    {
+        var hostId = JsonDocument.Parse(File.ReadAllText(readyPath)).RootElement.GetProperty("process_id").GetInt32();
+        var identity = File.Exists(identityPath) ? JsonSerializer.Deserialize<HostIdentity>(File.ReadAllText(identityPath)) : null;
+        var verifiedIdentity = identity ?? throw new InvalidOperationException("GUI host PID has no matching worker identity");
+        Ensure(verifiedIdentity.ProcessId == hostId, "GUI host PID has no matching worker identity");
+        try
+        {
+            using var host = Process.GetProcessById(hostId);
+            if (!host.HasExited)
+            {
+                hostLeftRunning = true;
+                Ensure(host.StartTime.ToUniversalTime().ToString("O") == verifiedIdentity.StartTimeUtc
+                    && Path.GetFullPath(host.MainModule?.FileName ?? "").Equals(expectedExe, StringComparison.OrdinalIgnoreCase),
+                    "Ready PID no longer belongs to this GUI host; unrelated process was preserved");
+                host.Kill(entireProcessTree: true);
+                if (!host.WaitForExit(TimeSpan.FromSeconds(5))) throw new TimeoutException("GUI host did not stop before clipboard cleanup");
+            }
+        }
+        catch (ArgumentException) { }
+    }
+    var receipt = ClipboardReceipt.Read(Path.Combine(artifacts, "clipboard-receipt.json"));
+    var finalSequence = Native.ClipboardSequence();
+    string clipboardStatus;
+    if (receipt is not null && finalSequence == receipt.Sequence)
+    {
+        ClipboardSafety.Restore(originalClipboard, receipt.Sequence);
+        clipboardStatus = "restored";
+    }
+    else if (receipt is null && finalSequence == originalSequence)
+        clipboardStatus = "unchanged";
+    else
+        clipboardStatus = "external-or-unreceipted-change-preserved";
+    File.WriteAllText(Path.Combine(artifacts, "supervisor.json"), JsonSerializer.Serialize(new
+    {
+        BudgetSeconds = 240, TimedOut = timedOut, HostLeftRunning = hostLeftRunning, WorkerExitCode = worker.ExitCode,
+        ClipboardStatus = clipboardStatus, InitialSequence = originalSequence, FinalSequence = finalSequence
+    }, new JsonSerializerOptions { WriteIndented = true }));
+    Ensure(clipboardStatus != "external-or-unreceipted-change-preserved", "Clipboard changed outside the verified test transaction; external data was preserved");
+    Ensure(!timedOut, "Lua Workspace debug GUI E2E exceeded its 240-second total limit");
+    return hostLeftRunning ? 1 : worker.ExitCode;
+}
+
+static int Run(string[] args)
+{
+    string? exe = null;
+    string? artifacts = null;
+    var scenario = "basic";
+    for (var index = 0; index < args.Length; ++index)
+    {
+        switch (args[index])
+        {
+            case "--exe": exe = Path.GetFullPath(args[++index]); break;
+            case "--artifacts": artifacts = Path.GetFullPath(args[++index]); break;
+            case "--scenario": scenario = args[++index]; break;
+            default: throw new ArgumentException($"Unknown argument: {args[index]}");
+        }
+    }
+    if (exe is null || !File.Exists(exe) || artifacts is null)
+        throw new ArgumentException("--exe and --artifacts are required");
+    Ensure(scenario is "basic" or "controls" or "files" or "dap" or "jit", "--scenario must be basic, controls, files, dap, or jit");
+    var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.ass");
+    var actions = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-actions.lua");
+    var expectedFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.expected.json");
+    var stepsFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-steps.lua");
+    var loopFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-loop.lua");
+    var templater = Path.Combine("automation", "autoload", "kara-templater.lua");
+    var includeRoot = Path.Combine("automation", "include");
+    var driver = Path.Combine("tests", "gui-automation", "lua-workspace", "debug-uia.cs");
+    var hashes = new Dictionary<string, string> { ["exe"] = Hash(exe), ["fixture"] = Hash(fixture), ["actions"] = Hash(actions),
+        ["expected"] = Hash(expectedFile), ["steps"] = Hash(stepsFile), ["loop"] = Hash(loopFile),
+        ["templater"] = Hash(templater), ["driver_source"] = Hash(driver),
+        ["clipboard_sta_source"] = Hash(Path.Combine("tests", "gui-automation", "driver", "ClipboardSta.cs")),
+        ["executed_driver_library"] = Hash(typeof(ClipboardSta).Assembly.Location),
+        ["executed_driver"] = Hash(Assembly.GetEntryAssembly()?.Location ?? throw new InvalidOperationException("Executed assembly unavailable")) };
+    var includeFiles = Directory.GetFiles(includeRoot, "*", SearchOption.AllDirectories);
+    foreach (var file in includeFiles)
+        hashes[Path.Combine(includeRoot, Path.GetRelativePath(includeRoot, file)).Replace('\\', '/')] = Hash(file);
+    var expected = JsonSerializer.Deserialize<ExpectedOutput>(File.ReadAllText(expectedFile), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })
+        ?? throw new FormatException("Debug expected JSON is empty");
+    Ensure(expected.Generated is not null && expected.GeneratedCount == expected.Generated.Count && expected.GeneratedCount > 0,
+        "Debug expected generated list/count is inconsistent");
+    var input = Path.Combine(artifacts, "input.ass");
+    File.Copy(fixture, input);
+    File.Copy(actions, Path.Combine(artifacts, "debug-actions.lua"));
+    File.Copy(stepsFile, Path.Combine(artifacts, "debug-steps.lua"));
+    File.Copy(loopFile, Path.Combine(artifacts, "debug-loop.lua"));
+    File.Copy(templater, Path.Combine(artifacts, "kara-templater.lua"));
+    foreach (var file in includeFiles)
+    {
+        var destination = Path.Combine(artifacts, "include", Path.GetRelativePath(includeRoot, file));
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        File.Copy(file, destination);
+    }
+    var baseline = EventLines(File.ReadAllText(input));
+    Ensure(baseline.Count == 7 && baseline[0].Text.Contains("OLD:", StringComparison.Ordinal), "Debug fixture baseline has changed");
+    Directory.CreateDirectory(Path.Combine(artifacts, "profile"));
+    if (scenario == "files") PrepareFiles();
+    if (scenario == "jit") PrepareJit();
+    var dapToken = "lua-workspace-e2e";
+    var dapPort = scenario == "dap" ? PrepareDap() : 0;
+    ClipboardReceipt.Initialize(Path.Combine(artifacts, "clipboard-receipt.json"), uint.Parse(
+        Environment.GetEnvironmentVariable("AEGISUB_DEBUG_CLIPBOARD_SEQUENCE") ?? throw new InvalidOperationException("Clipboard baseline is missing"),
+        System.Globalization.CultureInfo.InvariantCulture));
+    var startedUtc = DateTimeOffset.UtcNow;
+    DateTimeOffset? finishedUtc = null;
+    var exitStatus = "running";
+    var steps = scenario == "controls"
+        ? new[] { "host-ready", "controls-open-steps", "step-in-out-over", "step-save-undo", "loop-seed", "loop-pause-stop",
+            "loop-live-rollback", "loop-undo-depth", "close-stop", "close-stop-rollback", "close-detach", "close-detach-save-undo", "normal-shutdown" }
+        : scenario == "files" ? FileSteps()
+        : scenario == "dap" ? DapSteps()
+        : scenario == "jit" ? JitSteps()
+        : new[] { "host-ready", "open-workspace", "edit-unapplied", "breakpoint-debug-pause", "stale-source", "stop-rollback",
+            "stop-live-rollback", "run-generated", "undo-restores", "debug-detach", "basic-normal-shutdown" };
+    var results = new List<StepResult>();
+    Process? host = null;
+    AutomationElement? main = null;
+    AutomationElement? workspace = null;
+    try
+    {
+        var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)! };
+        foreach (var argument in new[] { "--gui-test", "host", "--profile-dir", Path.Combine(artifacts, "profile"), "--artifacts", artifacts, "--open", input })
+            start.ArgumentList.Add(argument);
+        host = Process.Start(start) ?? throw new InvalidOperationException("Could not start GUI host");
+        File.WriteAllText(Path.Combine(artifacts, "host-identity.json"), JsonSerializer.Serialize(new HostIdentity(host.Id, host.StartTime.ToUniversalTime().ToString("O"))));
+        Step("host-ready", () =>
+        {
+            var ready = AutomationProtocol.WaitForReadyArtifact(Path.Combine(artifacts, "ready.json"), host, TimeSpan.FromSeconds(15));
+            Ensure(ready.ProcessId == host.Id, "ready.json belongs to another host");
+            _ = UiaDriver.WaitForMainWindow(host, TimeSpan.FromSeconds(15));
+        });
+        main = AutomationElement.FromHandle(host.MainWindowHandle);
+        SaveEvidence(main, artifacts, "main-before-open");
+        if (scenario != "basic")
+        {
+            if (scenario == "controls") RunControls();
+            else if (scenario == "files") RunFiles();
+            else if (scenario == "dap") RunDap();
+            else RunJit();
+            foreach (var step in steps.Where(name => results.All(result => result.Name != name)))
+                results.Add(new StepResult(step, "not-run", "Scenario step was not executed"));
+            finishedUtc = DateTimeOffset.UtcNow;
+            exitStatus = results.Count == steps.Length && results.All(result => result.Status == "passed") ? "passed" : "incomplete";
+            WriteManifest();
+            return exitStatus == "passed" ? 0 : 1;
+        }
+        AutomationElement? editor = null;
+        Step("open-workspace", () =>
+        {
+            InvokeMenu(main, host, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+            InvokeMenu(main, host, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+            workspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(8));
+            SaveEvidence(workspace, artifacts, "workspace-opened");
+            editor = FindStyledText(workspace, insideNotebook: false);
+            Ensure(editor is not null, "Workspace source editor has no unique UIA STC descendant");
+        });
+        const string edited = "decorate = function(value)\n  return \"DBG:\" .. string.upper(value)\nend";
+        File.WriteAllText(Path.Combine(artifacts, "edited.lua"), edited, new UTF8Encoding(false));
+        Step("edit-unapplied", () =>
+        {
+            Native.ReplaceWithClipboard(editor!, host, edited);
+            Ensure(Normalize(CopySource(workspace!, host)) == edited, "Workspace editor did not retain exact multiline un-applied source");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Un-applied source changed physical ASS events");
+            SaveEvidence(workspace!, artifacts, "edited-unapplied");
+        });
+        Step("breakpoint-debug-pause", () =>
+        {
+            Native.Focus(editor!, host);
+            Native.SendCtrlHome(editor!, host);
+            Native.SendKey(editor!, host, 0x28);
+            InvokeButton(workspace!, "Toggle Breakpoint");
+            var debugTask = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            PauseStatus? entry = null;
+            WaitUntil(() => (entry = ParsePauseStatus(ReadRunStatus(workspace!)))?.Reason == "entry", TimeSpan.FromSeconds(15),
+                "Debug did not report its initial entry pause");
+            File.WriteAllText(Path.Combine(artifacts, "debug-entry-status.txt"), ReadRunStatus(workspace!));
+            SaveEvidence(workspace!, artifacts, "debug-entry-paused");
+            AssertLivePauseControls(main, workspace!);
+            InvokeButton(workspace!, "Continue");
+            SelectTab(workspace!, "Stack and Variables");
+            PauseStatus? breakpoint = null;
+            WaitUntil(() => (breakpoint = ParsePauseStatus(ReadRunStatus(workspace!))) is { Reason: "breakpoint" } candidate
+                && candidate.Sequence > entry!.Sequence && StackHasSourceLine(workspace!, "Code line ID ", 2),
+                TimeSpan.FromSeconds(20), "Continue did not stop at a new code-source line 2 breakpoint");
+            SaveEvidence(workspace!, artifacts, "debug-breakpoint-paused");
+            File.WriteAllText(Path.Combine(artifacts, "debug-paused-status.txt"), ReadRunStatus(workspace!));
+            AssertLivePauseControls(main, workspace!);
+            DebugInvocation.Set(debugTask);
+        });
+        Step("stale-source", () =>
+        {
+            SelectTab(workspace!, "Execution Source");
+            var execution = FindStyledText(workspace!, insideNotebook: true);
+            Ensure(execution is not null, "Paused execution source has no unique readonly STC descendant");
+            var captured = Native.CopyStyledText(execution!, host);
+            File.WriteAllText(Path.Combine(artifacts, "paused-source.lua"), captured, new UTF8Encoding(false));
+            Ensure(Normalize(captured) == edited, "Paused readonly source did not match the immutable invocation revision");
+            Native.ReplaceWithClipboard(editor!, host, edited + "\n-- next revision only");
+            var after = Native.CopyStyledText(execution!, host);
+            Ensure(Normalize(after) == edited, "Paused readonly source changed with a newer editor buffer");
+            Ensure(FindExactText(workspace!, text => text.Contains("[stale editor revision]", StringComparison.Ordinal)) is not null,
+                "Execution identity did not mark the captured revision stale after editing");
+            File.WriteAllText(Path.Combine(artifacts, "stale-editor.lua"), CopySource(workspace!, host), new UTF8Encoding(false));
+            SaveEvidence(workspace!, artifacts, "stale-paused-source");
+        });
+        Step("stop-rollback", () =>
+        {
+            InvokeButton(workspace!, "Stop");
+            Ensure(DebugInvocation.Wait(TimeSpan.FromSeconds(20)), "Stopped debug command did not return");
+            WaitUntil(() => ReadRunStatus(workspace!).Contains("cancelled", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(8),
+                "Stop did not reach a cancelled terminal state");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Stopped debug invocation modified the physical ASS baseline");
+            Native.Undo(editor!, host);
+            Ensure(Normalize(CopySource(workspace!, host)) == edited, "One Workspace-local Undo did not restore the invocation source after stale edit");
+            SaveEvidence(workspace!, artifacts, "debug-stopped");
+        });
+        Step("stop-live-rollback", () =>
+        {
+            WaitUntil(() => main.Current.IsEnabled, TimeSpan.FromSeconds(5), "Stop did not release the main window");
+            var before = File.ReadAllBytes(input);
+            var task = Task.Run(() => InvokeMenu(main, host, "Workspace Debug Verify Original", TimeSpan.FromSeconds(8)));
+            var dialog = WaitWindowContainingText(host, "Debug original live baseline verified", TimeSpan.FromSeconds(8));
+            SaveEvidence(dialog, artifacts, "basic-live-rollback");
+            InvokeButton(dialog, "OK");
+            Ensure(task.Wait(TimeSpan.FromSeconds(10)), "Basic live rollback verifier did not return");
+            WaitUntil(() => main.Current.IsEnabled && FindProgressPane(host, "Workspace Debug Verify Original") is null,
+                TimeSpan.FromSeconds(8), "Basic live rollback verifier did not release its execution UI");
+            Ensure(File.ReadAllBytes(input).SequenceEqual(before) && EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                "Basic live rollback verifier changed or disagreed with the physical baseline");
+        });
+        Step("run-generated", () =>
+        {
+            var task = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitForInvocation(workspace!, host, task, "completed", artifacts, "run-generated");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Run wrote the physical ASS before explicit main Save");
+            var save = UiaDriver.FindEnabledInvokableButtonByAutomationId(main, "Item 5002", "Save the current subtitles");
+            WaitUntil(() => (save = UiaDriver.FindEnabledInvokableButtonByAutomationId(main, "Item 5002", "Save the current subtitles")) is not null,
+                TimeSpan.FromSeconds(8), "Main Save did not become available after Workspace Run");
+            UiaDriver.Invoke(save!);
+            WaitUntil(() => EventLines(File.ReadAllText(input)).Count == baseline.Count + expected.GeneratedCount,
+                TimeSpan.FromSeconds(8), "Saved ASS did not contain independent generated count");
+            var saved = File.ReadAllText(input);
+            File.WriteAllText(Path.Combine(artifacts, "run-output.ass"), saved);
+            AssertGenerated(saved, baseline, expected);
+            SaveEvidence(workspace!, artifacts, "run-completed");
+        });
+        Step("undo-restores", () =>
+        {
+            InvokeMenu(main, host, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            AutomationElement? save = null;
+            WaitUntil(() => (save = UiaDriver.FindEnabledInvokableButtonByAutomationId(main, "Item 5002", "Save the current subtitles")) is not null,
+                TimeSpan.FromSeconds(8), "Main Save did not become available after one Undo");
+            UiaDriver.Invoke(save!);
+            WaitUntil(() => EventLines(File.ReadAllText(input)).SequenceEqual(baseline), TimeSpan.FromSeconds(8),
+                "One main Undo did not restore the exact seven-event baseline");
+            File.Copy(input, Path.Combine(artifacts, "undone.ass"));
+        });
+        Step("debug-detach", () =>
+        {
+            var task = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            PauseStatus? entry = null;
+            WaitUntil(() => (entry = ParsePauseStatus(ReadRunStatus(workspace!))) is { Reason: "entry", Sequence: 1 },
+                TimeSpan.FromSeconds(15), "Second Debug did not reach its new entry #1 pause");
+            AssertLivePauseControls(main, workspace!);
+            SaveEvidence(workspace!, artifacts, "detach-paused");
+            InvokeButton(workspace!, "Detach");
+            WaitForInvocation(workspace!, host, task, "completed", artifacts, "detach-completed");
+            AutomationElement? save = null;
+            WaitUntil(() => (save = UiaDriver.FindEnabledInvokableButtonByAutomationId(main, "Item 5002", "Save the current subtitles")) is not null,
+                TimeSpan.FromSeconds(8), "Main Save did not become available after detached invocation committed");
+            UiaDriver.Invoke(save!);
+            WaitUntil(() => EventLines(File.ReadAllText(input)).Count == baseline.Count + expected.GeneratedCount,
+                TimeSpan.FromSeconds(8), "Detached invocation did not persist expected generated count");
+            var saved = File.ReadAllText(input);
+            File.WriteAllText(Path.Combine(artifacts, "detach-output.ass"), saved);
+            AssertGenerated(saved, baseline, expected);
+        });
+        Step("basic-normal-shutdown", () =>
+        {
+            Native.PostClose(workspace!, host);
+            var dialog = WaitWindow(host, "Unsaved Lua source", TimeSpan.FromSeconds(5));
+            SaveEvidence(dialog, artifacts, "basic-discard-unsaved-source");
+            InvokeButton(dialog, "Discard");
+            WaitUntil(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromSeconds(5), "Basic Workspace did not close after Discard");
+            AssertGenerated(File.ReadAllText(input), baseline, expected);
+            Native.StabilizeOwnedClipboard(host.Id);
+            if (!main.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern))
+                throw new InvalidOperationException("Basic main window lacks WindowPattern.Close");
+            ((WindowPattern)pattern).Close();
+            Ensure(host.WaitForExit(TimeSpan.FromSeconds(10)) && host.ExitCode == 0, "Basic host did not exit normally with code zero");
+            File.WriteAllText(Path.Combine(artifacts, "basic-normal-shutdown.json"), JsonSerializer.Serialize(new
+            {
+                HostExitCode = host.ExitCode, Method = "WindowPattern.Close"
+            }));
+        });
+        foreach (var step in steps.Where(name => results.All(result => result.Name != name)))
+            results.Add(new StepResult(step, "not-run", "Scenario step was not executed"));
+        finishedUtc = DateTimeOffset.UtcNow;
+        exitStatus = results.Count == steps.Length && results.All(result => result.Status == "passed") ? "passed" : "incomplete";
+        WriteManifest();
+        return exitStatus == "passed" ? 0 : 1;
+    }
+    catch (Exception error)
+    {
+        if (host is not null && !host.HasExited) TryProcessEvidence(host, artifacts, "failure");
+        var failing = steps.FirstOrDefault(name => results.All(result => result.Name != name));
+        if (failing is not null) results.Add(new StepResult(failing, "failed", error.Message));
+        foreach (var step in steps.Where(name => results.All(result => result.Name != name)))
+            results.Add(new StepResult(step, "not-run", "A preceding step failed"));
+        finishedUtc = DateTimeOffset.UtcNow;
+        exitStatus = "failed";
+        WriteManifest();
+        Console.Error.WriteLine(error);
+        return 1;
+    }
+    finally
+    {
+        if (workspace is not null) TryEvidence(workspace, artifacts, "final-workspace");
+        if (host is not null && !host.HasExited)
+        {
+            Native.StabilizeOwnedClipboard(host.Id);
+            host.Kill(entireProcessTree: true);
+            if (!host.WaitForExit(TimeSpan.FromSeconds(5))) throw new TimeoutException("GUI host did not stop before clipboard cleanup");
+        }
+        host?.Dispose();
+    }
+
+    string[] FileSteps() => new[] { "host-ready", "files-open-noentry", "files-noentry-first-run", "files-noentry-reload",
+        "files-noentry-recover", "files-noentry-undo", "files-readonly-failure", "files-readonly-live-baseline",
+        "files-readonly-recovery", "files-readonly-undo", "files-managed-beta", "files-managed-beta-undo",
+        "files-managed-gamma", "files-managed-gamma-undo", "files-normal-shutdown" };
+
+    void PrepareFiles()
+    {
+        foreach (var name in new[] { "debug-file-noentry.lua", "debug-file-save.lua", "debug-file-save-edited.lua",
+            "debug-file-macros.lua", "debug-file-macros-v2.lua" })
+        {
+            var source = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", name);
+            hashes[name] = Hash(source);
+            File.Copy(source, Path.Combine(artifacts, name));
+        }
+        var physical = File.ReadAllText(input);
+        const string before = "Automation Scripts: ~debug-actions.lua|~kara-templater.lua";
+        Ensure(physical.Split(before, StringSplitOptions.None).Length == 2, "ASS fixture has no unique Automation Scripts metadata to extend");
+        physical = physical.Replace(before, before + "|~debug-file-macros.lua", StringComparison.Ordinal);
+        File.WriteAllText(input, physical, new UTF8Encoding(false));
+        hashes["files-prepared-input-ass"] = Hash(input);
+        Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "File-scenario script metadata changed event baseline");
+        Ensure(!File.Exists(Path.Combine(artifacts, "debug-noentry-loads.txt")), "No-entry loader marker predates GUI host startup");
+    }
+
+    void RunFiles()
+    {
+        var gui = main ?? throw new InvalidOperationException("Main GUI frame is unavailable");
+        var process = host ?? throw new InvalidOperationException("GUI host is unavailable");
+        var noentry = Path.Combine(artifacts, "debug-file-noentry.lua");
+        var marker = Path.Combine(artifacts, "debug-noentry-loads.txt");
+        var saveFile = Path.Combine(artifacts, "debug-file-save.lua");
+        var savedEdited = File.ReadAllText(Path.Combine(artifacts, "debug-file-save-edited.lua"));
+        var managedFile = Path.Combine(artifacts, "debug-file-macros.lua");
+        var managedEdited = File.ReadAllText(Path.Combine(artifacts, "debug-file-macros-v2.lua"));
+        var recovered = baseline.ToArray();
+        recovered[0] = recovered[0] with { Effect = "noentry-recovered" };
+        var saved = baseline.ToArray();
+        saved[0] = saved[0] with { Effect = "file-saved" };
+        var beta = baseline.ToArray();
+        beta[0] = beta[0] with { Effect = "managed-beta" };
+        var gamma = baseline.ToArray();
+        gamma[0] = gamma[0] with { Effect = "managed-gamma" };
+        AutomationElement? contextControl = null;
+
+        int MarkerCount() => File.Exists(marker) ? File.ReadAllLines(marker).Length : 0;
+
+        void WaitNoEntry(int expectedCount)
+        {
+            WaitUntil(() => MarkerCount() == expectedCount
+                && FindExactText(workspace!, value => value.Contains("The reloaded Lua file has no registered macro to run", StringComparison.Ordinal)) is not null,
+                TimeSpan.FromSeconds(8), "No-entry Run did not report the exact missing-macro condition after source load");
+            Ensure(!FindButton(workspace!, "Run").Current.IsEnabled && !FindButton(workspace!, "Debug").Current.IsEnabled,
+                "No-entry revision left Run or Debug available");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "No-entry source load modified physical ASS");
+        }
+
+        void WaitFileRun(Task invocation, string script, string macro)
+        {
+            var feature = "Feature: automation/lua/" + script + "/" + macro;
+            WaitUntil(() =>
+            {
+                var view = Native.ReadEditText(contextControl ?? throw new InvalidOperationException("File Context Edit is unavailable"), process);
+                return invocation.IsCompleted && view.Split('\n').Any(line => line.TrimEnd('\r') == feature)
+                    && view.Split('\n').Any(line => line.TrimEnd('\r') == "Status: completed")
+                    && ReadRunStatus(workspace!).Contains("completed", StringComparison.OrdinalIgnoreCase)
+                    && gui.Current.IsEnabled;
+            }, TimeSpan.FromSeconds(15), $"{macro} did not reach its exact completed Workspace observation");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), $"{macro} GUI invocation task did not return");
+        }
+
+        AutomationElement FindContextEdit()
+        {
+            SelectTab(workspace!, "Context");
+            var candidates = workspace!.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>()
+                .Where(item => item.Current.ProcessId == process.Id && !item.Current.IsOffscreen
+                    && item.Current.ClassName == "Edit" && item.Current.ControlType == ControlType.Document
+                    && item.Current.NativeWindowHandle != 0 && HasNotebookAncestor(item, workspace!)).ToArray();
+            Ensure(candidates.Length == 1, $"Context tab exposes {candidates.Length} visible native Edit controls");
+            return candidates[0];
+        }
+
+        void VerifyOriginal(string evidence)
+        {
+            var bytes = File.ReadAllBytes(input);
+            var task = Task.Run(() => InvokeMenu(gui, process, "Workspace Debug Verify Original", TimeSpan.FromSeconds(8)));
+            var dialog = WaitWindowContainingText(process, "Debug original live baseline verified", TimeSpan.FromSeconds(8));
+            SaveEvidence(dialog, artifacts, evidence + "-live-dialog");
+            InvokeButton(dialog, "OK");
+            Ensure(task.Wait(TimeSpan.FromSeconds(10)), "Independent live ASS verifier did not finish after exact OK");
+            WaitUntil(() => gui.Current.IsEnabled && FindProgressPane(process, "Workspace Debug Verify Original") is null,
+                TimeSpan.FromSeconds(8), "Independent live ASS verifier did not release its execution UI");
+            Ensure(File.ReadAllBytes(input).SequenceEqual(bytes) && EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                "Independent live ASS verifier changed the physical baseline");
+        }
+
+        void UndoToOriginal(string evidence)
+        {
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            SaveMainAss(gui, input, baseline, artifacts, evidence);
+        }
+
+        void ChooseManagedMacro(string selected, string absent, string evidence)
+        {
+            var task = Task.Run(() => InvokeButton(workspace!, "Run"));
+            var dialog = WaitWindow(process, "Lua Workspace macro", TimeSpan.FromSeconds(8));
+            SaveEvidence(dialog, artifacts, evidence + "-choice");
+            var choices = dialog.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)).Cast<AutomationElement>()
+                .Where(item => !item.Current.IsOffscreen).ToArray();
+            Ensure(choices.Length == 2 && choices.Any(item => item.Current.Name == "Workspace File Alpha")
+                && choices.Any(item => item.Current.Name == selected)
+                && choices.All(item => item.Current.Name != absent), "Managed macro choice did not reflect the saved/reloaded registry");
+            var choice = choices.Single(item => item.Current.Name == selected);
+            if (!choice.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var select))
+                throw new InvalidOperationException("Exact managed macro choice has no SelectionItemPattern");
+            ((SelectionItemPattern)select).Select();
+            var okay = UiaDriver.FindDescendantByAutomationId(dialog, "5100", ControlType.Button)
+                ?? throw new InvalidOperationException("Macro-choice dialog has no observed wx OK ID 5100");
+            Ensure(okay.Current.IsEnabled && okay.TryGetCurrentPattern(InvokePattern.Pattern, out _), "Macro choice OK cannot be invoked");
+            UiaDriver.Invoke(okay);
+            WaitUntil(() => FindWindow(process, "Lua Workspace macro") is null, TimeSpan.FromSeconds(5),
+                "Macro-choice dialog remained after its exact selection");
+            WaitFileRun(task, "debug-file-macros", selected);
+        }
+
+        void VerifyManagedMenuRegistry()
+        {
+            var menus = gui.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem)).Cast<AutomationElement>()
+                .Where(item => !item.Current.IsOffscreen
+                    && (item.Current.Name ?? "").Replace("&", "", StringComparison.Ordinal) == "Automation").ToArray();
+            Ensure(menus.Length == 1, "Main frame has no unique visible Automation menu after managed reload");
+            var opened = false;
+            if (menus[0].TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var expand))
+            {
+                try { ((ExpandCollapsePattern)expand).Expand(); opened = true; }
+                catch (InvalidOperationException) { }
+            }
+            if (!opened && menus[0].TryGetCurrentPattern(InvokePattern.Pattern, out var invoke))
+            {
+                ((InvokePattern)invoke).Invoke();
+                opened = true;
+            }
+            if (!opened) Native.PostSystemMenu(new nint(gui.Current.NativeWindowHandle), 'u');
+            WaitUntil(() => FindVisibleMenuCommand(process, "Workspace File Gamma") is not null, TimeSpan.FromSeconds(5),
+                "Reloaded managed macro Gamma did not appear in the real Automation menu");
+            Ensure(FindVisibleMenuCommand(process, "Workspace File Beta") is null,
+                "Stale managed macro Beta remained in the real Automation menu after saved reload");
+            TryProcessEvidence(process, artifacts, "files-managed-registry");
+        }
+
+        Step("files-open-noentry", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+            InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            SaveEvidence(workspace, artifacts, "files-workspace-opened");
+            OpenLuaFile(workspace, process, noentry, artifacts, "files-noentry-picker");
+            contextControl = FindContextEdit();
+            Ensure(MarkerCount() == 0, "Opening a Lua source file executed its top-level loader");
+            InvokeButton(workspace, "Save");
+            Ensure(MarkerCount() == 0 && EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                "Saving a Lua source file executed its top-level loader or changed ASS");
+            SaveEvidence(workspace, artifacts, "files-noentry-opened");
+        });
+        Step("files-noentry-first-run", () =>
+        {
+            InvokeButton(workspace!, "Run");
+            WaitNoEntry(1);
+            File.WriteAllText(Path.Combine(artifacts, "noentry-first-run.txt"), File.ReadAllText(marker));
+            SaveEvidence(workspace!, artifacts, "files-noentry-disabled");
+        });
+        Step("files-noentry-reload", () =>
+        {
+            InvokeButton(workspace!, "Reload");
+            WaitUntil(() => FindButton(workspace!, "Run").Current.IsEnabled && FindButton(workspace!, "Debug").Current.IsEnabled,
+                TimeSpan.FromSeconds(5), "Explicit Reload did not clear the no-macro revision lock");
+            Ensure(MarkerCount() == 1, "Explicit Reload executed the Lua source unexpectedly");
+            InvokeButton(workspace!, "Run");
+            WaitNoEntry(2);
+            File.WriteAllText(Path.Combine(artifacts, "noentry-second-run.txt"), File.ReadAllText(marker));
+        });
+        Step("files-noentry-recover", () =>
+        {
+            var source = File.ReadAllText(noentry) + "\naegisub.register_macro(\"Workspace File Recovered\", \"Recovered entry\", function(subs, selected, active)\n"
+                + "  local line = subs[active]\n  line.effect = \"noentry-recovered\"\n  subs[active] = line\n  return selected, active\nend)\n";
+            var recoveredPath = Path.Combine(artifacts, "noentry-recovered.lua");
+            File.WriteAllText(recoveredPath, source, new UTF8Encoding(false));
+            hashes["files-generated-noentry-recovered"] = Hash(recoveredPath);
+            var editor = FindStyledText(workspace!, insideNotebook: false)
+                ?? throw new InvalidOperationException("No-entry source editor was not found");
+            Native.ReplaceWithClipboard(editor, process, source);
+            Ensure(Normalize(CopySource(workspace!, process)) == Normalize(source), "Recovered macro edit was not retained in the Workspace buffer");
+            WaitUntil(() => FindButton(workspace!, "Run").Current.IsEnabled && FindButton(workspace!, "Debug").Current.IsEnabled,
+                TimeSpan.FromSeconds(5), "A new editor revision did not re-enable Run/Debug after no-entry");
+            Ensure(MarkerCount() == 2, "Editing the no-entry buffer executed the top-level loader");
+            var task = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitFileRun(task, "debug-file-noentry", "Workspace File Recovered");
+            Ensure(MarkerCount() == 3 && Normalize(File.ReadAllText(noentry)) == Normalize(source),
+                "Recovered Run did not save/reload the new macro source exactly once");
+            SaveMainAss(gui, input, recovered, artifacts, "noentry-recovered.ass");
+        });
+        Step("files-noentry-undo", () => UndoToOriginal("noentry-undone.ass"));
+        Step("files-readonly-failure", () =>
+        {
+            OpenLuaFile(workspace!, process, saveFile, artifacts, "files-readonly-picker");
+            var originalBytes = File.ReadAllBytes(saveFile);
+            Ensure(originalBytes.Length >= 3 && originalBytes[0] == 0xef && originalBytes[1] == 0xbb && originalBytes[2] == 0xbf,
+                "Read-only fixture lost its UTF-8 BOM before the GUI run");
+            var originalAttributes = File.GetAttributes(saveFile);
+            try
+            {
+                File.SetAttributes(saveFile, originalAttributes | FileAttributes.ReadOnly);
+                var editor = FindStyledText(workspace!, insideNotebook: false)
+                    ?? throw new InvalidOperationException("Read-only Lua-file editor was not found");
+                Native.ReplaceWithClipboard(editor, process, savedEdited);
+                Ensure(Normalize(CopySource(workspace!, process)) == Normalize(savedEdited), "Read-only source edit was not retained before Run");
+                InvokeButton(workspace!, "Run");
+                WaitUntil(() => FindExactText(workspace!, value => value.Contains("Save the Lua file successfully before Run/Debug", StringComparison.Ordinal)) is not null,
+                    TimeSpan.FromSeconds(6), "Run did not report the failed Lua-file Save boundary");
+                Ensure(File.ReadAllBytes(saveFile).SequenceEqual(originalBytes)
+                    && Normalize(CopySource(workspace!, process)) == Normalize(savedEdited)
+                    && workspace!.Current.Name.Contains(" *", StringComparison.Ordinal)
+                    && EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                    "Failed read-only Save modified disk, ASS, or the dirty editor buffer");
+                SaveEvidence(workspace!, artifacts, "files-readonly-failed");
+            }
+            finally { File.SetAttributes(saveFile, originalAttributes); }
+        });
+        Step("files-readonly-live-baseline", () => VerifyOriginal("files-readonly"));
+        Step("files-readonly-recovery", () =>
+        {
+            var task = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitFileRun(task, "debug-file-save", "Workspace File Saved");
+            var bytes = File.ReadAllBytes(saveFile);
+            Ensure(bytes.Length >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf
+                && Normalize(File.ReadAllText(saveFile)) == Normalize(savedEdited),
+                "Recovered Lua-file Run did not save the edited macro while preserving its BOM");
+            SaveMainAss(gui, input, saved, artifacts, "files-readonly-recovered.ass");
+        });
+        Step("files-readonly-undo", () => UndoToOriginal("files-readonly-undone.ass"));
+        Step("files-managed-beta", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+            OpenLuaFile(workspace!, process, managedFile, artifacts, "files-managed-picker");
+            ChooseManagedMacro("Workspace File Beta", "Workspace File Gamma", "files-managed-beta");
+            SaveMainAss(gui, input, beta, artifacts, "files-managed-beta.ass");
+        });
+        Step("files-managed-beta-undo", () => UndoToOriginal("files-managed-beta-undone.ass"));
+        Step("files-managed-gamma", () =>
+        {
+            var oldBytes = File.ReadAllBytes(managedFile);
+            var editor = FindStyledText(workspace!, insideNotebook: false)
+                ?? throw new InvalidOperationException("Managed Lua-file editor was not found");
+            Native.ReplaceWithClipboard(editor, process, managedEdited);
+            Ensure(Normalize(CopySource(workspace!, process)) == Normalize(managedEdited)
+                && File.ReadAllBytes(managedFile).SequenceEqual(oldBytes),
+                "Managed macro edit was applied to disk before the explicit Run Save/Reload");
+            ChooseManagedMacro("Workspace File Gamma", "Workspace File Beta", "files-managed-gamma");
+            Ensure(Normalize(File.ReadAllText(managedFile)) == Normalize(managedEdited),
+                "Managed script Reload did not use the newly saved registry source");
+            SaveMainAss(gui, input, gamma, artifacts, "files-managed-gamma.ass");
+            VerifyManagedMenuRegistry();
+        });
+        Step("files-managed-gamma-undo", () => UndoToOriginal("files-managed-gamma-undone.ass"));
+        Step("files-normal-shutdown", () =>
+        {
+            Native.StabilizeOwnedClipboard(process.Id);
+            if (!gui.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern))
+                throw new InvalidOperationException("Main frame lacks real WindowPattern.Close");
+            ((WindowPattern)pattern).Close();
+            Ensure(process.WaitForExit(TimeSpan.FromSeconds(10)), "File-scenario GUI host did not exit normally within ten seconds");
+            Ensure(process.ExitCode == 0, "File-scenario GUI host returned nonzero after normal close");
+            File.WriteAllText(Path.Combine(artifacts, "files-normal-shutdown.json"), JsonSerializer.Serialize(new
+            {
+                HostExitCode = process.ExitCode, Method = "WindowPattern.Close"
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        });
+    }
+
+    string[] DapSteps() => ["host-ready", "dap-enable-service", "dap-open-workspace", "dap-edit-unapplied",
+        "dap-remote-attach", "dap-remote-reject", "dap-remote-disconnect", "dap-local-entry",
+        "dap-local-disconnect", "dap-local-terminate", "dap-paused-open-reject", "dap-paused-run-reject",
+        "dap-paused-save-reject", "dap-local-stop",
+        "dap-loop-seed", "dap-loop-stop-rollback", "dap-loop-undo", "dap-disable-service", "dap-normal-shutdown"];
+
+    int PrepareDap()
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var user = Path.Combine(artifacts, "profile", "user");
+        Directory.CreateDirectory(user);
+        var configPath = Path.Combine(user, "config.json");
+        File.WriteAllText(configPath, JsonSerializer.Serialize(new
+        {
+            Automation = new { Debug = new Dictionary<string, object>
+            {
+                ["Listen Port"] = port, ["Require Token"] = true, ["Token"] = dapToken
+            } }
+        }), new UTF8Encoding(false));
+        hashes["dap_config"] = Hash(configPath);
+        hashes["dap_client_source"] = Hash(Path.Combine("tests", "gui-automation", "driver", "AutomationDebugClient.cs"));
+        hashes["dap_command_source"] = Hash(Path.Combine("tests", "gui-automation", "driver", "ObservedWindowsCommand.cs"));
+        return port;
+    }
+
+    void RunDap()
+    {
+        var gui = main ?? throw new InvalidOperationException("Main GUI frame is unavailable");
+        var process = host ?? throw new InvalidOperationException("GUI host is unavailable");
+        AutomationElement? editor = null;
+        AutomationDebugClient? remote = null;
+        string? originalEditorSource = null;
+        Task? localInvocation = null;
+        PauseStatus? localPause = null;
+        List<string>? pausedStack = null;
+        string? pausedSource = null;
+        string? pausedMainTitle = null;
+        string[]? pausedWindows = null;
+        const string edited = "decorate = function(value)\n  return \"DAP:\" .. string.upper(value)\nend";
+        var seeded = baseline.ToArray();
+        seeded[0] = seeded[0] with { Effect = "debug-seed" };
+        try
+        {
+            Step("dap-enable-service", () =>
+            {
+                if (!gui.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern))
+                    throw new InvalidOperationException("DAP main window lacks WindowPattern for full-width status evidence");
+                ((WindowPattern)pattern).SetWindowVisualState(WindowVisualState.Maximized);
+                WaitUntil(() => ((WindowPattern)pattern).Current.WindowVisualState == WindowVisualState.Maximized,
+                    TimeSpan.FromSeconds(5), "DAP main window did not maximize for full rejection status evidence");
+                DapToggleService(true);
+            });
+            Step("dap-open-workspace", () =>
+            {
+                InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+                InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+                workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+                editor = FindStyledText(workspace, insideNotebook: false)
+                    ?? throw new InvalidOperationException("Workspace source editor is unavailable");
+                originalEditorSource = Normalize(CopySource(workspace, process));
+                File.WriteAllText(Path.Combine(artifacts, "dap-original-editor.lua"), originalEditorSource, new UTF8Encoding(false));
+                SaveEvidence(workspace, artifacts, "dap-workspace-opened");
+            });
+            Step("dap-edit-unapplied", () =>
+            {
+                Native.ReplaceWithClipboard(editor!, process, edited);
+                Ensure(Normalize(CopySource(workspace!, process)) == edited, "DAP source edit did not remain in the Workspace buffer");
+                Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Un-applied DAP source changed physical ASS");
+                File.WriteAllText(Path.Combine(artifacts, "dap-edited.lua"), edited, new UTF8Encoding(false));
+            });
+            Step("dap-remote-attach", () =>
+            {
+                remote = new AutomationDebugClient(dapPort, Path.Combine(artifacts, "dap-remote.ndjson"), TimeSpan.FromSeconds(5));
+                DapAssertResponse(remote.Request("initialize", new { adapterID = "aegisub" }, TimeSpan.FromSeconds(5)), true, "initialize");
+                DapAssertResponse(remote.Request("attach", new { token = dapToken }, TimeSpan.FromSeconds(5)), true, "attach");
+                Ensure(remote.WaitEvent("initialized", TimeSpan.FromSeconds(5)).GetProperty("event").GetString() == "initialized",
+                    "DAP attach did not publish initialized");
+                DapAssertResponse(remote.Request("configurationDone", null, TimeSpan.FromSeconds(5)), true, "configurationDone");
+            });
+            Step("dap-remote-reject", () =>
+            {
+                InvokeButton(workspace!, "Debug");
+                WaitUntil(() => FindExactText(workspace!, text => text.Contains("remote automation debug client", StringComparison.OrdinalIgnoreCase)) is not null,
+                    TimeSpan.FromSeconds(5), "Workspace Debug did not reject the connected remote owner");
+                Ensure(FindButton(workspace!, "Debug").Current.IsEnabled && gui.Current.IsEnabled,
+                    "Rejected local Debug left a live invocation or locked the main frame");
+                Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Remote ownership rejection changed physical ASS");
+                SaveEvidence(workspace!, artifacts, "dap-remote-rejected");
+            });
+            Step("dap-remote-disconnect", () =>
+            {
+                DapAssertResponse(remote!.Request("disconnect", null, TimeSpan.FromSeconds(5)), true, "disconnect");
+                DapWaitClosed(remote);
+                remote.Dispose();
+                remote = null;
+            });
+            Step("dap-local-entry", () =>
+            {
+                Native.Focus(editor!, process);
+                Native.SendCtrlHome(editor!, process);
+                Native.SendKey(editor!, process, 0x28);
+                InvokeButton(workspace!, "Toggle Breakpoint");
+                localInvocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+                WaitUntil(() => ParsePauseStatus(ReadRunStatus(workspace!)) is
+                    { Reason: "entry", Sequence: 1 } pause
+                    && pause.SourcePath.Equals(Path.Combine(artifacts, "kara-templater.lua").Replace('\\', '/'), StringComparison.OrdinalIgnoreCase),
+                    TimeSpan.FromSeconds(15), "Local Debug did not reach entry while the remote listener remained enabled");
+                AssertLivePauseControls(gui, workspace!);
+                SaveEvidence(workspace!, artifacts, "dap-local-entry");
+                InvokeButton(workspace!, "Continue");
+                WaitUntil(() => (localPause = ParsePauseStatus(ReadRunStatus(workspace!))) is
+                    { Reason: "breakpoint", Sequence: 2, Line: 2 } pause
+                    && pause.SourcePath.StartsWith("aegisub-workspace://", StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(15), "Local Debug did not reach the exact captured coding-source breakpoint");
+                AssertLivePauseControls(gui, workspace!);
+                SaveEvidence(workspace!, artifacts, "dap-local-breakpoint");
+            });
+            Step("dap-local-disconnect", () => DapProbeLocalOwner("disconnect", localPause!));
+            Step("dap-local-terminate", () => DapProbeLocalOwner("terminate", localPause!));
+            Step("dap-paused-open-reject", () =>
+            {
+                pausedMainTitle = gui.Current.Name;
+                pausedWindows = DapWindowNames();
+                pausedSource = DapExecutionSource();
+                pausedStack = StackItems(workspace!);
+                Ensure(StackHasSourceLine(workspace!, "Code line ID ", localPause!.Line),
+                    "Initial DAP pause stack lost the captured source breakpoint");
+                var mainHwnd = new nint(gui.Current.NativeWindowHandle);
+                var commandId = ObservedWindowsCommand.FindMenuCommand(mainHwnd, process.Id, "File", "Open Subtitles...");
+                ObservedWindowsCommand.PostMenuCommand(mainHwnd, process.Id, commandId);
+                const string rejection = "A Lua Workspace invocation is active. Use its Stop or Detach controls.";
+                WaitUntil(() => UiaDriver.FindDescendantByAutomationId(gui, "StatusBar.Pane1", ControlType.Edit)?.Current.Name == rejection,
+                    TimeSpan.FromSeconds(5),
+                    "Observed subtitle/open command did not reach the production active-invocation rejection");
+                File.WriteAllText(Path.Combine(artifacts, "dap-paused-open-command.json"), JsonSerializer.Serialize(new
+                {
+                    MainHwnd = mainHwnd.ToInt64(), CommandId = commandId, Rejection = rejection
+                }));
+                DapAssertPausedUnchanged("subtitle/open");
+                SaveEvidence(gui, artifacts, "dap-paused-open-main");
+                SaveEvidence(workspace!, artifacts, "dap-paused-open-workspace");
+            });
+            Step("dap-paused-run-reject", () =>
+            {
+                var run = FindButton(workspace!, "Run");
+                Ensure(run.Current.ProcessId == process.Id && run.Current.NativeWindowHandle != 0,
+                    "Exact disabled Workspace Run button has no observed host HWND");
+                var buttonHwnd = new nint(run.Current.NativeWindowHandle);
+                var (parentHwnd, commandId) = ObservedWindowsCommand.PostButtonClick(buttonHwnd, process.Id);
+                const string rejection = "A Workspace invocation is already active or no source is open";
+                WaitUntil(() => FindExactText(workspace!, text => text == rejection) is not null, TimeSpan.FromSeconds(5),
+                    "Observed Run BN_CLICKED did not reach the production StartRun rejection");
+                File.WriteAllText(Path.Combine(artifacts, "dap-paused-run-command.json"), JsonSerializer.Serialize(new
+                {
+                    ButtonHwnd = buttonHwnd.ToInt64(), ParentHwnd = parentHwnd.ToInt64(), CommandId = commandId,
+                    Rejection = rejection
+                }));
+                DapAssertPausedUnchanged("second Run");
+                SaveEvidence(workspace!, artifacts, "dap-paused-run-workspace");
+            });
+            Step("dap-paused-save-reject", () =>
+            {
+                Native.SaveShortcut(editor!, process);
+                WaitUntil(() => FindExactText(workspace!, text => text.Contains("Apply/Save is unavailable", StringComparison.Ordinal)) is not null,
+                    TimeSpan.FromSeconds(5), "Ctrl+S did not explicitly reject Apply during the local pause");
+                Ensure(Normalize(CopySource(workspace!, process)) == edited, "Rejected Ctrl+S changed the dirty Workspace buffer");
+                Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Rejected Ctrl+S changed physical ASS");
+                AssertLivePauseControls(gui, workspace!);
+                SelectTab(workspace!, "Execution Source");
+                var execution = FindStyledText(workspace!, insideNotebook: true)
+                    ?? throw new InvalidOperationException("Paused readonly execution source is unavailable");
+                Ensure(Normalize(Native.CopyStyledText(execution, process)) == edited,
+                    "Rejected Ctrl+S lost the captured readonly source revision");
+                SaveEvidence(workspace!, artifacts, "dap-paused-save-rejected");
+            });
+            Step("dap-local-stop", () =>
+            {
+                InvokeButton(workspace!, "Continue");
+                WaitUntil(() => ParsePauseStatus(ReadRunStatus(workspace!)) is { Reason: "breakpoint" } pause
+                    && pause.Sequence > localPause!.Sequence && pause.SourcePath == localPause.SourcePath && pause.Line == 2,
+                    TimeSpan.FromSeconds(15), "Local Continue did not preserve the line 2 breakpoint after DAP rejection");
+                InvokeButton(workspace!, "Stop");
+                Ensure(localInvocation!.Wait(TimeSpan.FromSeconds(20)), "Local Stop did not release the GUI invocation");
+                WaitUntil(() => ReadRunStatus(workspace!).Contains("cancelled", StringComparison.OrdinalIgnoreCase)
+                    && gui.Current.IsEnabled, TimeSpan.FromSeconds(8), "Local Stop did not reach a cancelled terminal state");
+                Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Local Stop changed the physical ASS baseline");
+                SaveEvidence(workspace!, artifacts, "dap-local-stopped");
+            });
+            Step("dap-loop-seed", () =>
+            {
+                Native.Undo(editor!, process);
+                Ensure(Normalize(CopySource(workspace!, process)) == originalEditorSource,
+                    "Workspace Undo did not restore the original code before switching to the loop fixture");
+                InvokeMenu(gui, process, "Workspace Debug Seed", TimeSpan.FromSeconds(8));
+                SaveMainAss(gui, input, seeded, artifacts, "dap-seeded.ass");
+                OpenLuaFile(workspace!, process, Path.Combine(artifacts, "debug-loop.lua"), artifacts, "dap-loop-picker");
+            });
+            Step("dap-loop-stop-rollback", () =>
+            {
+                var invocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+                WaitPauseAt(workspace!, "entry", 1, "debug-loop.lua", 2, TimeSpan.FromSeconds(15));
+                InvokeButton(workspace!, "Continue");
+                WaitLoopStarted(workspace!, process, TimeSpan.FromSeconds(5));
+                InvokeButton(workspace!, "Stop");
+                Ensure(invocation.Wait(TimeSpan.FromSeconds(12)), "Loop Stop did not terminate the DAP-on invocation");
+                WaitUntil(() => ReadRunStatus(workspace!).Contains("cancelled", StringComparison.OrdinalIgnoreCase),
+                    TimeSpan.FromSeconds(5), "Loop Stop did not report cancelled");
+                Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(seeded), "Loop Stop altered the physical seed baseline");
+                VerifySeed(gui, process, input, seeded, artifacts, "dap-loop-live-rollback");
+            });
+            Step("dap-loop-undo", () =>
+            {
+                InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+                SaveMainAss(gui, input, baseline, artifacts, "dap-loop-undone.ass");
+            });
+            Step("dap-disable-service", () => DapToggleService(false));
+            Step("dap-normal-shutdown", () =>
+            {
+                if (!gui.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern))
+                    throw new InvalidOperationException("Main frame lacks real WindowPattern.Close");
+                Native.StabilizeOwnedClipboard(process.Id);
+                ((WindowPattern)pattern).Close();
+                Ensure(process.WaitForExit(TimeSpan.FromSeconds(10)) && process.ExitCode == 0,
+                    "DAP GUI host did not exit normally with code zero");
+                File.WriteAllText(Path.Combine(artifacts, "dap-normal-shutdown.json"), JsonSerializer.Serialize(new
+                {
+                    HostExitCode = process.ExitCode, Method = "WindowPattern.Close"
+                }));
+            });
+        }
+        finally { remote?.Dispose(); }
+
+        void DapToggleService(bool enable)
+        {
+            InvokeMenu(gui, process, "Automation...", TimeSpan.FromSeconds(8));
+            var manager = WaitWindow(process, "Automation Manager", TimeSpan.FromSeconds(8));
+            InvokeButton(manager, enable ? "Enable Debug Mode" : "Disable Debug Mode");
+            WaitUntil(() => UiaDriver.FindEnabledInvokableButton(manager, enable ? "Disable Debug Mode" : "Enable Debug Mode") is not null,
+                TimeSpan.FromSeconds(8), "Automation Manager did not reflect the requested debug mode");
+            SaveEvidence(manager, artifacts, enable ? "dap-service-enabled" : "dap-service-disabled");
+            InvokeButton(manager, "Close");
+            WaitUntil(() => FindWindow(process, "Automation Manager") is null, TimeSpan.FromSeconds(5),
+                "Automation Manager did not close after debug-mode change");
+        }
+
+        string[] DapWindowNames() => AutomationElement.RootElement.FindAll(TreeScope.Children,
+            new PropertyCondition(AutomationElement.ProcessIdProperty, process.Id)).Cast<AutomationElement>()
+            .Where(item => item.Current.ControlType == ControlType.Window && !item.Current.IsOffscreen)
+            .Select(item => item.Current.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray();
+
+        string DapExecutionSource()
+        {
+            SelectTab(workspace!, "Execution Source");
+            var execution = FindStyledText(workspace!, insideNotebook: true)
+                ?? throw new InvalidOperationException("Paused execution source is unavailable");
+            var source = Normalize(Native.CopyStyledText(execution, process));
+            SelectTab(workspace!, "Stack and Variables");
+            return source;
+        }
+
+        void DapAssertPausedUnchanged(string action)
+        {
+            Ensure(gui.Current.Name == pausedMainTitle, action + " changed the active subtitle title");
+            Ensure(DapWindowNames().SequenceEqual(pausedWindows!), action + " opened a new GUI window or file picker");
+            Ensure(DapExecutionSource() == pausedSource, action + " changed the exact paused execution source");
+            Ensure(StackItems(workspace!).SequenceEqual(pausedStack!), action + " changed the paused stack frames");
+            Ensure(StackHasSourceLine(workspace!, "Code line ID ", localPause!.Line),
+                action + " lost the captured coding-source breakpoint");
+            Ensure(Normalize(CopySource(workspace!, process)) == edited,
+                action + " changed the unapplied Workspace source");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), action + " changed the physical ASS");
+            AssertLivePauseControls(gui, workspace!);
+        }
+
+        void DapProbeLocalOwner(string finalCommand, PauseStatus expectedPause)
+        {
+            using var client = new AutomationDebugClient(dapPort, Path.Combine(artifacts, "dap-local-" + finalCommand + ".ndjson"), TimeSpan.FromSeconds(5));
+            DapAssertResponse(client.Request("initialize", new { adapterID = "aegisub" }, TimeSpan.FromSeconds(5)), true, "initialize");
+            DapAssertResponse(client.Request("attach", new { token = dapToken }, TimeSpan.FromSeconds(5)), false, "attach");
+            DapAssertResponse(client.Request("continue", new { threadId = 1 }, TimeSpan.FromSeconds(5)), false, "continue");
+            DapAssertResponse(client.Request("setBreakpoints", new { source = new { path = expectedPause.SourcePath },
+                breakpoints = new[] { new { line = expectedPause.Line + 1 } } }, TimeSpan.FromSeconds(5)), false, "setBreakpoints");
+            DapAssertResponse(client.Request(finalCommand, null, TimeSpan.FromSeconds(5)), true, finalCommand);
+            DapWaitClosed(client);
+            Ensure(ParsePauseStatus(ReadRunStatus(workspace!)) == expectedPause,
+                "DAP " + finalCommand + " changed the local pause sequence or exact source location");
+            AssertLivePauseControls(gui, workspace!);
+            SaveEvidence(workspace!, artifacts, "dap-local-" + finalCommand + "-retained");
+        }
+    }
+
+    void DapAssertResponse(JsonElement response, bool success, string command)
+    {
+        Ensure(response.GetProperty("type").GetString() == "response"
+            && response.GetProperty("command").GetString() == command
+            && response.GetProperty("success").GetBoolean() == success,
+            "DAP " + command + " response did not report the expected success state");
+        if (!success)
+            Ensure(response.GetProperty("message").GetString()?.Contains("local automation debug session", StringComparison.OrdinalIgnoreCase) == true,
+                "DAP " + command + " rejection did not identify the local owner");
+    }
+
+    void DapWaitClosed(AutomationDebugClient client)
+    {
+        try
+        {
+            client.WaitEvent("__dap_connection_closed__", TimeSpan.FromSeconds(5));
+            throw new InvalidOperationException("DAP connection remained open after disconnect/terminate");
+        }
+        catch (EndOfStreamException) { }
+        catch (IOException error) when (error.InnerException is System.Net.Sockets.SocketException socket
+            && socket.SocketErrorCode is System.Net.Sockets.SocketError.ConnectionReset or System.Net.Sockets.SocketError.ConnectionAborted) { }
+    }
+
+    string[] JitSteps()
+    {
+        var names = new List<string> { "host-ready", "jit-open" };
+        foreach (var mode in new[] { "on", "off" })
+            foreach (var outcome in new[] { "completed", "failed", "cancelled" })
+                foreach (var stage in new[] { "source", "run", "restored", "ass" })
+                    names.Add($"jit-{mode}-{outcome}-{stage}");
+        names.Add("jit-normal-shutdown");
+        return names.ToArray();
+    }
+
+    void PrepareJit()
+    {
+        var source = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-jit.lua");
+        var destination = Path.Combine(artifacts, "debug-jit.lua");
+        File.Copy(source, destination);
+        hashes["jit-fixture"] = Hash(source);
+        hashes["jit-managed-initial"] = Hash(destination);
+        const string scripts = "Automation Scripts: ~debug-actions.lua|~kara-templater.lua";
+        var text = File.ReadAllText(input);
+        Ensure(text.Split(scripts, StringSplitOptions.None).Length == 2, "JIT input lacks its unique managed Automation Scripts declaration");
+        File.WriteAllText(input, text.Replace(scripts, scripts + "|~debug-jit.lua", StringComparison.Ordinal), new UTF8Encoding(false));
+        Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Attaching the JIT fixture changed the seven-event ASS baseline");
+        hashes["jit-input-initial"] = Hash(input);
+    }
+
+    void RunJit()
+    {
+        var gui = main ?? throw new InvalidOperationException("JIT main frame is unavailable");
+        var process = host ?? throw new InvalidOperationException("JIT host process is unavailable");
+        var managedFile = Path.Combine(artifacts, "debug-jit.lua");
+        var template = Normalize(File.ReadAllText(managedFile));
+        const string modeMarker = "local original_mode = \"on\"";
+        const string outcomeMarker = "local outcome = \"completed\"";
+        Ensure(template.Split(modeMarker, StringSplitOptions.None).Length == 2
+            && template.Split(outcomeMarker, StringSplitOptions.None).Length == 2, "JIT source mode/outcome markers are not unique");
+        var lines = template.Split('\n');
+        int JitLine(string statement)
+        {
+            var matches = lines.Select((line, index) => (line, index)).Where(item => item.line.Trim() == statement).ToArray();
+            Ensure(matches.Length == 1, "JIT source statement is not unique: " + statement);
+            return matches[0].index + 1;
+        }
+        var entryLine = JitLine("local workspace_mode = jit.status()");
+        var loopLines = new[] { JitLine("for index = 1, limit do"), JitLine("total = total + index % 97") };
+        Step("jit-open", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+            InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            OpenLuaFile(workspace, process, managedFile, artifacts, "jit-file-picker");
+            Ensure(workspace.Current.Name.Contains("debug-jit.lua", StringComparison.Ordinal), "Workspace did not open the managed JIT file");
+        });
+        foreach (var mode in new[] { "on", "off" })
+        {
+            foreach (var outcome in new[] { "completed", "failed", "cancelled" })
+            {
+                var name = $"jit-{mode}-{outcome}";
+                var original = mode == "on" ? "true" : "false";
+                var source = template.Replace(modeMarker, $"local original_mode = \"{mode}\"", StringComparison.Ordinal)
+                    .Replace(outcomeMarker, $"local outcome = \"{outcome}\"", StringComparison.Ordinal);
+                var casePath = Path.Combine(artifacts, name + ".json");
+                var evidence = new Dictionary<string, object?>
+                {
+                    ["mode"] = mode, ["expected_outcome"] = outcome, ["fixture"] = "debug-jit.lua",
+                    ["entry_line"] = entryLine, ["manual_pause_lines"] = loopLines, ["passed"] = false
+                };
+                void JitWriteCase() => File.WriteAllText(casePath, JsonSerializer.Serialize(evidence, new JsonSerializerOptions { WriteIndented = true }));
+                Step(name + "-source", () =>
+                {
+                    InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+                    var sourcePath = Path.Combine(artifacts, name + ".lua");
+                    File.WriteAllText(sourcePath, source, new UTF8Encoding(false));
+                    var editor = FindStyledText(workspace!, insideNotebook: false)
+                        ?? throw new InvalidOperationException("JIT source editor was not found");
+                    Native.ReplaceWithClipboard(editor, process, source);
+                    Ensure(Normalize(CopySource(workspace!, process)) == source, "JIT source edit differs from the exact case revision");
+                    InvokeButton(workspace!, "Save");
+                    WaitUntil(() => Normalize(File.ReadAllText(managedFile)) == source, TimeSpan.FromSeconds(5),
+                        "Workspace Save did not persist the exact JIT case source");
+                    hashes[name + "-source"] = Hash(sourcePath);
+                    hashes[name + "-managed"] = Hash(managedFile);
+                    evidence["source_sha256"] = hashes[name + "-source"];
+                    evidence["managed_sha256"] = hashes[name + "-managed"];
+                    Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Saving JIT source modified physical ASS events");
+                    JitWriteCase();
+                });
+                Step(name + "-run", () =>
+                {
+                    var invocation = Task.Run(() => InvokeButton(workspace!, outcome == "cancelled" ? "Debug" : "Run"));
+                    JitChooseExercise(process, name);
+                    if (outcome == "cancelled")
+                    {
+                        WaitPauseAt(workspace!, "entry", 1, "debug-jit.lua", entryLine, TimeSpan.FromSeconds(12));
+                        Ensure(ParsePauseStatus(ReadRunStatus(workspace!))!.SourcePath.Equals(managedFile.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase),
+                            "JIT entry pause resolved a different managed file");
+                        AssertLivePauseControls(gui, workspace!);
+                        evidence["entry_pause"] = ParsePauseStatus(ReadRunStatus(workspace!));
+                        SaveEvidence(workspace!, artifacts, name + "-entry");
+                        InvokeButton(workspace!, "Continue");
+                        WaitUntil(() => ReadRunStatus(workspace!).StartsWith("Debug: running", StringComparison.Ordinal)
+                            && ReadRunLog(workspace!, process).Contains($"jit-loop-started|{mode}|cancelled", StringComparison.Ordinal),
+                            TimeSpan.FromSeconds(8), "JIT cancellation loop did not report its unique post-write handshake");
+                        InvokeButton(workspace!, "Pause");
+                        PauseStatus? pause = null;
+                        WaitUntil(() => (pause = ParsePauseStatus(ReadRunStatus(workspace!))) is { Reason: "pause", Sequence: 2 }
+                            && pause.SourcePath.Equals(managedFile.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)
+                            && loopLines.Contains(pause.Line), TimeSpan.FromSeconds(8),
+                            "Manual Pause did not interrupt the previously traced hot_loop at an exact loop source line");
+                        AssertLivePauseControls(gui, workspace!);
+                        SelectTab(workspace!, "Stack and Variables");
+                        var stack = StackItems(workspace!);
+                        Ensure(stack[0] == $"hot_loop - debug-jit.lua:{pause!.Line}", "Manual Pause top stack frame is not the target hot_loop source");
+                        evidence["manual_pause"] = pause;
+                        evidence["paused_stack"] = stack;
+                        SaveEvidence(workspace!, artifacts, name + "-manual-pause");
+                        InvokeButton(workspace!, "Continue");
+                        WaitUntil(() => ReadRunStatus(workspace!).StartsWith("Debug: running", StringComparison.Ordinal), TimeSpan.FromSeconds(5),
+                            "JIT Continue did not resume the paused hot_loop before Stop");
+                        InvokeButton(workspace!, "Stop");
+                    }
+                    var enter = $"jit-enter|{mode}|{outcome}|original={original}|workspace=false|prewarmed={original}|trace=";
+                    WaitUntil(() => invocation.IsCompleted && gui.Current.IsEnabled
+                        && ReadRunStatus(workspace!).Contains(outcome, StringComparison.OrdinalIgnoreCase)
+                        && ReadRunLog(workspace!, process).Contains(enter, StringComparison.Ordinal), TimeSpan.FromSeconds(15),
+                        "JIT invocation did not reach its fresh expected terminal state with scoped engine evidence");
+                    Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "JIT UIA invocation did not return after termination");
+                    var log = ReadRunLog(workspace!, process);
+                    var traceMatch = Regex.Match(log, Regex.Escape(enter) + @"(\d+)(?:\r?\n|$)", RegexOptions.CultureInvariant);
+                    Ensure(traceMatch.Success, "JIT log lacks the exact original/workspace/prewarmed trace observation");
+                    var trace = int.Parse(traceMatch.Groups[1].Value);
+                    Ensure(mode == "on" ? trace > 0 : trace == 0, "JIT trace evidence does not match the original engine mode");
+                    if (outcome == "failed")
+                        Ensure(log.Contains($"workspace-jit-{mode}-intentional-failure", StringComparison.Ordinal), "JIT failed for a reason other than its deliberate error");
+                    Ensure(Hash(managedFile) == hashes[name + "-managed"], "JIT managed source changed between Save and execution");
+                    Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "JIT invocation wrote the physical ASS before main Save");
+                    evidence["terminal"] = ReadRunStatus(workspace!);
+                    evidence["retained_prewarm_trace"] = trace;
+                    evidence["prewarmed"] = mode == "on";
+                    evidence["workspace_engine"] = false;
+                    File.WriteAllText(Path.Combine(artifacts, name + "-run.log"), log);
+                    SaveEvidence(workspace!, artifacts, name + "-terminal");
+                    JitWriteCase();
+                });
+                Step(name + "-restored", () =>
+                {
+                    var label = $"JIT restored|{mode}|{outcome}|engine={original}|prewarmed={original}|workspace=false|runs=1";
+                    JitAcknowledgeMenu(gui, process, "Workspace JIT Verify", label, name + "-restored");
+                    Ensure(Hash(managedFile) == hashes[name + "-managed"], "JIT verifier changed its managed script source");
+                    evidence["same_state_restoration_label"] = label;
+                    evidence["restoration_entry"] = "Automation menu / Workspace JIT Verify";
+                    JitWriteCase();
+                });
+                Step(name + "-ass", () =>
+                {
+                    if (outcome == "completed")
+                    {
+                        var committed = baseline.ToArray();
+                        committed[0] = committed[0] with { Effect = $"jit-{mode}-completed-153" };
+                        SaveMainAss(gui, input, committed, artifacts, name + "-committed.ass");
+                        evidence["committed_events"] = committed;
+                        InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+                        SaveMainAss(gui, input, baseline, artifacts, name + "-undone.ass");
+                    }
+                    var bytes = File.ReadAllBytes(input);
+                    JitAcknowledgeMenu(gui, process, "Workspace Debug Verify Original", "Debug original live baseline verified", name + "-live-baseline");
+                    Ensure(File.ReadAllBytes(input).SequenceEqual(bytes) && EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                        "JIT independent live verifier changed or disagreed with the physical baseline");
+                    AssertPhysicalEventLines(File.ReadAllText(input), 7);
+                    File.WriteAllText(Path.Combine(artifacts, name + "-baseline.ass"), File.ReadAllText(input), new UTF8Encoding(false));
+                    evidence["final_events"] = baseline;
+                    evidence["live_baseline_verified"] = true;
+                    evidence["passed"] = true;
+                    JitWriteCase();
+                });
+            }
+        }
+        Step("jit-normal-shutdown", () =>
+        {
+            if (!gui.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern))
+                throw new InvalidOperationException("JIT main frame lacks WindowPattern.Close");
+            Native.StabilizeOwnedClipboard(process.Id);
+            ((WindowPattern)pattern).Close();
+            Ensure(process.WaitForExit(TimeSpan.FromSeconds(10)) && process.ExitCode == 0, "JIT host did not exit normally with code zero");
+            File.WriteAllText(Path.Combine(artifacts, "jit-normal-shutdown.json"), JsonSerializer.Serialize(new
+            {
+                HostExitCode = process.ExitCode, Method = "WindowPattern.Close"
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        });
+    }
+
+    void JitChooseExercise(Process process, string evidence)
+    {
+        var dialog = WaitWindow(process, "Lua Workspace macro", TimeSpan.FromSeconds(8));
+        var choices = dialog.FindAll(TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)).Cast<AutomationElement>()
+            .Where(item => !item.Current.IsOffscreen).ToArray();
+        Ensure(choices.Length == 2 && choices.Any(item => item.Current.Name == "Workspace JIT Exercise")
+            && choices.Any(item => item.Current.Name == "Workspace JIT Verify"), "JIT Save/Reload macro selection does not expose the exact two fixture macros");
+        var choice = choices.Single(item => item.Current.Name == "Workspace JIT Exercise");
+        if (!choice.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var select))
+            throw new InvalidOperationException("JIT Exercise choice lacks SelectionItemPattern");
+        ((SelectionItemPattern)select).Select();
+        SaveEvidence(dialog, artifacts, evidence + "-macro-choice");
+        var okay = UiaDriver.FindDescendantByAutomationId(dialog, "5100", ControlType.Button)
+            ?? throw new InvalidOperationException("JIT macro choice has no observed wx OK ID 5100");
+        Ensure(okay.Current.IsEnabled && okay.TryGetCurrentPattern(InvokePattern.Pattern, out _), "JIT macro choice OK is not invokable");
+        UiaDriver.Invoke(okay);
+        WaitUntil(() => FindWindow(process, "Lua Workspace macro") is null, TimeSpan.FromSeconds(5), "JIT macro choice did not close after exact selection");
+    }
+
+    void JitAcknowledgeMenu(AutomationElement gui, Process process, string macro, string label, string evidence)
+    {
+        var invocation = Task.Run(() => InvokeMenu(gui, process, macro, TimeSpan.FromSeconds(8)));
+        var dialog = WaitWindowContainingText(process, label, TimeSpan.FromSeconds(8));
+        SaveEvidence(dialog, artifacts, evidence + "-dialog");
+        InvokeButton(dialog, "OK");
+        Ensure(invocation.Wait(TimeSpan.FromSeconds(10)), "JIT ordinary-menu verifier did not return after exact acknowledgement");
+        WaitUntil(() => gui.Current.IsEnabled && FindProgressPane(process, macro) is null, TimeSpan.FromSeconds(8),
+            "JIT ordinary-menu verifier did not release its execution UI");
+    }
+
+    void RunControls()
+    {
+        var gui = main ?? throw new InvalidOperationException("Main GUI frame is unavailable");
+        var process = host ?? throw new InvalidOperationException("GUI host is unavailable");
+        var stepped = baseline.ToArray();
+        stepped[0] = stepped[0] with { Effect = "step:8" };
+        var seeded = baseline.ToArray();
+        seeded[0] = seeded[0] with { Effect = "debug-seed" };
+        var completed = seeded.ToArray();
+        completed[0] = completed[0] with { Effect = "loop-complete" };
+        var stepsArtifact = Path.Combine(artifacts, "debug-steps.lua");
+        var loopArtifact = Path.Combine(artifacts, "debug-loop.lua");
+
+        Step("controls-open-steps", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+            InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            SaveEvidence(workspace, artifacts, "controls-workspace-opened");
+            OpenLuaFile(workspace, process, stepsArtifact, artifacts, "steps-file-picker");
+            Ensure(workspace.Current.Name.Contains("debug-steps.lua", StringComparison.Ordinal), "Workspace did not bind the selected steps Lua file");
+        });
+        Step("step-in-out-over", () =>
+        {
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            WaitPauseAt(workspace!, "entry", 1, "debug-steps.lua", 10, TimeSpan.FromSeconds(15));
+            AssertLivePauseControls(gui, workspace!);
+            SelectTab(workspace!, "Stack and Variables");
+            var callbackDepth = StackItems(workspace!).Count;
+            SaveEvidence(workspace!, artifacts, "steps-entry");
+
+            InvokeButton(workspace!, "Step In");
+            WaitPauseAt(workspace!, "step", 2, "debug-steps.lua", 6, TimeSpan.FromSeconds(8));
+            var outerDepth = StackItems(workspace!).Count;
+            Ensure(outerDepth > callbackDepth && StackHasSourceLine(workspace!, "debug-steps.lua", 6), "Step In did not enter outer at line 6");
+            SaveEvidence(workspace!, artifacts, "steps-outer");
+
+            InvokeButton(workspace!, "Step In");
+            WaitPauseAt(workspace!, "step", 3, "debug-steps.lua", 2, TimeSpan.FromSeconds(8));
+            var innerDepth = StackItems(workspace!).Count;
+            Ensure(innerDepth > outerDepth && StackHasSourceLine(workspace!, "debug-steps.lua", 2), "Second Step In did not enter inner at line 2");
+            SaveEvidence(workspace!, artifacts, "steps-inner");
+
+            InvokeButton(workspace!, "Step Out");
+            WaitPauseAt(workspace!, "step", 4, "debug-steps.lua", 7, TimeSpan.FromSeconds(8));
+            Ensure(StackItems(workspace!).Count == outerDepth, "Step Out did not return to outer's stack depth");
+            SaveEvidence(workspace!, artifacts, "steps-out");
+
+            InvokeButton(workspace!, "Step Over");
+            WaitPauseAt(workspace!, "step", 5, "debug-steps.lua", 11, TimeSpan.FromSeconds(8));
+            Ensure(StackItems(workspace!).Count == callbackDepth, "Step Over did not return to the macro callback depth");
+            SelectTab(workspace!, "Execution Source");
+            var execution = FindStyledText(workspace!, insideNotebook: true)
+                ?? throw new InvalidOperationException("Steps execution source is unavailable");
+            Ensure(Normalize(Native.CopyStyledText(execution, process)) == Normalize(File.ReadAllText(stepsArtifact)),
+                "Step source did not come from the exact saved Lua file revision");
+            SaveEvidence(workspace!, artifacts, "steps-over");
+            InvokeButton(workspace!, "Continue");
+            WaitForInvocation(workspace!, process, invocation, "completed", artifacts, "steps-completed");
+        });
+        Step("step-save-undo", () =>
+        {
+            SaveMainAss(gui, input, stepped, artifacts, "steps-saved.ass");
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            SaveMainAss(gui, input, baseline, artifacts, "steps-undone.ass");
+        });
+        Step("loop-seed", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Seed", TimeSpan.FromSeconds(8));
+            SaveMainAss(gui, input, seeded, artifacts, "loop-seed.ass");
+            OpenLuaFile(workspace!, process, loopArtifact, artifacts, "loop-file-picker");
+            Ensure(workspace!.Current.Name.Contains("debug-loop.lua", StringComparison.Ordinal), "Workspace did not bind the loop Lua file");
+        });
+        Step("loop-pause-stop", () =>
+        {
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            WaitPauseAt(workspace!, "entry", 1, "debug-loop.lua", 2, TimeSpan.FromSeconds(15));
+            AssertLivePauseControls(gui, workspace!);
+            InvokeButton(workspace!, "Continue");
+            WaitLoopStarted(workspace!, process, TimeSpan.FromSeconds(5));
+            InvokeButton(workspace!, "Pause");
+            WaitPauseAt(workspace!, "pause", 2, "debug-loop.lua", 8, TimeSpan.FromSeconds(8));
+            SaveEvidence(workspace!, artifacts, "loop-manual-pause");
+            InvokeButton(workspace!, "Continue");
+            WaitUntil(() => ReadRunStatus(workspace!).StartsWith("Debug: running", StringComparison.Ordinal), TimeSpan.FromSeconds(5),
+                "Continue did not resume the long loop before Stop");
+            InvokeButton(workspace!, "Stop");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(12)), "Long-loop Stop did not terminate its invocation");
+            WaitUntil(() => ReadRunStatus(workspace!).Contains("cancelled", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(5),
+                "Long-loop Stop did not report cancelled");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(seeded), "Stop altered the physically saved seed baseline");
+            SaveEvidence(workspace!, artifacts, "loop-stopped");
+        });
+        Step("loop-live-rollback", () => VerifySeed(gui, process, input, seeded, artifacts, "loop-stop-verify"));
+        Step("loop-undo-depth", () =>
+        {
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            SaveMainAss(gui, input, baseline, artifacts, "loop-undo-depth.ass");
+        });
+        Step("close-stop", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Seed", TimeSpan.FromSeconds(8));
+            SaveMainAss(gui, input, seeded, artifacts, "close-stop-seed.ass");
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            WaitPauseAt(workspace!, "entry", 1, "debug-loop.lua", 2, TimeSpan.FromSeconds(15));
+            InvokeButton(workspace!, "Continue");
+            WaitLoopStarted(workspace!, process, TimeSpan.FromSeconds(5));
+            var statusHandle = CaptureRunStatusHandle(workspace!, process);
+            Native.PostClose(workspace!, process);
+            var decision = WaitWindow(process, "Active Lua Workspace invocation", TimeSpan.FromSeconds(5));
+            SaveEvidence(decision, artifacts, "close-stop-choice");
+            InvokeButton(decision, "Stop then close");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(12)), "Close/Stop did not terminate the active invocation");
+            WaitUntil(() => FindWindow(process, "Lua Workspace") is null && gui.Current.IsEnabled, TimeSpan.FromSeconds(6),
+                "Close/Stop did not hide Workspace and re-enable the main frame");
+            Ensure(Native.ReadStaticText(statusHandle, process).Contains("cancelled", StringComparison.OrdinalIgnoreCase),
+                "Close/Stop did not retain a cancelled terminal status");
+            File.WriteAllText(Path.Combine(artifacts, "close-stop-terminal.txt"), Native.ReadStaticText(statusHandle, process));
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(seeded), "Close/Stop altered physical seed baseline");
+            TryProcessEvidence(process, artifacts, "close-stop-hidden");
+        });
+        Step("close-stop-rollback", () =>
+        {
+            VerifySeed(gui, process, input, seeded, artifacts, "close-stop-verify");
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            SaveMainAss(gui, input, baseline, artifacts, "close-stop-undone.ass");
+        });
+        Step("close-detach", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+            InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            OpenLuaFile(workspace, process, loopArtifact, artifacts, "detach-loop-file-picker");
+            InvokeMenu(gui, process, "Workspace Debug Seed", TimeSpan.FromSeconds(8));
+            SaveMainAss(gui, input, seeded, artifacts, "close-detach-seed.ass");
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            WaitPauseAt(workspace!, "entry", 1, "debug-loop.lua", 2, TimeSpan.FromSeconds(15));
+            InvokeButton(workspace!, "Continue");
+            WaitLoopStarted(workspace!, process, TimeSpan.FromSeconds(5));
+            var statusHandle = CaptureRunStatusHandle(workspace!, process);
+            var stopButton = FindButton(workspace!, "Stop");
+            Native.PostClose(workspace!, process);
+            var decision = WaitWindow(process, "Active Lua Workspace invocation", TimeSpan.FromSeconds(5));
+            SaveEvidence(decision, artifacts, "close-detach-choice");
+            InvokeButton(decision, "Detach and hide");
+            WaitUntil(() => FindWindow(process, "Lua Workspace") is null, TimeSpan.FromSeconds(5), "Detach did not hide Workspace");
+            var detachedStatus = Native.ReadStaticText(statusHandle, process);
+            var mainEnabledWhileDetached = gui.Current.IsEnabled;
+            var stopEnabledWhileDetached = stopButton.Current.IsEnabled;
+            File.WriteAllText(Path.Combine(artifacts, "close-detach-running.json"), JsonSerializer.Serialize(new
+            {
+                Status = detachedStatus, MainEnabled = mainEnabledWhileDetached, StopEnabled = stopEnabledWhileDetached
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            Ensure(!mainEnabledWhileDetached && stopEnabledWhileDetached
+                && detachedStatus.StartsWith("Detached", StringComparison.Ordinal)
+                && !detachedStatus.Contains("completed", StringComparison.OrdinalIgnoreCase),
+                "Detach did not leave a live hidden invocation holding the ASS commit boundary");
+            WaitUntil(() => invocation.IsCompleted && Native.ReadStaticText(statusHandle, process).Contains("completed", StringComparison.OrdinalIgnoreCase)
+                && gui.Current.IsEnabled, TimeSpan.FromSeconds(30), "Detached long loop did not reach its real completed terminal state");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "Detached GUI invocation task did not return after terminal state");
+            TryProcessEvidence(process, artifacts, "close-detach-hidden");
+        });
+        Step("close-detach-save-undo", () =>
+        {
+            SaveMainAss(gui, input, completed, artifacts, "close-detach-completed.ass");
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            SaveMainAss(gui, input, seeded, artifacts, "close-detach-undone-once.ass");
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            SaveMainAss(gui, input, baseline, artifacts, "close-detach-undone-twice.ass");
+        });
+        Step("normal-shutdown", () =>
+        {
+            if (!gui.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern))
+                throw new InvalidOperationException("Main frame lacks real WindowPattern.Close");
+            Native.StabilizeOwnedClipboard(process.Id);
+            ((WindowPattern)pattern).Close();
+            Ensure(process.WaitForExit(TimeSpan.FromSeconds(10)), "GUI host did not exit normally within ten seconds");
+            Ensure(process.ExitCode == 0, "GUI host returned nonzero after normal close");
+            File.WriteAllText(Path.Combine(artifacts, "normal-shutdown.json"), JsonSerializer.Serialize(new
+            {
+                HostExitCode = process.ExitCode, Method = "WindowPattern.Close"
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        });
+    }
+
+    void Step(string name, Action action)
+    {
+        File.AppendAllText(Path.Combine(artifacts, "stages.log"), $"{DateTimeOffset.UtcNow:O}\t{name}\tstart{Environment.NewLine}");
+        action();
+        results.Add(new StepResult(name, "passed", ""));
+        File.AppendAllText(Path.Combine(artifacts, "stages.log"), $"{DateTimeOffset.UtcNow:O}\t{name}\tpassed{Environment.NewLine}");
+        WriteManifest();
+    }
+    void WriteManifest() => File.WriteAllText(Path.Combine(artifacts, "manifest.json"), JsonSerializer.Serialize(new
+    {
+        StartedUtc = startedUtc, FinishedUtc = finishedUtc, BudgetSeconds = 240, ExeSha256 = hashes["exe"],
+        Scenario = scenario,
+        AcceptanceScope = "This scenario only. Full S4 requires basic, controls, files, dap, jit, native virtual-source E2E, and S2/S3 regressions.",
+        Fixtures = new[] { fixture.Replace('\\', '/'), actions.Replace('\\', '/'), expectedFile.Replace('\\', '/'),
+            stepsFile.Replace('\\', '/'), loopFile.Replace('\\', '/'), templater.Replace('\\', '/') },
+        Sha256 = hashes, ExitStatus = exitStatus, Steps = results
+    }, new JsonSerializerOptions { WriteIndented = true }));
+}
+
+static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
+static string Normalize(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
+static void Ensure(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
+
+static void WaitUntil(Func<bool> predicate, TimeSpan timeout, string failure)
+{
+    var timer = Stopwatch.StartNew();
+    while (timer.Elapsed < timeout)
+    {
+        if (predicate()) return;
+        Thread.Sleep(75);
+    }
+    throw new TimeoutException(failure);
+}
+
+static AutomationElement? FindWindow(Process host, string prefix)
+{
+    var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
+    var matches = new Dictionary<int, AutomationElement>();
+    foreach (AutomationElement root in roots)
+    {
+        foreach (var item in new[] { root }.Concat(root.FindAll(TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window)).Cast<AutomationElement>()))
+        {
+            try
+            {
+                var current = item.Current;
+                if (current.ProcessId == host.Id && !current.IsOffscreen && current.NativeWindowHandle != 0
+                    && (current.Name ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    matches.TryAdd(current.NativeWindowHandle, item);
+            }
+            catch (ElementNotAvailableException) { }
+        }
+    }
+    Ensure(matches.Count <= 1, $"Window prefix {prefix} matched {matches.Count} same-PID visible HWNDs");
+    return matches.Count == 1 ? matches.Values.Single() : null;
+}
+
+static AutomationElement WaitWindow(Process host, string prefix, TimeSpan timeout)
+{
+    AutomationElement? result = null;
+    WaitUntil(() => (result = FindWindow(host, prefix)) is not null, timeout, $"Window {prefix} was not found");
+    return result!;
+}
+
+static AutomationElement? FindExactText(AutomationElement window, Func<string, bool> matches, bool allowHidden = false)
+{
+    foreach (AutomationElement item in window.FindAll(TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)))
+    {
+        try { if ((allowHidden || !item.Current.IsOffscreen) && matches(item.Current.Name ?? "")) return item; }
+        catch (ElementNotAvailableException) { }
+    }
+    return null;
+}
+
+static string ReadRunStatus(AutomationElement workspace, bool allowHidden = false)
+{
+    var text = FindExactText(workspace, value => value.StartsWith("Debug:", StringComparison.Ordinal)
+        || value.StartsWith("Invocation ", StringComparison.Ordinal)
+        || value.StartsWith("Stopping", StringComparison.Ordinal)
+        || value.StartsWith("Detached;", StringComparison.Ordinal)
+        || value.StartsWith("Run active", StringComparison.Ordinal), allowHidden);
+    return text?.Current.Name ?? "";
+}
+
+static nint CaptureRunStatusHandle(AutomationElement workspace, Process host)
+{
+    var status = FindExactText(workspace, value => value.StartsWith("Debug:", StringComparison.Ordinal))
+        ?? throw new InvalidOperationException("Visible debug status was not found before hiding Workspace");
+    var current = status.Current;
+    Ensure(current.ClassName == "Static" && current.ProcessId == host.Id && current.NativeWindowHandle != 0,
+        "Debug status is not an observed native Static control in this host");
+    return new nint(current.NativeWindowHandle);
+}
+
+static PauseStatus? ParsePauseStatus(string text)
+{
+    var match = Regex.Match(text, @"^Debug: paused \[(entry|breakpoint|step|pause) #(\d+)\] (.+):(\d+)$", RegexOptions.CultureInvariant);
+    return match.Success ? new PauseStatus(match.Groups[1].Value, int.Parse(match.Groups[2].Value),
+        match.Groups[3].Value.Replace('\\', '/'), int.Parse(match.Groups[4].Value)) : null;
+}
+
+static void WaitPauseAt(AutomationElement workspace, string reason, int sequence, string file, int line, TimeSpan timeout)
+{
+    WaitUntil(() => ParsePauseStatus(ReadRunStatus(workspace)) is { } pause && pause.Reason == reason
+        && pause.Sequence == sequence && pause.Line == line
+        && pause.SourcePath.EndsWith("/" + file, StringComparison.OrdinalIgnoreCase), timeout,
+        $"Debug did not report {reason} #{sequence} at {file}:{line}");
+}
+
+static List<string> StackItems(AutomationElement workspace)
+{
+    var names = new List<string>();
+    foreach (AutomationElement item in workspace.FindAll(TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)))
+    {
+        try { if (!item.Current.IsOffscreen) names.Add(item.Current.Name); }
+        catch (ElementNotAvailableException) { }
+    }
+    Ensure(names.Count > 0, "Visible paused stack has no UIA ListItem frames");
+    return names;
+}
+
+static string ReadRunLog(AutomationElement workspace, Process host)
+{
+    var edits = workspace.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>()
+        .Where(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen && item.Current.ClassName == "Edit"
+            && item.Current.ControlType == ControlType.Document && item.Current.NativeWindowHandle != 0
+            && !HasNotebookAncestor(item, workspace)).ToArray();
+    Ensure(edits.Length == 1, $"Expected one visible run-log Edit outside notebook, found {edits.Length}");
+    return Native.ReadEditText(edits[0], host);
+}
+
+static void WaitLoopStarted(AutomationElement workspace, Process host, TimeSpan timeout)
+{
+    WaitUntil(() => ReadRunStatus(workspace).StartsWith("Debug: running", StringComparison.Ordinal)
+        && ReadRunLog(workspace, host).Contains("workspace-debug-loop-started", StringComparison.Ordinal), timeout,
+        "Long loop did not enter running state and report its unique progress handshake");
+}
+
+static bool HasNotebookAncestor(AutomationElement item, AutomationElement workspace)
+{
+    var parent = TreeWalker.ControlViewWalker.GetParent(item);
+    while (parent is not null && parent != workspace)
+    {
+        if (parent.Current.ClassName == "_wx_SysTabCtl32") return true;
+        parent = TreeWalker.ControlViewWalker.GetParent(parent);
+    }
+    return false;
+}
+
+static void AssertLivePauseControls(AutomationElement main, AutomationElement workspace)
+{
+    Ensure(!main.Current.IsEnabled, "Main frame remained enabled during a live paused Workspace invocation");
+    foreach (var name in new[] { "Continue", "Step In", "Step Over", "Step Out", "Stop" })
+        Ensure(FindButton(workspace, name).Current.IsEnabled, $"Live pause control {name} is disabled");
+    foreach (var name in new[] { "Run", "Debug", "Open File", "Reload" })
+        Ensure(!FindButton(workspace, name).Current.IsEnabled, $"Unsafe {name} stayed enabled during a live pause");
+    var save = UiaDriver.FindDescendantByAutomationId(workspace, "5003", ControlType.Button)
+        ?? throw new InvalidOperationException("Workspace has no exact Apply/Save control");
+    Ensure(save.Current.Name is "Apply" or "Save" && !save.Current.IsEnabled,
+        "Workspace Apply/Save control was unexpected or enabled during a live pause");
+}
+
+static AutomationElement FindButton(AutomationElement window, string name)
+{
+    var buttons = window.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button))
+        .Cast<AutomationElement>().Where(item => item.Current.Name == name).ToArray();
+    Ensure(buttons.Length == 1, $"Expected one exact {name} button, found {buttons.Length}");
+    return buttons[0];
+}
+
+static AutomationElement? FindStyledText(AutomationElement workspace, bool insideNotebook)
+{
+    var candidates = new List<AutomationElement>();
+    foreach (AutomationElement item in workspace.FindAll(TreeScope.Descendants, Condition.TrueCondition))
+    {
+        try
+        {
+            var current = item.Current;
+            if (current.ProcessId != workspace.Current.ProcessId || current.IsOffscreen
+                || current.ControlType != ControlType.Pane || current.ClassName != "wxWindow"
+                || current.NativeWindowHandle == 0 || !item.TryGetCurrentPattern(ScrollPattern.Pattern, out _))
+                continue;
+            if (HasNotebookAncestor(item, workspace) == insideNotebook) candidates.Add(item);
+        }
+        catch (ElementNotAvailableException) { }
+    }
+    Ensure(candidates.Count <= 1, $"Workspace exposes {candidates.Count} visible STC controls for notebook={insideNotebook}");
+    return candidates.Count == 1 ? candidates[0] : null;
+}
+
+static void SelectTab(AutomationElement workspace, string name)
+{
+    var tabs = workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem))
+        .Cast<AutomationElement>().Where(item => item.Current.Name == name).ToArray();
+    Ensure(tabs.Length == 1 && tabs[0].TryGetCurrentPattern(SelectionItemPattern.Pattern, out _), $"Exact tab {name} was unavailable");
+    var pattern = (SelectionItemPattern)tabs[0].GetCurrentPattern(SelectionItemPattern.Pattern);
+    pattern.Select();
+    WaitUntil(() => pattern.Current.IsSelected, TimeSpan.FromSeconds(3), $"Tab {name} did not select");
+}
+
+static bool StackHasSourceLine(AutomationElement workspace, string sourcePrefix, int line)
+{
+    foreach (AutomationElement item in workspace.FindAll(TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)))
+    {
+        try
+        {
+            var current = item.Current;
+            if (!current.IsOffscreen && current.Name.Contains(sourcePrefix, StringComparison.Ordinal)
+                && current.Name.EndsWith(":" + line, StringComparison.Ordinal)) return true;
+        }
+        catch (ElementNotAvailableException) { }
+    }
+    return false;
+}
+
+static void InvokeButton(AutomationElement window, string name)
+{
+    var buttons = window.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button))
+        .Cast<AutomationElement>().Where(item => item.Current.Name == name && item.Current.IsEnabled
+            && item.TryGetCurrentPattern(InvokePattern.Pattern, out _)).ToArray();
+    Ensure(buttons.Length == 1, $"Expected one enabled exact {name} button, found {buttons.Length}");
+    UiaDriver.Invoke(buttons[0]);
+}
+
+static void OpenLuaFile(AutomationElement workspace, Process host, string path, string artifacts, string evidenceName)
+{
+    var task = Task.Run(() => InvokeButton(workspace, "Open File"));
+    var picker = WaitWindow(host, "Open Lua source", TimeSpan.FromSeconds(6));
+    SaveEvidence(picker, artifacts, evidenceName);
+    var filename = UiaDriver.FindDescendantByAutomationId(picker, "1148", ControlType.Edit);
+    if (filename is null || !filename.TryGetCurrentPattern(ValuePattern.Pattern, out var pattern))
+        throw new InvalidOperationException("Open Lua source picker has no exact filename ValuePattern");
+    ((ValuePattern)pattern).SetValue(path);
+    var open = UiaDriver.FindDescendantByAutomationId(picker, "1", ControlType.Button)
+        ?? throw new InvalidOperationException("Open Lua source picker has no observed stock Open ID 1");
+    Ensure(open.Current.IsEnabled && open.TryGetCurrentPattern(InvokePattern.Pattern, out _), "Picker Open button is not invokable");
+    UiaDriver.Invoke(open);
+    Ensure(task.Wait(TimeSpan.FromSeconds(8)), "Open Lua source picker did not complete after exact Open");
+    WaitUntil(() => FindWindow(host, "Open Lua source") is null
+        && workspace.Current.Name.Contains(Path.GetFileName(path), StringComparison.Ordinal), TimeSpan.FromSeconds(6),
+        "Open Lua source did not close its picker and bind the requested saved file");
+}
+
+static void SaveMainAss(AutomationElement main, string input, IReadOnlyList<AssEvent> expected, string artifacts, string evidenceName)
+{
+    AutomationElement? save = null;
+    WaitUntil(() => (save = UiaDriver.FindEnabledInvokableButtonByAutomationId(main, "Item 5002", "Save the current subtitles")) is not null,
+        TimeSpan.FromSeconds(8), "Main Save did not become available for a committed ASS change");
+    UiaDriver.Invoke(save!);
+    WaitUntil(() => EventLines(File.ReadAllText(input)).SequenceEqual(expected), TimeSpan.FromSeconds(8),
+        "Saved ASS events did not exactly match the independent scenario baseline");
+    var text = File.ReadAllText(input);
+    AssertPhysicalEventLines(text, expected.Count);
+    File.WriteAllText(Path.Combine(artifacts, evidenceName), text, new UTF8Encoding(false));
+}
+
+static void AssertPhysicalEventLines(string ass, int expected)
+{
+    var lines = ass.Split('\n').Select(line => line.TrimEnd('\r')).ToArray();
+    var section = Array.IndexOf(lines, "[Events]");
+    Ensure(section >= 0, "Saved ASS has no Events section");
+    var count = 0;
+    foreach (var line in lines.Skip(section + 1))
+    {
+        if (line.Length == 0) continue;
+        if (line.StartsWith('[')) break;
+        if (line.StartsWith("Format:", StringComparison.Ordinal)) continue;
+        Ensure(line.StartsWith("Comment:", StringComparison.Ordinal) || line.StartsWith("Dialogue:", StringComparison.Ordinal),
+            "Saved ASS has an orphan physical continuation line");
+        ++count;
+    }
+    Ensure(count == expected, "Saved ASS physical event count differs from scenario expectation");
+}
+
+static AutomationElement WaitWindowContainingText(Process host, string exactText, TimeSpan timeout)
+{
+    AutomationElement? found = null;
+    WaitUntil(() =>
+    {
+        var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
+        foreach (AutomationElement root in roots)
+        {
+            foreach (AutomationElement label in root.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)))
+            {
+                try
+                {
+                    if (label.Current.Name != exactText) continue;
+                    var parent = TreeWalker.ControlViewWalker.GetParent(label);
+                    while (parent is not null)
+                    {
+                        var current = parent.Current;
+                        if (current.ProcessId == host.Id && current.ClassName == "#32770" && current.NativeWindowHandle != 0
+                            && !current.IsOffscreen && (current.ControlType == ControlType.Window || current.ControlType == ControlType.Pane))
+                        {
+                            found = parent;
+                            return true;
+                        }
+                        parent = TreeWalker.ControlViewWalker.GetParent(parent);
+                    }
+                }
+                catch (ElementNotAvailableException) { }
+            }
+        }
+        return false;
+    }, timeout, $"Exact dialog label {exactText} was not exposed");
+    return found!;
+}
+
+static void VerifySeed(AutomationElement main, Process host, string input, IReadOnlyList<AssEvent> seeded, string artifacts, string evidenceName)
+{
+    var before = File.ReadAllBytes(input);
+    var task = Task.Run(() => InvokeMenu(main, host, "Workspace Debug Verify Seed Rollback", TimeSpan.FromSeconds(8)));
+    var dialog = WaitWindowContainingText(host, "Debug seed rollback verified", TimeSpan.FromSeconds(8));
+    SaveEvidence(dialog, artifacts, evidenceName + "-dialog");
+    InvokeButton(dialog, "OK");
+    Ensure(task.Wait(TimeSpan.FromSeconds(10)), "Live rollback verifier did not finish after its exact acknowledgement");
+    WaitUntil(() => main.Current.IsEnabled && FindProgressPane(host, "Workspace Debug Verify Seed Rollback") is null,
+        TimeSpan.FromSeconds(8), "Live rollback verifier did not release its real modal execution UI");
+    Ensure(File.ReadAllBytes(input).SequenceEqual(before) && EventLines(File.ReadAllText(input)).SequenceEqual(seeded),
+        "Live rollback verifier changed or disagreed with physical seed ASS");
+}
+
+static AutomationElement? FindVisibleMenuCommand(Process host, string name)
+{
+    var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
+    foreach (AutomationElement root in roots)
+    {
+        foreach (AutomationElement item in root.FindAll(TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem)))
+        {
+            try
+            {
+                if (!item.Current.IsOffscreen && (item.Current.Name ?? "").Replace("&", "", StringComparison.Ordinal)
+                    .Contains(name, StringComparison.OrdinalIgnoreCase)) return item;
+            }
+            catch (ElementNotAvailableException) { }
+        }
+    }
+    return null;
+}
+
+static void InvokeMenu(AutomationElement main, Process host, string name, TimeSpan timeout, string menuName = "Automation")
+{
+    AutomationElement? menu = null;
+    WaitUntil(() => main.Current.IsEnabled && (menu = main.FindAll(TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem))
+        .Cast<AutomationElement>().FirstOrDefault(item => !item.Current.IsOffscreen
+            && (item.Current.Name ?? "").Replace("&", "", StringComparison.Ordinal)
+                .Equals(menuName, StringComparison.OrdinalIgnoreCase))) is not null,
+        timeout, $"Main menu {menuName} was not exposed after execution UI completed");
+    var opened = false;
+    if (menu!.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var expand))
+    {
+        try { ((ExpandCollapsePattern)expand).Expand(); opened = true; }
+        catch (InvalidOperationException) { }
+    }
+    if (!opened && menu.TryGetCurrentPattern(InvokePattern.Pattern, out var invoke))
+    {
+        ((InvokePattern)invoke).Invoke();
+        opened = true;
+    }
+    if (!opened)
+    {
+        var mnemonic = menuName == "Automation" ? 'u' : menuName == "Edit" ? 'e'
+            : throw new InvalidOperationException($"Menu {menuName} has no observed mnemonic");
+        Native.PostSystemMenu(new nint(main.Current.NativeWindowHandle), mnemonic);
+    }
+    AutomationElement? command = null;
+    WaitUntil(() => (command = FindVisibleMenuCommand(host, name)) is not null, timeout, $"Menu command {name} was unavailable");
+    UiaDriver.Invoke(command!);
+}
+
+static string CopySource(AutomationElement workspace, Process host)
+{
+    ClipboardReceipt.VerifyCurrent();
+    var before = Native.ClipboardSequence();
+    InvokeButton(workspace, "Copy source");
+    WaitUntil(() => Native.ClipboardSequence() != before, TimeSpan.FromSeconds(3), "Copy source did not publish clipboard text");
+    var sequence = Native.ClipboardSequence();
+    Native.AssertClipboardState(sequence, host.Id);
+    var text = ClipboardSafety.ReadText();
+    Native.AssertClipboardState(sequence, host.Id);
+    ClipboardReceipt.Record("workspace-copy-source", host.Id, sequence);
+    return text;
+}
+
+static void SaveEvidence(AutomationElement window, string artifacts, string name)
+{
+    var lines = new List<string>();
+    foreach (var item in new[] { window }.Concat(window.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>()).Take(700))
+    {
+        try
+        {
+            var current = item.Current;
+            lines.Add($"{current.ControlType.ProgrammaticName}\t{current.Name}\t{current.AutomationId}\t{current.ClassName}\t{current.NativeWindowHandle}\t{current.IsEnabled}\t{current.IsOffscreen}\t{string.Join(',', item.GetSupportedPatterns().Select(pattern => pattern.ProgrammaticName))}");
+        }
+        catch (ElementNotAvailableException) { lines.Add("<stale UIA element>"); }
+    }
+    File.WriteAllLines(Path.Combine(artifacts, name + "-uia.txt"), lines);
+    var capture = ScreenCapture.SaveWindowPng(window, Path.Combine(artifacts, name + ".png"));
+    Ensure(capture.NonBlackPixelCount > 0, $"{name} screenshot was black");
+}
+
+static void TryEvidence(AutomationElement window, string artifacts, string name)
+{
+    try { SaveEvidence(window, artifacts, name); }
+    catch (Exception error) { File.WriteAllText(Path.Combine(artifacts, name + "-error.txt"), error.Message); }
+}
+
+static void TryProcessEvidence(Process host, string artifacts, string name)
+{
+    try
+    {
+        var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
+        var index = 0;
+        foreach (AutomationElement root in roots)
+            TryEvidence(root, artifacts, name + "-root-" + index++);
+    }
+    catch (Exception error) { File.WriteAllText(Path.Combine(artifacts, name + "-error.txt"), error.Message); }
+}
+
+static int ParseTime(string text)
+{
+    var parts = text.Split(':', '.');
+    Ensure(parts.Length == 4, "ASS time has an unexpected form");
+    return ((int.Parse(parts[0]) * 60 + int.Parse(parts[1])) * 60 + int.Parse(parts[2])) * 1000 + int.Parse(parts[3]) * 10;
+}
+
+static List<AssEvent> EventLines(string ass) => ass.Split('\n').Select(line => line.TrimEnd('\r'))
+    .Where(line => line.StartsWith("Comment:", StringComparison.Ordinal) || line.StartsWith("Dialogue:", StringComparison.Ordinal))
+    .Select(line =>
+    {
+        var split = line.IndexOf(':');
+        var fields = line[(split + 1)..].TrimStart().Split(',', 10);
+        Ensure(fields.Length == 10, "ASS event has an unexpected field count");
+        return new AssEvent(line[..split], int.Parse(fields[0]), ParseTime(fields[1]), ParseTime(fields[2]), fields[3].Trim(),
+            fields[4].Trim(), int.Parse(fields[5]), int.Parse(fields[6]), int.Parse(fields[7]), fields[8].Trim(), fields[9]);
+    }).ToList();
+
+static void AssertGenerated(string saved, List<AssEvent> baseline, ExpectedOutput expected)
+{
+    var lines = saved.Split('\n').Select(line => line.TrimEnd('\r')).ToArray();
+    var section = Array.IndexOf(lines, "[Events]");
+    Ensure(section >= 0, "Saved ASS lost its Events section");
+    var physicalEvents = 0;
+    foreach (var line in lines.Skip(section + 1))
+    {
+        if (line.Length == 0) continue;
+        if (line.StartsWith('[')) break;
+        if (line.StartsWith("Format:", StringComparison.Ordinal)) continue;
+        Ensure(line.StartsWith("Comment:", StringComparison.Ordinal) || line.StartsWith("Dialogue:", StringComparison.Ordinal),
+            "Saved ASS has a physical orphan continuation line");
+        ++physicalEvents;
+    }
+    Ensure(physicalEvents == baseline.Count + expected.GeneratedCount, "Saved ASS physical event count differs from independent expectation");
+    var actual = EventLines(saved);
+    Ensure(actual.Count == baseline.Count + expected.GeneratedCount, "Saved ASS event count differs from independent expectation");
+    for (var i = 0; i < 5; ++i)
+        Ensure(actual[i] == baseline[i], $"Coding/template event {i} changed during un-applied Run");
+    for (var i = 5; i < 7; ++i)
+        Ensure(actual[i] with { Kind = baseline[i].Kind, Effect = baseline[i].Effect } == baseline[i]
+            && actual[i].Kind == "Comment" && actual[i].Effect == "karaoke", $"Original karaoke event {i} changed unexpectedly");
+    for (var i = 0; i < expected.GeneratedCount; ++i)
+    {
+        var found = actual[baseline.Count + i];
+        var wanted = expected.Generated[i];
+        Ensure(found.Kind == "Dialogue" && found.Effect == "fx" && found.Style == wanted.Style && found.Name == ""
+            && found.MarginL == 0 && found.MarginR == 0 && found.MarginV == 0 && found.Layer == wanted.Layer
+            && found.StartMs == wanted.StartMs && found.EndMs == wanted.EndMs && found.Text == wanted.Text,
+            $"Generated event {i + 1} differs from independently authored output fields");
+    }
+}
+
+static AutomationElement? FindProgressPane(Process host, string exactTitle)
+{
+    var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
+    var matches = new List<AutomationElement>();
+    foreach (AutomationElement root in roots)
+    {
+        foreach (var item in new[] { root }.Concat(root.FindAll(TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Pane)).Cast<AutomationElement>()))
+        {
+            try
+            {
+                if (item.Current.ProcessId == host.Id && item.Current.ControlType == ControlType.Pane && item.Current.ClassName == "#32770"
+                    && item.Current.Name == exactTitle && item.Current.NativeWindowHandle != 0 && !item.Current.IsOffscreen)
+                    matches.Add(item);
+            }
+            catch (ElementNotAvailableException) { }
+        }
+    }
+    Ensure(matches.Count <= 1, "More than one exact progress dialog was found");
+    return matches.Count == 1 ? matches[0] : null;
+}
+
+static void WaitForInvocation(AutomationElement workspace, Process host, Task invocation, string outcome, string artifacts, string label)
+{
+    var closedProgress = false;
+    WaitUntil(() =>
+    {
+        var progress = FindProgressPane(host, "Apply karaoke template");
+        if (!closedProgress && progress is not null)
+        {
+            var close = progress.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button))
+                .Cast<AutomationElement>().FirstOrDefault(item => item.Current.Name == "Close" && item.Current.IsEnabled
+                    && item.TryGetCurrentPattern(InvokePattern.Pattern, out _));
+            if (close is not null)
+            {
+                SaveEvidence(progress, artifacts, label + "-progress-close");
+                UiaDriver.Invoke(close);
+                closedProgress = true;
+            }
+        }
+        return invocation.IsCompleted && ReadRunStatus(workspace).Contains(outcome, StringComparison.OrdinalIgnoreCase);
+    }, TimeSpan.FromSeconds(25), $"Invocation did not reach {outcome} and release its progress UI");
+    Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "UIA invocation did not return after terminal state");
+}
+
+sealed record AssEvent(string Kind, int Layer, int StartMs, int EndMs, string Style, string Name, int MarginL, int MarginR, int MarginV, string Effect, string Text);
+
+sealed record ClipboardReceiptData(uint Sequence, int OwnerProcessId, string Stage);
+
+static class ClipboardReceipt
+{
+    private static string? path;
+    private static uint sequence;
+
+    public static void Initialize(string receiptPath, uint originalSequence)
+    {
+        path = receiptPath;
+        sequence = originalSequence;
+    }
+
+    public static void VerifyCurrent() => Ensure(Native.ClipboardSequence() == sequence,
+        "Clipboard changed outside this GUI test; preserving external data");
+
+    public static void Record(string stage, int ownerProcessId, uint verifiedSequence)
+    {
+        if (path is null) throw new InvalidOperationException("Clipboard receipt path was not initialized");
+        Native.AssertClipboardState(verifiedSequence, ownerProcessId);
+        var pending = path + ".pending";
+        File.WriteAllText(pending, JsonSerializer.Serialize(new ClipboardReceiptData(verifiedSequence, ownerProcessId, stage)));
+        File.Move(pending, path, overwrite: true);
+        Native.AssertClipboardState(verifiedSequence, ownerProcessId);
+        sequence = verifiedSequence;
+    }
+
+    public static ClipboardReceiptData? Read(string receiptPath) => File.Exists(receiptPath)
+        ? JsonSerializer.Deserialize<ClipboardReceiptData>(File.ReadAllText(receiptPath)) : null;
+
+    public static ClipboardReceiptData? ReadForCurrent() => path is null ? null : Read(path);
+
+    private static void Ensure(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+}
+
+static class ClipboardSafety
+{
+    public static T OnSta<T>(Func<T> operation) => ClipboardSta.Invoke(operation);
+
+    public static string ReadText() => OnSta(() => Clipboard.GetText());
+
+    public static uint SetText(string text) => OnSta(() =>
+    {
+        Clipboard.SetText(text);
+        var verified = Native.ClipboardSequence();
+        ClipboardReceipt.Record("test-paste", Environment.ProcessId, verified);
+        return verified;
+    });
+
+    public static void Restore(DataObject? snapshot, uint expectedSequence) => OnSta(() =>
+    {
+        Ensure(Native.ClipboardSequence() == expectedSequence, "Clipboard changed before restoration; preserving external data");
+        if (snapshot is null) Clipboard.Clear();
+        else Clipboard.SetDataObject(snapshot, true);
+        return true;
+    });
+
+    public static DataObject? Capture()
+    {
+        var source = Clipboard.GetDataObject();
+        if (source is null) return null;
+        var snapshot = new DataObject();
+        foreach (var format in source.GetFormats(autoConvert: false))
+        {
+            var value = source.GetData(format, autoConvert: false)
+                ?? throw new InvalidOperationException("An existing clipboard format could not be materialized");
+            object independent = value switch
+            {
+                string text => text,
+                byte[] bytes => bytes.ToArray(),
+                string[] paths => paths.ToArray(),
+                StringCollection strings => CopyStrings(strings),
+                Image image => new Bitmap(image),
+                Stream stream => CopyStream(stream),
+                _ => throw new NotSupportedException("An existing clipboard format cannot be safely materialized")
+            };
+            snapshot.SetData(format, autoConvert: false, independent);
+        }
+        return snapshot;
+    }
+
+    private static StringCollection CopyStrings(StringCollection source)
+    {
+        var copy = new StringCollection();
+        copy.AddRange(source.Cast<string>().ToArray());
+        return copy;
+    }
+
+    private static MemoryStream CopyStream(Stream source)
+    {
+        var copy = new MemoryStream();
+        var original = source.CanSeek ? source.Position : (long?)null;
+        if (source.CanSeek) source.Position = 0;
+        try { source.CopyTo(copy); }
+        finally { if (original is not null) source.Position = original.Value; }
+        copy.Position = 0;
+        return copy;
+    }
+
+    private static void Ensure(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+}
+
+static class Native
+{
+
+    [StructLayout(LayoutKind.Sequential)] private struct Input { public uint Type; public InputUnion Union; }
+    [StructLayout(LayoutKind.Explicit)] private struct InputUnion { [FieldOffset(0)] public MouseInput Mouse; [FieldOffset(0)] public KeyboardInput Keyboard; }
+    [StructLayout(LayoutKind.Sequential)] private struct MouseInput { public int X, Y; public uint Data, Flags, Time; public nint ExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] private struct KeyboardInput { public ushort VirtualKey, ScanCode; public uint Flags, Time; public nint ExtraInfo; }
+
+    [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
+    [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] private static extern nint GetClipboardOwner();
+    [DllImport("user32.dll")] private static extern int IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll", SetLastError = true)] private static extern uint GetWindowThreadProcessId(nint hwnd, out uint processId);
+    [DllImport("user32.dll", EntryPoint = "PostMessageW", ExactSpelling = true, SetLastError = true)]
+    private static extern int PostMessageW(nint hwnd, uint message, nint wParam, nint lParam);
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int GetClassNameW(nint hwnd, [Out] char[] className, int maxCount);
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern nint SendMessageTimeoutW(nint hwnd, uint message, nint wParam, [Out] char[] buffer,
+        uint flags, uint timeout, out nint result);
+
+    public static uint ClipboardSequence() => GetClipboardSequenceNumber();
+
+    public static void AssertClipboardState(uint expectedSequence, int expectedOwnerPid)
+    {
+        Ensure(ClipboardSequence() == expectedSequence, "Clipboard sequence changed during provenance verification");
+        GetWindowThreadProcessId(GetClipboardOwner(), out var owner);
+        Ensure(owner == (uint)expectedOwnerPid, $"Clipboard owner PID {owner} differs from expected {expectedOwnerPid}");
+        Ensure(ClipboardSequence() == expectedSequence, "Clipboard sequence changed after owner verification");
+    }
+
+    public static void PostSystemMenu(nint hwnd, char mnemonic)
+    {
+        if (PostMessageW(hwnd, 0x0112, 0xF100, mnemonic) == 0)
+            throw new InvalidOperationException("Observed menu mnemonic could not be posted to the GUI host");
+    }
+
+    public static void PostClose(AutomationElement workspace, Process host)
+    {
+        var current = workspace.Current;
+        Ensure(current.ControlType == ControlType.Window && current.ProcessId == host.Id && current.NativeWindowHandle != 0,
+            "Workspace close target is not the exact launched host window");
+        var handle = new nint(current.NativeWindowHandle);
+        GetWindowThreadProcessId(handle, out var owner);
+        Ensure(owner == (uint)host.Id, "Workspace close HWND changed ownership");
+        if (PostMessageW(handle, 0x0010, 0, 0) == 0)
+            throw new InvalidOperationException("Queued OS close could not be posted to the verified Workspace HWND");
+    }
+
+    public static string ReadEditText(AutomationElement edit, Process host)
+    {
+        var current = edit.Current;
+        Ensure(current.ProcessId == host.Id && current.ClassName == "Edit" && current.NativeWindowHandle != 0
+            && current.ControlType == ControlType.Document, "Run log is not the observed native Edit in this host");
+        var handle = new nint(current.NativeWindowHandle);
+        return ReadControlText(handle, host, "Edit");
+    }
+
+    public static string ReadStaticText(nint handle, Process host) => ReadControlText(handle, host, "Static");
+
+    private static string ReadControlText(nint handle, Process host, string expectedClass)
+    {
+        GetWindowThreadProcessId(handle, out var owner);
+        Ensure(owner == (uint)host.Id, "Observed text HWND changed ownership");
+        var className = new char[64];
+        var classLength = GetClassNameW(handle, className, className.Length);
+        Ensure(classLength > 0 && classLength < className.Length - 1 && new string(className, 0, classLength) == expectedClass,
+            "Observed text HWND no longer has its expected native class");
+        const int capacity = 65_536;
+        var buffer = new char[capacity];
+        if (SendMessageTimeoutW(handle, 0x000D, capacity, buffer, 0x0002, 2000, out var copied) == 0)
+            throw new TimeoutException("Bounded WM_GETTEXT for the observed control timed out or failed");
+        var length = copied.ToInt64();
+        Ensure(length >= 0 && length < capacity - 1, "Control text exceeded the fixed Unicode buffer; refusing truncated text");
+        return new string(buffer, 0, (int)length);
+    }
+
+    public static void StabilizeOwnedClipboard(int hostPid)
+    {
+        var receipt = ClipboardReceipt.ReadForCurrent();
+        if (receipt is null || receipt.OwnerProcessId != hostPid) return;
+        ClipboardReceipt.VerifyCurrent();
+        AssertClipboardState(receipt.Sequence, hostPid);
+        var text = ClipboardSafety.ReadText();
+        AssertClipboardState(receipt.Sequence, hostPid);
+        _ = ClipboardSafety.SetText(text);
+    }
+
+    private static void PrepareFocus(AutomationElement editor, Process host)
+    {
+        var frame = editor;
+        while (frame.Current.ControlType != ControlType.Window)
+            frame = TreeWalker.ControlViewWalker.GetParent(frame) ?? throw new InvalidOperationException("STC has no top-level frame");
+        UiaDriver.FocusAndVerify(frame, host, TimeSpan.FromSeconds(3));
+        editor.SetFocus();
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            GetWindowThreadProcessId(GetForegroundWindow(), out var owner);
+            if (owner == (uint)host.Id && AutomationElement.FocusedElement.Current.NativeWindowHandle == editor.Current.NativeWindowHandle)
+                return;
+            Thread.Sleep(50);
+        }
+        throw new TimeoutException("Guarded input did not gain exact host STC focus");
+    }
+
+    private static void AssertFocus(AutomationElement editor, Process host)
+    {
+        GetWindowThreadProcessId(GetForegroundWindow(), out var owner);
+        Ensure(owner == (uint)host.Id && AutomationElement.FocusedElement.Current.NativeWindowHandle == editor.Current.NativeWindowHandle,
+            "Guarded input stopped after focus left the host STC");
+    }
+
+    private static Input Key(ushort virtualKey, bool up) => new()
+    {
+        Type = 1, Union = new InputUnion { Keyboard = new KeyboardInput { VirtualKey = virtualKey, Flags = up ? 2u : 0u } }
+    };
+
+    private static void Send(AutomationElement editor, Process host, params Input[] inputs)
+    {
+        AssertFocus(editor, host);
+        if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>()) != inputs.Length)
+        {
+            var released = SendInput(2, new[] { Key(0x11, true), Key(0x10, true) }, Marshal.SizeOf<Input>());
+            throw new InvalidOperationException(released == 2 ? "Guarded input was partial; modifiers released"
+                : "Guarded input was partial and modifier release failed");
+        }
+    }
+
+    private static void Chord(AutomationElement editor, Process host, ushort key) => Send(editor, host,
+        Key(0x11, false), Key(key, false), Key(key, true), Key(0x11, true));
+
+    public static void SendCtrlHome(AutomationElement editor, Process host) => Chord(editor, host, 0x24);
+    public static void SendKey(AutomationElement editor, Process host, ushort key) => Send(editor, host, Key(key, false), Key(key, true));
+
+    public static void Focus(AutomationElement editor, Process host) => PrepareFocus(editor, host);
+    public static void SaveShortcut(AutomationElement editor, Process host)
+    {
+        PrepareFocus(editor, host);
+        Chord(editor, host, 'S');
+    }
+    public static void Undo(AutomationElement editor, Process host)
+    {
+        PrepareFocus(editor, host);
+        Chord(editor, host, 'Z');
+    }
+
+    public static string CopyStyledText(AutomationElement editor, Process host)
+    {
+        PrepareFocus(editor, host);
+        ClipboardReceipt.VerifyCurrent();
+        var before = ClipboardSequence();
+        Chord(editor, host, 'A');
+        Chord(editor, host, 'C');
+        WaitUntil(() => ClipboardSequence() != before, TimeSpan.FromSeconds(3), "STC copy did not change the clipboard");
+        var copiedSequence = ClipboardSequence();
+        AssertClipboardState(copiedSequence, host.Id);
+        var copied = ClipboardSafety.ReadText();
+        AssertClipboardState(copiedSequence, host.Id);
+        ClipboardReceipt.Record("host-stc-copy", host.Id, copiedSequence);
+        return copied;
+    }
+
+    public static void ReplaceWithClipboard(AutomationElement editor, Process host, string text)
+    {
+        PrepareFocus(editor, host);
+        ClipboardReceipt.VerifyCurrent();
+        var publishedSequence = ClipboardSafety.SetText(text);
+        Ensure(ClipboardSequence() == publishedSequence && IsClipboardFormatAvailable(13) != 0,
+            "Published test text is not a stable CF_UNICODETEXT clipboard value");
+        Ensure(ClipboardSafety.ReadText() == text && ClipboardSequence() == publishedSequence,
+            "Published test paste source was not preserved before guarded input");
+        AssertClipboardState(publishedSequence, Environment.ProcessId);
+        Chord(editor, host, 'A');
+        Chord(editor, host, 'V');
+        Chord(editor, host, 'A');
+        Chord(editor, host, 'C');
+        try
+        {
+            WaitUntil(() => ClipboardSequence() != publishedSequence, TimeSpan.FromSeconds(3), "STC did not prove paste consumption by host copy");
+        }
+        catch (TimeoutException)
+        {
+            var sequence = ClipboardSequence();
+            GetWindowThreadProcessId(GetClipboardOwner(), out var owner);
+            Console.Error.WriteLine($"paste.failure.sequence={sequence};published={publishedSequence};owner={owner};unicode={IsClipboardFormatAvailable(13)}");
+            if (sequence == publishedSequence && owner == (uint)Environment.ProcessId)
+            {
+                var retained = ClipboardSafety.ReadText();
+                AssertClipboardState(sequence, Environment.ProcessId);
+                Console.Error.WriteLine($"paste.failure.retained_length={retained.Length};expected_length={text.Length};retained_equals_expected={retained == text}");
+            }
+            throw;
+        }
+        var copiedSequence = ClipboardSequence();
+        AssertClipboardState(copiedSequence, host.Id);
+        var copied = ClipboardSafety.ReadText();
+        AssertClipboardState(copiedSequence, host.Id);
+        ClipboardReceipt.Record("host-copy-after-paste", host.Id, copiedSequence);
+        Ensure(Normalize(copied) == Normalize(text), "Editor host copy differs from the pasted source");
+    }
+
+    private static string Normalize(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    private static void Ensure(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static void WaitUntil(Func<bool> predicate, TimeSpan timeout, string failure)
+    {
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < timeout)
+        {
+            if (predicate()) return;
+            Thread.Sleep(25);
+        }
+        throw new TimeoutException(failure);
+    }
+}
+
+sealed record StepResult(string Name, string Status, string Detail);
+sealed record HostIdentity(int ProcessId, string StartTimeUtc);
+sealed record PauseStatus(string Reason, int Sequence, string SourcePath, int Line);
+sealed record ExpectedOutput(int GeneratedCount, List<ExpectedGenerated> Generated);
+sealed record ExpectedGenerated(string Text, int Layer, int StartMs, int EndMs, string Style);
+static class DebugInvocation
+{
+    private static Task? active;
+    public static void Set(Task task) => active = task;
+    public static bool Wait(TimeSpan timeout) => active is not null && active.Wait(timeout);
+}

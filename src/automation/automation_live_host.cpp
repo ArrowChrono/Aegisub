@@ -27,6 +27,7 @@
 #include "../frame_main.h"
 #ifdef WITH_WXSTC
 #include "../lua_workspace_frame.h"
+#include "../lua_workspace_runner.h"
 #endif
 #include "../include/aegisub/context.h"
 #include "../include/aegisub/context_ui.h"
@@ -207,6 +208,20 @@ public:
 			context->ShowStatus(message, timeout_ms);
 	}
 
+	[[nodiscard]] std::shared_ptr<LuaWorkspaceRunRequest const> GetWorkspaceRunRequest(AutomationInvocation const& invocation) const override {
+#ifdef WITH_WXSTC
+		return agi::ui::MainInvoke([this, &invocation]() -> std::shared_ptr<LuaWorkspaceRunRequest const> {
+			if (!context || !context->GetUI().frame)
+				return {};
+			auto *workspace = context->GetUI().frame->GetLuaWorkspace(false);
+			return workspace ? workspace->GetWorkspaceRunRequest(invocation) : nullptr;
+		});
+#else
+		(void)invocation;
+		return {};
+#endif
+	}
+
 	bool SupportsInteractiveDialogs() const override
 	{
 		return context && context->GetUI().frame;
@@ -216,10 +231,34 @@ public:
 	{
 		auto *parent = static_cast<wxWindow *>(anchor.native_parent);
 		if (context) {
+			if (context->lua_workspace_invocation_active)
+				throw AutomationError("Another Automation invocation cannot start while Lua Workspace is running");
 			if (auto runner = context->CreateAutomationBackgroundScriptRunner(title))
 				return runner;
 		}
 		return std::make_unique<BackgroundScriptRunner>(parent, title, GetFileDialogService());
+	}
+
+	[[nodiscard]] std::unique_ptr<BackgroundScriptRunner> CreateWorkspaceBackgroundScriptRunner(
+		std::shared_ptr<LuaWorkspaceRunRequest const> const& request, std::string const& title) const override {
+#ifdef WITH_WXSTC
+		agi::ui::VerifyAccess();
+		auto *frame = context ? context->GetUI().frame : nullptr;
+		auto *workspace = frame ? frame->GetLuaWorkspace(false) : nullptr;
+		if (!request || !workspace || !context->lua_workspace_invocation_active || workspace->GetActiveRunRequest() != request)
+			throw AutomationError("Lua Workspace runner request does not own the active invocation");
+		auto report = [workspace, lifetime = frame->GetAsyncUiLifetime(), id = request->invocation_id](std::string const& text) {
+			if (lifetime.lock())
+				workspace->ReportRunProgress(id, text);
+		};
+		return std::make_unique<BackgroundScriptRunner>(
+			std::make_unique<LuaWorkspaceBackgroundRunner>(request, std::move(report)),
+			workspace, title, GetFileDialogService());
+#else
+		(void)request;
+		(void)title;
+		return {};
+#endif
 	}
 
 	void ShowDialog(ProgressSink& sink, ScriptDialog& dialog) override

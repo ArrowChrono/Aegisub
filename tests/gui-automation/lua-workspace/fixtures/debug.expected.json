@@ -1,0 +1,29 @@
+{
+  "generated_count": 24,
+  "generated": [
+    {"text":"L1:DBG:ALPHA;L1:DBG:BETA;", "layer":1, "start_ms":1000, "end_ms":2000, "style":"Default"},
+    {"text":"L2:DBG:ALPHA;L2:DBG:BETA;", "layer":1, "start_ms":1000, "end_ms":2000, "style":"Default"},
+    {"text":"S1:DBG:", "layer":2, "start_ms":1000, "end_ms":1000, "style":"Default"},
+    {"text":"S2:DBG:", "layer":2, "start_ms":1000, "end_ms":1000, "style":"Default"},
+    {"text":"S1:DBG:ALPHA", "layer":2, "start_ms":1000, "end_ms":1500, "style":"Default"},
+    {"text":"S2:DBG:ALPHA", "layer":2, "start_ms":1000, "end_ms":1500, "style":"Default"},
+    {"text":"S1:DBG:BETA", "layer":2, "start_ms":1500, "end_ms":2000, "style":"Default"},
+    {"text":"S2:DBG:BETA", "layer":2, "start_ms":1500, "end_ms":2000, "style":"Default"},
+    {"text":"F1:DBG:A", "layer":3, "start_ms":1000, "end_ms":1500, "style":"Default-furigana"},
+    {"text":"F2:DBG:A", "layer":3, "start_ms":1000, "end_ms":1500, "style":"Default-furigana"},
+    {"text":"F1:DBG:B", "layer":3, "start_ms":1500, "end_ms":2000, "style":"Default-furigana"},
+    {"text":"F2:DBG:B", "layer":3, "start_ms":1500, "end_ms":2000, "style":"Default-furigana"},
+    {"text":"L1:DBG:GAMMA;L1:DBG:DELTA;", "layer":1, "start_ms":3000, "end_ms":4500, "style":"Default"},
+    {"text":"L2:DBG:GAMMA;L2:DBG:DELTA;", "layer":1, "start_ms":3000, "end_ms":4500, "style":"Default"},
+    {"text":"S1:DBG:", "layer":2, "start_ms":3000, "end_ms":3000, "style":"Default"},
+    {"text":"S2:DBG:", "layer":2, "start_ms":3000, "end_ms":3000, "style":"Default"},
+    {"text":"S1:DBG:GAMMA", "layer":2, "start_ms":3000, "end_ms":3750, "style":"Default"},
+    {"text":"S2:DBG:GAMMA", "layer":2, "start_ms":3000, "end_ms":3750, "style":"Default"},
+    {"text":"S1:DBG:DELTA", "layer":2, "start_ms":3750, "end_ms":4500, "style":"Default"},
+    {"text":"S2:DBG:DELTA", "layer":2, "start_ms":3750, "end_ms":4500, "style":"Default"},
+    {"text":"F1:DBG:G", "layer":3, "start_ms":3000, "end_ms":3750, "style":"Default-furigana"},
+    {"text":"F2:DBG:G", "layer":3, "start_ms":3000, "end_ms":3750, "style":"Default-furigana"},
+    {"text":"F1:DBG:D", "layer":3, "start_ms":3750, "end_ms":4500, "style":"Default-furigana"},
+    {"text":"F2:DBG:D", "layer":3, "start_ms":3750, "end_ms":4500, "style":"Default-furigana"}
+  ]
+}

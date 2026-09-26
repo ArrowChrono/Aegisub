@@ -17,13 +17,17 @@
 #include <libaegisub/fs_fwd.h>
 
 #include <vector>
+#include <functional>
+#include <string_view>
 
 struct lua_State;
 
 namespace agi { namespace lua {
-	/// Load a Lua or Moonscript file at the given path
-	bool LoadFile(lua_State *L, agi::fs::path const& filename);
-	/// Install our module loader and add include_path to the module search
-	/// path of the given lua state
-	bool Install(lua_State *L, std::vector<fs::path> const& include_path);
+using ScriptSourceObserver = std::function<void(fs::path const&, std::string_view)>;
+void SetScriptSourceObserver(lua_State *L, ScriptSourceObserver observer);
+/// Load a Lua or Moonscript file at the given path
+bool LoadFile(lua_State *L, agi::fs::path const& filename);
+/// Install our module loader and add include_path to the module search
+/// path of the given lua state
+bool Install(lua_State *L, std::vector<fs::path> const& include_path);
 } }

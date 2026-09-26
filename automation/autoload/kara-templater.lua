@@ -376,8 +376,13 @@ function parse_templates(meta, styles, subs)
 end
 
 function parse_code(meta, styles, line, templates, mods, line_index)
+	local workspace_code, workspace_chunk
+	if aegisub.__workspace_code_source then
+		workspace_code, workspace_chunk = aegisub.__workspace_code_source(line_index)
+	end
 	local template = {
-		code = line.text,
+		code = workspace_code or line.text,
+		__workspace_chunk = workspace_chunk,
 		loops = 1,
 		style = line.style
 	}
@@ -386,7 +391,7 @@ function parse_code(meta, styles, line, templates, mods, line_index)
 		source_line_index = line_index,
 		source_style = line.style,
 		source_effect = line.effect,
-		source_text = line.text,
+		source_text = template.code,
 		source_fragment_kind = "code-template",
 	})
 	local inserted = false
@@ -600,6 +605,12 @@ function parse_template(meta, styles, line, templates, mods, line_index)
 	end
 	if not template.isline then
 		template.t = line.text
+	end
+	if aegisub.__workspace_source_identity then
+		local identity = aegisub.__workspace_source_identity(line_index)
+		if identity then
+			template.__workspace_identity = template.__workspace_identity and (template.__workspace_identity .. "+" .. identity) or identity
+		end
 	end
 end
 
@@ -1034,7 +1045,7 @@ function apply_line(meta, styles, subs, line, templates, tenv)
 end
 
 function run_code_template(template, tenv)
-	local f, err = loadstring(template.code, "template code")
+	local f, err = loadstring(template.code, template.__workspace_chunk or "template code")
 	if not f then
 		update_template_debug_context("code-parse", template, tenv, { parse_error = err })
 		aegisub.debug.out(2, "Failed to parse Lua code: %s\nCode that failed to parse: %s\n\n", err, template.code)
@@ -1083,7 +1094,22 @@ function run_text_template(template, tenv, varctx, debug_template)
 
 	-- Function for evaluating expressions
 	local function expression_evaluator(expression)
-		f, err = loadstring(string.format("return (%s)", expression))
+		local source = string.format("return (%s)", expression)
+		local chunk_name
+		if debug_view.__workspace_identity then
+			local chunks = debug_view.__workspace_expressions
+			if not chunks then
+				chunks = { count = 0 }
+				debug_view.__workspace_expressions = chunks
+			end
+			chunk_name = chunks[source]
+			if not chunk_name then
+				chunks.count = chunks.count + 1
+				chunk_name = aegisub.__register_workspace_source(debug_view.__workspace_identity .. "/expression/" .. chunks.count, source)
+				chunks[source] = chunk_name
+			end
+		end
+		f, err = loadstring(source, chunk_name)
 		if (err) ~= nil then
 			update_template_debug_context("expression-parse", debug_view, tenv, { expression = expression, parse_error = err })
 			aegisub.debug.out(2, "Error parsing expression: %s\nExpression producing error: %s\nTemplate with expression: %s\n\n", err, expression, template)

@@ -33,6 +33,7 @@
 #include "ass_style.h"
 #include "automation/engine/automation_engine_registry.h"
 #include "automation/automation_live_host.h"
+#include "automation/automation_debug_service.h"
 #include "compat.h"
 #ifdef WITH_PLUGIN_BRIDGE
 #include "coreclr/dotnet_automation_engine.h"
@@ -76,6 +77,11 @@
 #endif
 
 namespace Automation4 {
+std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgroundScriptRunner(
+	std::shared_ptr<LuaWorkspaceRunRequest const> const&, std::string const&) const {
+	return {};
+}
+
 	namespace {
 		using AutoloadTimingClock = std::chrono::steady_clock;
 
@@ -824,6 +830,8 @@ namespace Automation4 {
 	// ScriptManager
 	void ScriptManager::Add(std::unique_ptr<Script> script)
 	{
+		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession())
+			throw AutomationError("Cannot change loaded scripts while a Lua Workspace invocation is active");
 		if (!script)
 			return;
 		script->CommitPendingFeatures();
@@ -836,6 +844,8 @@ namespace Automation4 {
 
 	void ScriptManager::Remove(Script *script)
 	{
+		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession())
+			throw AutomationError("Cannot change loaded scripts while a Lua Workspace invocation is active");
 		auto i = find_if(scripts.begin(), scripts.end(), [&](std::unique_ptr<Script> const& s) { return s.get() == script; });
 		if (i != scripts.end())
 			scripts.erase(i);
@@ -845,12 +855,15 @@ namespace Automation4 {
 
 	void ScriptManager::RemoveAll()
 	{
+		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession())
+			throw AutomationError("Cannot change loaded scripts while a Lua Workspace invocation is active");
 		scripts.clear();
 		ScriptsChanged();
 	}
 
-	void ScriptManager::Reload(Script *script)
-	{
+	void ScriptManager::Reload(Script *script, std::shared_ptr<AutomationDebugSession> const& owner) {
+		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession() && (!config::automation_debug_service->OwnsLocalSession(owner) || owner->GetStateSnapshot().invocation_active))
+			throw AutomationError("Cannot reload scripts while a Lua Workspace invocation is active");
 		script->Reload();
 		script->CommitPendingFeatures();
 		ScriptsChanged();
@@ -888,6 +901,12 @@ namespace Automation4 {
 		int error_count,
 		std::vector<std::pair<std::string, bool>> diagnostics)
 	{
+		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession()) {
+			pending_reload = true;
+			LOG_W("automation/reload") << "Autoload refresh deferred until the Lua Workspace invocation finishes";
+			return;
+		}
+		pending_reload = false;
 		for (auto& script : loaded_scripts) {
 			if (!script->GetLoadedState())
 				ReportFailedAutomationScriptLoad(script->GetFilename(), script->GetDescription());
@@ -912,6 +931,13 @@ namespace Automation4 {
 		}
 
 		ScriptsChanged();
+	}
+
+	void AutoloadScriptManager::ProcessPendingReload() {
+		if (!pending_reload || (config::automation_debug_service && config::automation_debug_service->HasLocalSession()))
+			return;
+		ReloadAsync();
+		pending_reload = false;
 	}
 
 	void AutoloadScriptManager::Reload()

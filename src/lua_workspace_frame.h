@@ -1,6 +1,8 @@
 #pragma once
 
 #include "automation/lua_workspace_document.h"
+#include "automation/lua_workspace_run.h"
+#include "automation/automation_debug_session.h"
 
 #include <libaegisub/signal.h>
 
@@ -14,6 +16,9 @@ class wxButton;
 class wxStaticText;
 class wxStyledTextCtrl;
 class wxTextCtrl;
+class wxListBox;
+class wxNotebook;
+class wxTimer;
 namespace agi {
 struct Context;
 }
@@ -30,17 +35,43 @@ class LuaWorkspaceFrame : public wxFrame {
 	Automation4::LuaWorkspaceDocument const *pending_discard_document = nullptr;
 	std::uint64_t pending_discard_revision = 0;
 	wxStyledTextCtrl *editor = nullptr;
+	wxButton *open_button = nullptr;
 	wxButton *apply = nullptr;
 	wxButton *format = nullptr;
 	wxButton *reload = nullptr;
 	wxStaticText *diagnostics = nullptr;
 	wxTextCtrl *runtime_context = nullptr;
 	wxTextCtrl *generated_output = nullptr;
+	wxNotebook *runtime_tabs = nullptr;
+	wxStyledTextCtrl *execution_source = nullptr;
+	wxStaticText *execution_identity = nullptr;
+	wxListBox *stack_frames = nullptr;
+	wxTextCtrl *debug_variables = nullptr;
+	wxTextCtrl *run_log = nullptr;
+	wxStaticText *run_status = nullptr;
+	wxButton *run_button = nullptr;
+	wxButton *debug_button = nullptr;
+	wxButton *continue_button = nullptr;
+	wxButton *pause_button = nullptr;
+	wxButton *step_in_button = nullptr;
+	wxButton *step_over_button = nullptr;
+	wxButton *step_out_button = nullptr;
+	wxButton *stop_button = nullptr;
+	wxButton *detach_button = nullptr;
+	wxTimer *debug_timer = nullptr;
+	std::shared_ptr<Automation4::LuaWorkspaceRunRequest> active_run_request;
+	std::shared_ptr<Automation4::AutomationDebugSession> active_session;
+	std::shared_ptr<Automation4::LuaWorkspaceSourceRegistry> last_sources;
+	std::optional<Automation4::AutomationDebugStateSnapshot> last_debug_snapshot;
+	std::uint64_t next_run_id = 0;
+	std::size_t last_debug_version = 0;
+	bool close_after_run = false;
 	std::shared_ptr<void> observation_lifetime = std::make_shared<char>();
 	std::shared_ptr<LuaWorkspaceRuntimeObservation> active_observation;
 	std::uint64_t invocation_sequence = 0;
 	bool loading = false;
 	std::optional<Automation4::LuaSourceDiagnostic> source_diagnostic;
+	std::optional<std::uint64_t> no_macro_revision;
 	std::string action_message;
 	Automation4::LuaWorkspaceDocumentResult target_state;
 	agi::signal::Connection commit_connection;
@@ -56,6 +87,12 @@ class LuaWorkspaceFrame : public wxFrame {
 	bool FinishOpen(std::unique_ptr<Automation4::LuaWorkspaceDocument> candidate, Automation4::LuaWorkspaceDocumentResult const& result);
 	void ClearRuntimeObservation();
 	void RenderRuntimeObservation(std::uint64_t sequence, std::weak_ptr<LuaWorkspaceRuntimeObservation> const& observation);
+	void StartRun(bool debug);
+	void UpdateRunControls();
+	void PollDebugState();
+	void ShowSelectedFrame();
+	void ToggleBreakpoint(int line);
+	std::vector<Automation4::AutomationDebugBreakpoint> CaptureBreakpoints(std::string const& source_uri) const;
 
 	public:
 	explicit LuaWorkspaceFrame(agi::Context *context);
@@ -68,4 +105,8 @@ class LuaWorkspaceFrame : public wxFrame {
 	bool IsDirty() const;
 	void DetachContext();
 	std::shared_ptr<Automation4::AutomationInvocationObserver> BeginInvocationObservation(Automation4::AutomationInvocation const& invocation);
+	std::shared_ptr<Automation4::LuaWorkspaceRunRequest const> GetWorkspaceRunRequest(Automation4::AutomationInvocation const& invocation) const;
+	std::shared_ptr<Automation4::LuaWorkspaceRunRequest const> GetActiveRunRequest() const;
+	bool IsInvocationRunning() const;
+	void ReportRunProgress(std::uint64_t invocation_id, std::string const& text);
 };

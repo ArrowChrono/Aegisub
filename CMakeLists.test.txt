@@ -33,6 +33,29 @@ if(BUILD_TESTING)
     )
 endif()
 
+add_executable(lua-workspace-virtual-source-e2e EXCLUDE_FROM_ALL
+    tests/gui-automation/lua-workspace/virtual-source-e2e.cpp
+    src/automation/automation_lua_debug_backend.cpp
+    src/auto4_lua_assfile.cpp
+    src/compat.cpp
+)
+target_compile_features(lua-workspace-virtual-source-e2e PRIVATE cxx_std_20)
+target_link_libraries(lua-workspace-virtual-source-e2e PRIVATE
+    aegisub_core aegisub_features luajit ${wxWidgets_LIBRARIES})
+aegisub_enable_wx_utf8_guard(lua-workspace-virtual-source-e2e)
+if(BUILD_TESTING)
+    add_test(NAME lua_workspace_virtual_sources
+        COMMAND lua-workspace-virtual-source-e2e
+            tests/gui-automation/lua-workspace/fixtures
+            "${PROJECT_BINARY_DIR}/artifacts/lua-workspace/virtual-sources"
+    )
+    set_tests_properties(lua_workspace_virtual_sources PROPERTIES
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        TIMEOUT 60
+        LABELS "e2e;lua-workspace"
+    )
+endif()
+
 find_package(GTest)
 if(GTEST_FOUND)
     set(AEGISUB_GTEST_SOURCES

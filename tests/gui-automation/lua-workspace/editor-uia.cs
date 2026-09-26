@@ -136,12 +136,15 @@ static int Run(string[] args)
     var mutationFixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "metadata-mutations.lua");
     var luaFixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "editor-file.lua");
     var driver = Path.Combine("tests", "gui-automation", "lua-workspace", "editor-uia.cs");
+    var clipboardStaSource = Path.Combine("tests", "gui-automation", "driver", "ClipboardSta.cs");
     var startedUtc = DateTimeOffset.UtcNow;
     var exeHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(exe)));
     var fixtureHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(fixture)));
     var mutationFixtureHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(mutationFixture)));
     var luaFixtureHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(luaFixture)));
     var driverHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(driver)));
+    var clipboardStaSourceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(clipboardStaSource)));
+    var executedDriverLibraryHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(typeof(UiaDriver).Assembly.Location)));
     var executedDriver = Assembly.GetEntryAssembly()?.Location ?? throw new InvalidOperationException("Executed driver assembly is unavailable");
     var executedDriverHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(executedDriver)));
     DateTimeOffset? finishedUtc = null;
@@ -675,6 +678,8 @@ static int Run(string[] args)
         LuaFixture = luaFixture.Replace('\\', '/'),
         LuaFixtureSha256 = luaFixtureHash,
         DriverSha256 = driverHash,
+        ClipboardStaSourceSha256 = clipboardStaSourceHash,
+        ExecutedDriverLibrarySha256 = executedDriverLibraryHash,
         ExecutedDriverSha256 = executedDriverHash,
         ExitStatus = exitStatus,
         Steps = results
@@ -745,22 +750,67 @@ static AutomationElement? FindNamed(AutomationElement root, string name)
 {
     for (var attempt = 0; attempt < 2; ++attempt)
     {
+        if (name == "Lua source")
+        {
+            var source = FindLuaSourceEditor(root);
+            if (source is not null) return source;
+            Thread.Sleep(50);
+            continue;
+        }
         var elements = root.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().ToArray();
-        AutomationElement? stc = null;
         foreach (var element in elements)
         {
             try
             {
                 var current = element.Current;
                 if (string.Equals(current.Name, name, StringComparison.OrdinalIgnoreCase)) return element;
-                if (name == "Lua source" && current.ControlType == ControlType.Pane && current.Name == "stcwindow") stc = element;
             }
             catch (ElementNotAvailableException) { }
         }
-        if (stc is not null) return stc;
         Thread.Sleep(50);
     }
     return null;
+}
+
+static bool IsStyledTextPane(AutomationElement element)
+{
+    var current = element.Current;
+    return current.ControlType == ControlType.Pane && current.ClassName == "wxWindow"
+        && current.NativeWindowHandle != 0 && current.ProcessId != 0
+        && (current.Name == "stcwindow" || element.TryGetCurrentPattern(ScrollPattern.Pattern, out _));
+}
+
+static AutomationElement? FindLuaSourceEditor(AutomationElement workspace)
+{
+    var processId = workspace.Current.ProcessId;
+    var handles = new Dictionary<int, AutomationElement>();
+    foreach (AutomationElement item in workspace.FindAll(TreeScope.Descendants, Condition.TrueCondition))
+    {
+        try
+        {
+            if (!IsStyledTextPane(item) || item.Current.ProcessId != processId || item.Current.IsOffscreen)
+                continue;
+            var parent = TreeWalker.ControlViewWalker.GetParent(item);
+            var underNotebook = false;
+            while (parent is not null)
+            {
+                var current = parent.Current;
+                if (current.ControlType == ControlType.Tab)
+                {
+                    underNotebook = true;
+                    break;
+                }
+                if (current.NativeWindowHandle == workspace.Current.NativeWindowHandle)
+                    break;
+                parent = TreeWalker.ControlViewWalker.GetParent(parent);
+            }
+            if (!underNotebook)
+                handles.TryAdd(item.Current.NativeWindowHandle, item);
+        }
+        catch (ElementNotAvailableException) { }
+    }
+    Ensure(handles.Count <= 1, $"Workspace exposes {handles.Count} visible Lua source STC controls outside its notebook");
+    return handles.Count == 1 ? handles.Values.Single() : null;
 }
 
 static void InvokeButton(AutomationElement root, string name)
@@ -960,12 +1010,14 @@ static void InvokeMenu(AutomationElement main, Process process, string menuName,
 
 static string ReadEditor(AutomationElement editor)
 {
-    if (editor.TryGetCurrentPattern(ValuePattern.Pattern, out var value))
-        return ((ValuePattern)value).Current.Value;
     var hwnd = new nint(editor.Current.NativeWindowHandle);
     Ensure(hwnd != 0, "Editor has no UIA value or native window");
-    if (!string.Equals(editor.Current.Name, "stcwindow", StringComparison.OrdinalIgnoreCase))
+    if (!IsStyledTextPane(editor))
+    {
+        if (editor.TryGetCurrentPattern(ValuePattern.Pattern, out var value))
+            return ((ValuePattern)value).Current.Value;
         return NativeMessage.GetWindowText(hwnd);
+    }
     var root = editor;
     while (TreeWalker.ControlViewWalker.GetParent(root) is { } parent && parent.Current.ControlType != ControlType.Window)
         root = parent;
@@ -988,6 +1040,11 @@ static string ReadEditor(AutomationElement editor)
 
 static void WriteEditor(AutomationElement editor, string text, Process host)
 {
+    if (IsStyledTextPane(editor))
+    {
+        GuardedKeyboard.ReplaceWithClipboard(editor, host, text);
+        return;
+    }
     if (editor.TryGetCurrentPattern(ValuePattern.Pattern, out var value) && !((ValuePattern)value).Current.IsReadOnly)
     {
         ((ValuePattern)value).SetValue(text);
@@ -995,12 +1052,7 @@ static void WriteEditor(AutomationElement editor, string text, Process host)
     }
     var hwnd = new nint(editor.Current.NativeWindowHandle);
     Ensure(hwnd != 0, "Editor cannot be changed via UIA or native HWND");
-    if (!string.Equals(editor.Current.Name, "stcwindow", StringComparison.OrdinalIgnoreCase))
-    {
-        Ensure(NativeMessage.TrySetWindowText(hwnd, text), "WM_SETTEXT is unsupported by this edit control");
-        return;
-    }
-    GuardedKeyboard.ReplaceWithClipboard(editor, host, text);
+    Ensure(NativeMessage.TrySetWindowText(hwnd, text), "WM_SETTEXT is unsupported by this edit control");
 }
 
 static void RequestClose(AutomationElement window)
@@ -1097,21 +1149,7 @@ static class ClipboardReceipt
 static class ClipboardSafety
 {
     public static T OnSta<T>(Func<T> operation)
-    {
-        T? result = default;
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try { result = operation(); }
-            catch (Exception error) { failure = error; }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.IsBackground = true;
-        thread.Start();
-        if (!thread.Join(TimeSpan.FromSeconds(5))) throw new TimeoutException("STA clipboard operation exceeded five seconds");
-        if (failure is not null) throw new InvalidOperationException("STA clipboard operation failed", failure);
-        return result!;
-    }
+        => ClipboardSta.Invoke(operation);
 
     public static string ReadText() => OnSta(() => Clipboard.GetText());
     public static uint SetText(string text) => OnSta(() =>

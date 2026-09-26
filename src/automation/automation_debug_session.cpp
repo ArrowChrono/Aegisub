@@ -640,6 +640,18 @@ AutomationDebugTarget AutomationDebugSession::GetTarget() const
 	return target;
 }
 
+void AutomationDebugSession::SetSourceRegistry(std::shared_ptr<LuaWorkspaceSourceRegistry> registry)
+{
+	std::scoped_lock lock(mutex);
+	source_registry = std::move(registry);
+}
+
+std::shared_ptr<LuaWorkspaceSourceRegistry> AutomationDebugSession::GetSourceRegistry() const
+{
+	std::scoped_lock lock(mutex);
+	return source_registry;
+}
+
 void AutomationDebugSession::SetBreakpoints(std::vector<AutomationDebugBreakpoint> values)
 {
 	std::lock_guard<std::mutex> lock(mutex);

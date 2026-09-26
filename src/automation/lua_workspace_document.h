@@ -64,6 +64,9 @@ class LuaWorkspaceDocument {
 	std::string const& GetSource() const { return source; }
 	std::string const& GetDisplayName() const { return display_name; }
 	std::string const& GetSourceIdentity() const { return source_identity; }
+	std::uint64_t GetDocumentGeneration() const { return document_generation; }
+	int GetDialogueId() const { return dialogue_id; }
+	agi::fs::path const& GetFilename() const { return filename; }
 	std::uint64_t GetRevision() const { return revision; }
 	bool IsDirty() const { return source != clean_source; }
 	void SetSource(std::string value);

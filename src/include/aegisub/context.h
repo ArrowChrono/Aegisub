@@ -137,6 +137,7 @@ struct Context {
 	std::shared_ptr<AudioPlayerFactoryService> audioPlayerFactoryService;
 	std::shared_ptr<Automation4::AutomationBackgroundScriptRunnerFactory> automationBackgroundScriptRunnerFactory;
 	std::unique_ptr<ContextUiState> ui;
+	bool lua_workspace_invocation_active = false;
 
 	Context();
 	~Context();

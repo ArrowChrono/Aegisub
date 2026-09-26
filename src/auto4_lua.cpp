@@ -45,6 +45,9 @@
 #include "automation/automation_live_host.h"
 #include "automation/automation_lua_debug_backend.h"
 #include "automation/automation_lua_runtime.h"
+#include "automation/lua_workspace_run.h"
+#include "automation/lua_source_tools.h"
+#include "automation/karaoke_line_classifier.h"
 #include "async_video_provider.h"
 #include "auto4_lua_factory.h"
 #include "audio_controller.h"
@@ -77,9 +80,15 @@
 #include <libaegisub/scope_exit.h>
 #include <libaegisub/string_utils.h>
 
+extern "C" {
+#include <luajit.h>
+}
+
 #include <algorithm>
 #include <cassert>
 #include <exception>
+#include <map>
+#include <set>
 #include <unordered_set>
 #include <wx/clipbrd.h>
 #include <wx/log.h>
@@ -346,6 +355,11 @@ namespace {
 
 	int observed_stack_trace(lua_State *L) {
 		auto *cancelled = static_cast<bool *>(lua_touserdata(L, lua_upvalueindex(1)));
+		if (LuaIsWorkspaceCancellation(L, 1)) {
+			*cancelled = true;
+			lua_pushnil(L);
+			return 1;
+		}
 		if (lua_isnil(L, 1)) {
 			lua_Debug frame;
 			for (int level = 1; lua_getstack(L, level, &frame); ++level) {
@@ -365,6 +379,20 @@ namespace {
 	{
 		LuaSetAutomationTemplateDebugContext(L, lua_gettop(L) >= 1 ? 1 : 0);
 		return 0;
+	}
+
+	int lua_register_workspace_source(lua_State *L) {
+		auto request = LuaGetWorkspaceRunRequest(L);
+		if (!request)
+			return 0;
+		auto identity = check_string(L, 1);
+		auto text = check_string(L, 2);
+		auto source = request->sources->Register({.uri = MakeLuaWorkspaceSourceUri(request->invocation_id, identity, 0),
+												  .source_identity = identity,
+												  .display_name = "Template expression",
+												  .text = std::move(text)});
+		push_value(L, "=" + source->uri);
+		return 1;
 	}
 
 	int lua_is_debug_template_enabled(lua_State *L)
@@ -561,13 +589,15 @@ namespace {
 	/// @throws agi::UserCancelException if the function fails to run to completion (either due to cancelling or errors)
 	void LuaThreadedCall(lua_State *L, int nargs, int nresults, BackgroundScriptRunner& bsr, AutomationInvocation const& invocation, AutomationInvocationOutcome *outcome = nullptr);
 
+	class LuaScript;
 	class LuaCommand final : public cmd::Command, private LuaFeature {
 		std::string cmd_name;
 		wxString display;
 		wxString help;
 		int cmd_type;
+		LuaScript *owner;
 
-	public:
+		public:
 		LuaCommand(lua_State *L);
 		~LuaCommand();
 
@@ -605,6 +635,11 @@ namespace {
 		AutomationRuntimeTraceSink *runtime_trace_sink = nullptr;
 		AutomationDebugSession *debug_session = nullptr;
 		std::unique_ptr<AutomationLuaDebugBackend> debug_backend;
+		std::map<std::string, LuaWorkspaceSource, std::less<>> compiled_sources;
+		std::set<std::string, std::less<>> ambiguous_sources;
+		bool macro_running = false;
+		int jit_status_ref = LUA_NOREF;
+		void RecordCompiledSource(agi::fs::path const& filename, std::string_view text);
 
 		std::string name;
 		std::string description;
@@ -640,8 +675,12 @@ namespace {
 		{
 			return automation_host && automation_host_identity == context;
 		}
-		AutomationDebugBackend *GetDebugBackend() const { return debug_backend.get(); }
+		[[nodiscard]] AutomationLuaDebugBackend *GetDebugBackend() const { return debug_backend.get(); }
 		AutomationDebugSession *GetDebugSession() const { return debug_session; }
+		void PrepareWorkspaceSources(LuaWorkspaceRunRequest const& request);
+		[[nodiscard]] bool IsMacroRunning() const { return macro_running; }
+		void SetMacroRunning(bool value) { macro_running = value; }
+		[[nodiscard]] bool IsJitEnabled() const;
 
 		// Script implementation
 		void Reload() override { Create(); }
@@ -737,6 +776,7 @@ namespace {
 			return;
 		}
 		debug_backend = agi::make_unique<AutomationLuaDebugBackend>(L, GetFilename());
+		SetScriptSourceObserver(L, [this](agi::fs::path const& filename, std::string_view text) { RecordCompiledSource(filename, text); });
 		if (debug_session)
 			debug_backend->SetSession(debug_session);
 
@@ -749,6 +789,10 @@ namespace {
 
 		// register standard libs
 		preload_modules(L);
+		lua_getglobal(L, "jit");
+		lua_getfield(L, -1, "status");
+		jit_status_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+		lua_pop(L, 1);
 		stackcheck.check_stack(0);
 
 		// dofile and loadfile are replaced with include
@@ -801,6 +845,7 @@ namespace {
 		set_field<cancel_script>(L, "cancel");
 		set_field<lua_set_debug_template_context>(L, "__set_debug_template_context");
 		set_field<lua_is_debug_template_enabled>(L, "__is_debug_template_enabled");
+		set_field<lua_register_workspace_source>(L, "__register_workspace_source");
 		set_field(L, "lua_automation_version", 4);
 		set_field<clipboard_init>(L, "__init_clipboard");
 		set_field<get_file_name>(L, "file_name");
@@ -885,6 +930,64 @@ namespace {
 
 		lua_close(L);
 		L = nullptr;
+		jit_status_ref = LUA_NOREF;
+		compiled_sources.clear();
+		ambiguous_sources.clear();
+	}
+
+	bool LuaScript::IsJitEnabled() const {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, jit_status_ref);
+		if (lua_pcall(L, 0, 1, 0) != 0) {
+			auto message = get_string_or_default(L, -1);
+			lua_pop(L, 1);
+			throw AutomationError("Could not read LuaJIT status: " + message);
+		}
+		bool valid = lua_isboolean(L, -1);
+		bool enabled = lua_toboolean(L, -1) != 0;
+		lua_pop(L, 1);
+		if (!valid)
+			throw AutomationError("LuaJIT status did not return a boolean");
+		return enabled;
+	}
+
+	void LuaScript::RecordCompiledSource(agi::fs::path const& filename, std::string_view text) {
+		auto uri = NormalizeAutomationDebugSource(agi::fs::PathToString(filename));
+		auto [found, inserted] = compiled_sources.try_emplace(uri, LuaWorkspaceSource{
+																	   .uri = uri,
+																	   .source_identity = uri,
+																	   .display_name = agi::fs::PathToString(filename.filename()),
+																	   .text = std::string(text)});
+		if (!inserted && found->second.text != text)
+			ambiguous_sources.insert(uri);
+		if (auto request = LuaGetWorkspaceRunRequest(L)) {
+			if (ambiguous_sources.contains(uri))
+				throw AutomationError("Workspace cannot identify different compiled revisions of the same Lua file; reload the script before running");
+			if (!text.empty() && static_cast<unsigned char>(text.front()) == 0x1b)
+				throw AutomationError("Workspace cannot display source for a binary Lua chunk");
+			if (!request->sources->Find(uri))
+				request->sources->Register(found->second);
+		}
+	}
+
+	void LuaScript::PrepareWorkspaceSources(LuaWorkspaceRunRequest const& request) {
+		if (!ambiguous_sources.empty())
+			throw AutomationError("Workspace cannot identify different compiled revisions of the same Lua file; reload the script before running");
+		if (request.file_source && request.source_override)
+			throw AutomationError("Workspace run cannot override a template and select a Lua file at the same time");
+		std::string selected_uri;
+		if (request.file_source) {
+			selected_uri = NormalizeAutomationDebugSource(agi::fs::PathToString(agi::fs::Canonicalize(agi::fs::PathFromString(request.file_source->uri))));
+			auto selected = compiled_sources.find(selected_uri);
+			if (selected == compiled_sources.end() || selected->second.text != request.file_source->text)
+				throw AutomationError("The selected Lua source differs from the compiled script; save and reload it before running");
+		}
+		for (auto const& [uri, recorded] : compiled_sources) {
+			if (!recorded.text.empty() && static_cast<unsigned char>(recorded.text.front()) == 0x1b)
+				throw AutomationError("Workspace cannot display source for a binary Lua chunk");
+			auto source = request.file_source && uri == selected_uri ? *request.file_source : recorded;
+			source.uri = uri;
+			request.sources->Register(std::move(source));
+		}
 	}
 
 	std::vector<ExportFilter*> LuaScript::GetFilters() const
@@ -1037,6 +1140,8 @@ namespace {
 
 		if (!config::automation_debug_service || !config::automation_debug_service->IsEnabled())
 			return {};
+		if (config::automation_debug_service->HasLocalSession() && (invocation.kind == AutomationInvocationKind::MacroValidate || invocation.kind == AutomationInvocationKind::MacroIsActive))
+			return {};
 
 		auto session = config::automation_debug_service->PrepareSession({
 			script->GetEngineName(),
@@ -1114,9 +1219,22 @@ namespace {
 		try {
 			bsr.Run([&](ProgressSink *ps) {
 				try {
+					auto *script = LuaScript::GetScriptObject(L);
+					auto workspace_request = LuaGetWorkspaceRunRequest(L);
+					std::optional<bool> original_jit_enabled;
+					auto restore_jit = agi::make_scope_exit([&] {
+						if (original_jit_enabled && luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | (*original_jit_enabled ? LUAJIT_MODE_ON : LUAJIT_MODE_OFF)) != 1)
+							LOG_E("automation/workspace") << "Could not restore the original LuaJIT engine state";
+					});
+					if (workspace_request) {
+						original_jit_enabled = script->IsJitEnabled();
+						if (luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_FLUSH) != 1 ||
+							luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF) != 1)
+							throw AutomationError("Could not disable LuaJIT for interactive Workspace execution");
+					}
 					LuaProgressSink lps(L, ps, invocation);
 					ScopedAutomationDebugInvocation debug_invocation(
-						LuaScript::GetScriptObject(L)->GetDebugBackend(),
+						script->GetDebugBackend(),
 						invocation);
 					bool cancelled = false;
 					if (outcome) {
@@ -1127,7 +1245,11 @@ namespace {
 						lua_pushcclosure(L, add_stack_trace, 0);
 					lua_insert(L, -nargs - 2);
 
+					auto *backend = script->GetDebugBackend();
+					backend->SetWorkspaceRunRequest(workspace_request);
+					auto clear_workspace_hook = agi::make_scope_exit([&] { backend->SetWorkspaceRunRequest({}); });
 					int status = lua_pcall(L, nargs, nresults, -nargs - 2);
+					backend->SetWorkspaceRunRequest({});
 					if (status) {
 						failed = true;
 						result = status == LUA_ERRRUN && cancelled ? AutomationInvocationOutcome::Cancelled : AutomationInvocationOutcome::Failed;
@@ -1222,11 +1344,7 @@ namespace {
 	}
 
 	LuaCommand::LuaCommand(lua_State *L)
-	: LuaFeature(L)
-	, display(check_wxstring(L, 1))
-	, help(get_wxstring(L, 2))
-	, cmd_type(cmd::COMMAND_NORMAL)
-	{
+		: LuaFeature(L), display(check_wxstring(L, 1)), help(get_wxstring(L, 2)), cmd_type(cmd::COMMAND_NORMAL), owner(LuaScript::GetScriptObject(L)) {
 		lua_getfield(L, LUA_REGISTRYINDEX, "filename");
 		cmd_name = agi::format("automation/lua/%s/%s", check_string(L, -1), check_string(L, 1));
 
@@ -1259,7 +1377,6 @@ namespace {
 
 		// store the table in the registry
 		RegisterFeature();
-
 	}
 
 	LuaCommand::~LuaCommand()
@@ -1283,6 +1400,8 @@ namespace {
 
 	bool LuaCommand::Validate(const agi::Context *c)
 	{
+		if (c->lua_workspace_invocation_active || owner->IsMacroRunning())
+			return false;
 		if (!(cmd_type & cmd::COMMAND_VALIDATE)) return true;
 		auto core = c->GetCore();
 		auto invocation = MakeMacroValidateInvocation(cmd_name);
@@ -1337,18 +1456,67 @@ namespace {
 
 	void LuaCommand::operator()(agi::Context *c)
 	{
+		if (owner->IsMacroRunning())
+			throw AutomationError("This Lua macro is already running");
+		auto invocation = MakeMacroRunInvocation(cmd_name);
+		std::shared_ptr<LuaWorkspaceRunRequest const> workspace_request;
+		if (c->lua_workspace_invocation_active) {
+			workspace_request = CreateAutomationLiveHost(c)->Ui().GetWorkspaceRunRequest(invocation);
+			if (!workspace_request || workspace_request->macro_command != cmd_name)
+				throw AutomationError("Another Lua Workspace invocation is active");
+		}
+		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession() && !workspace_request)
+			throw AutomationError("Another Lua Workspace invocation is active");
+		owner->SetMacroRunning(true);
+		auto clear_running = agi::make_scope_exit([&] { owner->SetMacroRunning(false); });
 		LuaStackcheck stackcheck(L);
 		auto core = c->GetCore();
-		auto invocation = MakeMacroRunInvocation(cmd_name);
 		int original_offset = core.ass->Info.size() + core.ass->Styles.size() + 1;
 		auto original_sel = selected_rows(c);
 		int original_active = 0;
 		if (auto active_line = core.selectionController->GetActiveLine())
 			original_active = active_line->Row + original_offset;
 		auto host = EnsureLuaScriptHost(L, c);
+		if (!workspace_request && host)
+			workspace_request = host->Ui().GetWorkspaceRunRequest(invocation);
+		auto *script = LuaScript::GetScriptObject(L);
+		auto *previous_debug_session = script->GetDebugSession();
+		if (workspace_request) {
+			if (workspace_request->macro_command != cmd_name || !workspace_request->sources || !workspace_request->stop_requested)
+				throw AutomationError("Invalid Lua Workspace invocation request");
+			if (workspace_request->source_override) {
+				auto const& override = *workspace_request->source_override;
+				if (override.document_generation != c->subsController->GetDocumentGeneration())
+					throw AutomationError("The Workspace template belongs to a different subtitle document");
+				bool found = false;
+				for (auto const& line : core.ass->Events)
+					if (line.Id == override.dialogue_id)
+						found = IsKaraokeCodeLine(line.Comment, line.Effect.get());
+				if (!found)
+					throw AutomationError("The Workspace target is no longer a karaoke code line");
+				if (override.source.source_identity != "aegisub://lua/" + std::to_string(override.document_generation) + "/" + std::to_string(override.dialogue_id) ||
+					override.source.uri != MakeLuaWorkspaceSourceUri(workspace_request->invocation_id, override.source.source_identity, override.source.revision))
+					throw AutomationError("The Workspace source identity does not match its subtitle binding");
+				if (auto diagnostic = ValidateLuaSource(override.source.text))
+					throw AutomationError(diagnostic->message);
+				workspace_request->sources->Register(override.source);
+			}
+			script->PrepareWorkspaceSources(*workspace_request);
+		}
+		auto clear_workspace_request = agi::make_scope_exit([&] {
+			if (workspace_request) {
+				script->GetDebugBackend()->SetWorkspaceRunRequest({});
+				LuaSetWorkspaceRunRequest(L, {});
+				script->SetDebugSession(previous_debug_session);
+			}
+		});
+		if (workspace_request) {
+			LuaSetWorkspaceRunRequest(L, workspace_request);
+			script->SetDebugSession(workspace_request->debug_session.get());
+		}
 		auto observer = host ? host->Ui().BeginInvocationObservation(invocation) : nullptr;
 		ScopedInvocationObservation observation(LuaScript::GetScriptObject(L), observer);
-		auto debug_session = PrepareLuaDebugSession(L, invocation);
+		auto debug_session = workspace_request ? std::shared_ptr<AutomationDebugSession>{} : PrepareLuaDebugSession(L, invocation);
 		auto clear_debug_session = agi::make_scope_exit([&] {
 			FinalizeLuaDebugSession(L, debug_session);
 		});
@@ -1365,13 +1533,24 @@ namespace {
 		push_value(L, original_sel);
 		push_value(L, original_active);
 
-		auto runner = host ? host->Ui().CreateBackgroundScriptRunner(from_wx(StrDisplay(c))) : std::unique_ptr<BackgroundScriptRunner>{};
+		auto runner = host
+						  ? (workspace_request ? host->Ui().CreateWorkspaceBackgroundScriptRunner(workspace_request, from_wx(StrDisplay(c))) : host->Ui().CreateBackgroundScriptRunner(from_wx(StrDisplay(c))))
+						  : std::unique_ptr<BackgroundScriptRunner>{};
 		if (!runner)
 			throw AutomationError("Automation background runner unavailable");
 
 		auto call_outcome = AutomationInvocationOutcome::Failed;
 		try {
-			LuaThreadedCall(L, 3, 2, *runner, invocation, observer ? &call_outcome : nullptr);
+			LuaThreadedCall(L, 3, 2, *runner, invocation, observer || workspace_request ? &call_outcome : nullptr);
+			if (workspace_request && workspace_request->stop_requested->load()) {
+				call_outcome = AutomationInvocationOutcome::Cancelled;
+				lua_pop(L, 2);
+				throw agi::UserCancelException("Cancelled by Lua Workspace");
+			}
+			if (workspace_request && workspace_request->source_override && !subsobj->WorkspaceOverrideApplied()) {
+				lua_pop(L, 2);
+				throw AutomationError("The selected macro did not consume the Workspace template source");
+			}
 		}
 		catch (agi::UserCancelException const&) {
 			observation.SetOutcome(call_outcome);
@@ -1472,6 +1651,8 @@ namespace {
 
 	bool LuaCommand::IsActive(const agi::Context *c)
 	{
+		if (c->lua_workspace_invocation_active || owner->IsMacroRunning())
+			return false;
 		if (!(cmd_type & cmd::COMMAND_TOGGLE)) return false;
 		auto core = c->GetCore();
 		auto invocation = MakeMacroIsActiveInvocation(cmd_name);

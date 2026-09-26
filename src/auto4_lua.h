@@ -82,6 +82,7 @@ namespace Automation4 {
 		/// Script-owned operations are no longer allowed once processing
 		/// completes, even though Lua userdata may still keep the object alive.
 		bool script_reference_active = true;
+		bool workspace_override_applied = false;
 
 		/// Set of subtitle lines being modified; initially a shallow copy of ass->Line
 		std::vector<AssEntry*> lines;
@@ -123,6 +124,8 @@ namespace Automation4 {
 
 		int LuaParseKaraokeData(lua_State *L);
 		int LuaGetScriptResolution(lua_State *L);
+		int LuaWorkspaceSourceIdentity(lua_State *L);
+		int LuaWorkspaceCodeSource(lua_State *L);
 
 		void LuaSetUndoPoint(lua_State *L);
 	public:
@@ -138,6 +141,7 @@ namespace Automation4 {
 		bool DebugCanSetUndo() const { return can_set_undo; }
 		bool DebugHasPendingModifications() const { return modification_type != 0; }
 		bool DebugTryPushLineAsLua(lua_State *L, size_t automation_row);
+		[[nodiscard]] bool WorkspaceOverrideApplied() const { return workspace_override_applied; }
 
 		/// makes a Lua representation of AssEntry and places on the top of the stack
 		void AssEntryToLua(lua_State *L, size_t idx);
