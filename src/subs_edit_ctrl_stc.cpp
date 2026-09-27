@@ -39,6 +39,7 @@
 #include "include/aegisub/spellchecker.h"
 #include "perf_trace.h"
 #include "selection_controller.h"
+#include "automation/lua_source_tools.h"
 #include "stc_compat.h"
 #include "text_selection_controller.h"
 #include "thesaurus.h"
@@ -62,9 +63,12 @@
 #include <utility>
 
 #include <wx/clipbrd.h>
+#include <wx/dataobj.h>
 #include <wx/dnd.h>
 #include <wx/intl.h>
+#include <wx/log.h>
 #include <wx/menu.h>
+#include <wx/msgdlg.h>
 #include <wx/settings.h>
 
 #ifdef __WXMSW__
@@ -329,6 +333,19 @@ public:
 	explicit DropTarget(SubsStyledTextEditCtrl *ctrl) : ctrl(ctrl) { }
 
 	bool OnDropText(wxCoord x, wxCoord y, wxString const& data) override {
+		if (ctrl->code_mode && (data.Find('\r') != wxNOT_FOUND || data.Find('\n') != wxNOT_FOUND)) {
+			ctrl->CancelTextDragPreview();
+			int const position = ctrl->PositionFromPoint(wxPoint(x, y));
+			if (position < 0)
+				return false;
+			int const anchor = ctrl->GetAnchor(), caret = ctrl->GetCurrentPos();
+			ctrl->SetSelection(position, position);
+			if (ctrl->InsertCodeText(from_wx(data)))
+				return true;
+			ctrl->SetAnchor(anchor);
+			ctrl->SetCurrentPos(caret);
+			return false;
+		}
 		return ctrl->DoDropText(x, y, data);
 	}
 
@@ -440,9 +457,12 @@ SubsStyledTextEditCtrl::SubsStyledTextEditCtrl(wxWindow* parent, wxSize wsize, l
 	Bind(wxEVT_STC_DRAG_OVER, &SubsStyledTextEditCtrl::OnDragOver, this);
 	Bind(wxEVT_STC_DO_DROP, &SubsStyledTextEditCtrl::OnDoDrop, this);
 	Bind(wxEVT_STC_STYLENEEDED, [=](wxStyledTextEvent&) {
+		if (code_mode)
+			return;
 		{
 			std::string text = GetTextRaw().data();
-			if (text == line_text) return;
+			if (text == line_text)
+				return;
 			repeat_tag_name_bounds = {-1, 0};
 			line_text = move(text);
 		}
@@ -472,7 +492,11 @@ SubsStyledTextEditCtrl::SubsStyledTextEditCtrl(wxWindow* parent, wxSize wsize, l
 	Subscribe("Karaoke Variable");
 
 	OPT_SUB("Colour/Subtitle/Background", &SubsStyledTextEditCtrl::SetStyles, this);
-	OPT_SUB("Subtitle/Highlight/Syntax", &SubsStyledTextEditCtrl::UpdateStyle, this);
+	OPT_SUB("Subtitle/Highlight/Syntax", [this](agi::OptionValue const&) {
+		if (code_mode)
+			SetStyles();
+		UpdateStyle();
+	});
 	OPT_SUB("Subtitle/Highlight/Color Swatches", &SubsStyledTextEditCtrl::UpdateStyle, this);
 	OPT_SUB("App/Call Tips", &SubsStyledTextEditCtrl::UpdateCallTip, this);
 
@@ -496,6 +520,35 @@ SubsStyledTextEditCtrl::SubsStyledTextEditCtrl(wxWindow* parent, wxSize wsize, l
 }
 
 SubsStyledTextEditCtrl::~SubsStyledTextEditCtrl() {
+}
+
+void SubsStyledTextEditCtrl::SetCodeMode(bool enabled) {
+	if (code_mode == enabled)
+		return;
+	CancelTextDragPreview();
+	code_mode = enabled;
+	style_context_valid = false;
+	tokenized_line.clear();
+	repeat_tag_name_bounds = {-1, 0};
+	CallTipCancel();
+	calltip_text.clear();
+	calltip_position = static_cast<size_t>(-1);
+	cursor_pos = -1;
+	marker_calltip_active = false;
+	SetIndicatorCurrent(0);
+	IndicatorClearRange(0, GetTextLength());
+	ClearCharacterMarkerIndicators();
+	character_marker_spans.clear();
+	ApplyCharacterMarkerSettings();
+	ClearColorSwatchIndicators();
+	color_swatch_spans.clear();
+	BraceHighlight(wxSTC_INVALID_POSITION, wxSTC_INVALID_POSITION);
+	SetLexer(code_mode ? wxSTC_LEX_LUA : wxSTC_LEX_CONTAINER);
+	SetKeyWords(0, to_wx(code_mode ? "and break do else elseif end false for function goto if in local nil not or repeat return then true until while" : ""));
+	SetStyles();
+	line_text = GetTextRaw().data();
+	UpdateStyle();
+	UpdateBraceHighlight();
 }
 
 #ifdef __WXMSW__
@@ -579,6 +632,10 @@ void SubsStyledTextEditCtrl::OnLoseFocus(wxFocusEvent &event) {
 }
 
 void SubsStyledTextEditCtrl::OnChar(wxKeyEvent &event) {
+	if (code_mode) {
+		event.Skip(event.GetKeyCode() != WXK_RETURN);
+		return;
+	}
 	aegisub::subtitle_edit_ops::AutoCloseKey auto_close_key;
 	if (!GetAutoCloseCharacterKey(event, auto_close_key)) {
 		event.Skip();
@@ -603,6 +660,31 @@ void SubsStyledTextEditCtrl::OnChar(wxKeyEvent &event) {
 void SubsStyledTextEditCtrl::OnKeyDown(wxKeyEvent &event) {
 	repeat_tag_name_bounds = {-1, 0};
 	event.Skip();
+	if (code_mode) {
+		if (event.GetKeyCode() == WXK_TAB && !event.CmdDown() && !event.AltDown()) {
+			if (event.ShiftDown())
+				CmdKeyExecute(wxSTC_CMD_BACKTAB);
+			else
+				ReplaceSelection(wxS("\t"));
+			event.Skip(false);
+		}
+		else if ((event.GetKeyCode() == WXK_HOME || event.GetKeyCode() == WXK_END) && !event.CmdDown() && !event.AltDown()) {
+			int const position = event.GetKeyCode() == WXK_HOME ? 0 : GetTextLength();
+			if (event.ShiftDown())
+				SetCurrentPos(position);
+			else
+				SetSelection(position, position);
+			event.Skip(false);
+		}
+		else if ((event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_RIGHT) && event.GetModifiers() == wxMOD_ALT)
+			event.Skip(false);
+		else if (event.GetKeyCode() == WXK_RETURN && event.GetModifiers() == wxMOD_SHIFT) {
+			if (context)
+				cmd::call("automation/lua/open-current-line", context);
+			event.Skip(false);
+		}
+		return;
+	}
 
 	// Smart Home: navigate backward through ASS text blocks.
 	if (event.GetKeyCode() == WXK_HOME && !event.CmdDown() && !event.AltDown()) {
@@ -1014,6 +1096,22 @@ void SubsStyledTextEditCtrl::SetStyles() {
 	SetSyntaxStyle(ss::LINE_BREAK, font, "Line Break", default_background);
 	SetSyntaxStyle(ss::KARAOKE_TEMPLATE, font, "Karaoke Template", default_background);
 	SetSyntaxStyle(ss::KARAOKE_VARIABLE, font, "Karaoke Variable", default_background);
+	if (code_mode) {
+		for (int style = wxSTC_LUA_DEFAULT; style <= wxSTC_LUA_WORD8; ++style) {
+			SetSyntaxStyle(style, font, "Normal", default_background);
+			StyleSetUnderline(style, false);
+		}
+		if (OPT_GET("Subtitle/Highlight/Syntax")->GetBool()) {
+			for (int style : {wxSTC_LUA_COMMENT, wxSTC_LUA_COMMENTLINE, wxSTC_LUA_COMMENTDOC})
+				SetSyntaxStyle(style, font, "Comment", default_background);
+			for (int style : {wxSTC_LUA_STRING, wxSTC_LUA_CHARACTER, wxSTC_LUA_LITERALSTRING})
+				SetSyntaxStyle(style, font, "Karaoke Variable", default_background);
+			SetSyntaxStyle(wxSTC_LUA_WORD, font, "Tags", default_background);
+			SetSyntaxStyle(wxSTC_LUA_NUMBER, font, "Parameters", default_background);
+			SetSyntaxStyle(wxSTC_LUA_OPERATOR, font, "Brackets", default_background);
+			SetSyntaxStyle(wxSTC_LUA_STRINGEOL, font, "Error", default_background);
+		}
+	}
 
 	SetCaretForeground(StyleGetForeground(ss::NORMAL));
 	StyleSetBackground(wxSTC_STYLE_DEFAULT, default_background);
@@ -1069,6 +1167,12 @@ void SubsStyledTextEditCtrl::SetStyles() {
 }
 
 void SubsStyledTextEditCtrl::UpdateStyle() {
+	if (code_mode) {
+		style_context_valid = true;
+		last_template_line = IsTemplateLine(context);
+		Colourise(0, -1);
+		return;
+	}
 	auto const text_bytes = static_cast<int>(std::min(
 		line_text.size(),
 		static_cast<size_t>(std::numeric_limits<int>::max())));
@@ -1155,6 +1259,20 @@ void SubsStyledTextEditCtrl::UpdateStyle() {
 }
 
 void SubsStyledTextEditCtrl::UpdateBraceHighlight() {
+	if (code_mode) {
+		int const position = GetCurrentPos() - 1;
+		int const character = position >= 0 ? GetCharAt(position) : 0;
+		if (character > 0 && std::string_view("()[]{}").find(static_cast<char>(character)) != std::string_view::npos) {
+			int const match = BraceMatch(position);
+			if (match >= 0)
+				BraceHighlight(position, match);
+			else
+				BraceBadLight(position);
+		}
+		else
+			BraceHighlight(wxSTC_INVALID_POSITION, wxSTC_INVALID_POSITION);
+		return;
+	}
 	int const caret = GetCurrentPos();
 	int brace = wxSTC_INVALID_POSITION;
 	if (caret > 0 && IsHighlightableBrace(GetCharAt(caret - 1)) && !IsEscapedOpenBrace(*this, caret - 1))
@@ -1177,6 +1295,8 @@ void SubsStyledTextEditCtrl::UpdateBraceHighlight() {
 }
 
 void SubsStyledTextEditCtrl::UpdateCallTip() {
+	if (code_mode)
+		return;
 	// Marker tooltips own the calltip while active; do not overwrite them.
 	if (marker_calltip_active)
 		return;
@@ -1303,7 +1423,47 @@ void SubsStyledTextEditCtrl::SetTextTo(std::string const& text) {
 #endif
 }
 
+bool SubsStyledTextEditCtrl::InsertCodeText(std::string const& text) {
+	wxCharBuffer const buffer = GetTextRaw();
+	std::string const original(buffer.data(), buffer.length());
+	std::string candidate = original.substr(0, GetSelectionStart()) + text + original.substr(GetSelectionEnd());
+	int caret = GetSelectionStart() + static_cast<int>(text.size());
+	if (candidate.find_first_of("\r\n") != std::string::npos) {
+		auto serialized = Automation4::SerializeLuaSource(candidate);
+		if (!serialized.Succeeded()) {
+			wxMessageBox(to_wx(serialized.diagnostic->message) + _("\n\nOpen the Lua Workspace (Shift+Enter) to edit multiline code."), _("Cannot paste Lua code"), wxOK | wxICON_ERROR, this);
+			return false;
+		}
+		candidate = std::move(serialized.source);
+		caret = static_cast<int>(candidate.size());
+	}
+	if (candidate != original) {
+		BeginUndoAction();
+		SetTargetRange(0, GetTextLength());
+		ReplaceTargetRaw(candidate.data(), static_cast<int>(candidate.size()));
+		EndUndoAction();
+	}
+	SetSelection(caret, caret);
+	line_text = candidate;
+	UpdateStyle();
+	return true;
+}
+
 void SubsStyledTextEditCtrl::Paste() {
+	if (code_mode) {
+		wxTextDataObject text;
+		auto *clipboard = wxClipboard::Get();
+		wxLogNull disable_logging;
+		bool const opened = clipboard->Open();
+		bool const read = opened && clipboard->GetData(text);
+		if (opened)
+			clipboard->Close();
+		if (read)
+			InsertCodeText(from_wx(text.GetText()));
+		else
+			wxMessageBox(_("Could not read text from the clipboard. The code line was not changed."), _("Cannot paste Lua code"), wxOK | wxICON_ERROR, this);
+		return;
+	}
 	std::string data = GetClipboard();
 
 	agi::util::strings::replace_all_inplace(data, "\r\n", "\\N");
@@ -1333,11 +1493,13 @@ void SubsStyledTextEditCtrl::OnContextMenu(wxContextMenuEvent &event) {
 	else
 		activePos = PositionFromPoint(ScreenToClient(pos));
 
-	currentWordPos = GetBoundsOfWordAtPosition(activePos);
-	currentWord = line_text.substr(currentWordPos.first, currentWordPos.second);
+	if (!code_mode) {
+		currentWordPos = GetBoundsOfWordAtPosition(activePos);
+		currentWord = line_text.substr(currentWordPos.first, currentWordPos.second);
+	}
 
 	wxMenu menu;
-	if (spellchecker) {
+	if (!code_mode && spellchecker) {
 		AddSpellCheckerEntries(menu);
 
 		// Append language list
@@ -1348,7 +1510,8 @@ void SubsStyledTextEditCtrl::OnContextMenu(wxContextMenuEvent &event) {
 		menu.AppendSeparator();
 	}
 
-	AddThesaurusEntries(menu);
+	if (!code_mode)
+		AddThesaurusEntries(menu);
 
 	// Standard actions
 	menu.Append(EDIT_MENU_CUT,_("Cu&t"))->Enable(GetSelectionStart()-GetSelectionEnd() != 0);
@@ -1358,7 +1521,7 @@ void SubsStyledTextEditCtrl::OnContextMenu(wxContextMenuEvent &event) {
 	menu.Append(EDIT_MENU_SELECT_ALL,_("Select &All"));
 
 	// Split
-	if (context) {
+	if (context && !code_mode) {
 		menu.AppendSeparator();
 		menu.Append(EDIT_MENU_SPLIT_PRESERVE, _("Split at cursor (preserve times)"));
 		menu.Append(EDIT_MENU_SPLIT_ESTIMATE, _("Split at cursor (estimate times)"));
@@ -1370,6 +1533,10 @@ void SubsStyledTextEditCtrl::OnContextMenu(wxContextMenuEvent &event) {
 }
 
 void SubsStyledTextEditCtrl::OnDoubleClick(wxStyledTextEvent &evt) {
+	if (code_mode) {
+		evt.Skip();
+		return;
+	}
 	int pos = evt.GetPosition();
 	auto const previous_tag_name_bounds = repeat_tag_name_bounds;
 	repeat_tag_name_bounds = {-1, 0};
@@ -1661,6 +1828,8 @@ void SubsStyledTextEditCtrl::ClearCharacterMarkerIndicators() {
 }
 
 void SubsStyledTextEditCtrl::UpdateCharacterMarkers() {
+	if (code_mode)
+		return;
 	auto const show = ReadCharacterMarkerShowConfig();
 	auto const error = ReadCharacterMarkerErrorConfig();
 	if (!aegisub::CharacterMarkersEnabled(show, error)) {
@@ -1766,6 +1935,10 @@ wxString SubsStyledTextEditCtrl::BuildCharacterMarkerTooltip(aegisub::CharacterM
 }
 
 void SubsStyledTextEditCtrl::OnCharacterMarkerDwellStart(wxStyledTextEvent& event) {
+	if (code_mode) {
+		event.Skip();
+		return;
+	}
 	int const pos = event.GetPosition();
 	if (pos < 0) {
 		event.Skip();
@@ -1815,7 +1988,7 @@ void SubsStyledTextEditCtrl::UpdateColorSwatches() {
 	ClearColorSwatchIndicators();
 	color_swatch_spans.clear();
 
-	if (!OPT_GET("Subtitle/Highlight/Color Swatches")->GetBool())
+	if (code_mode || !OPT_GET("Subtitle/Highlight/Color Swatches")->GetBool())
 		return;
 
 	color_swatch_spans = aegisub::subtitle_edit_ops::FindColorSpans(line_text, tokenized_line);

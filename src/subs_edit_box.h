@@ -115,6 +115,10 @@ class SubsEditBox final : public wxPanel {
 	wxRadioButton *by_frame;
 	wxTextCtrl *char_count;
 	wxCheckBox *split_box;
+#ifdef WITH_WXSTC
+	wxButton *lua_workspace_button;
+#endif
+	bool code_mode = false;
 	SubtitleTimeDisplayMode time_display_mode = SubtitleTimeDisplayMode::Ass;
 	SubtitleTimeDisplayMode non_frame_display_mode = SubtitleTimeDisplayMode::Ass;
 	SubtitleTimeDisplayMode file_default_display_mode = SubtitleTimeDisplayMode::Ass;
@@ -223,6 +227,7 @@ class SubsEditBox final : public wxPanel {
 	void OnCommit(int type, AssDialogue const* changed);
 
 	void UpdateFields(int type, bool repopulate_lists);
+	void UpdateCodeMode();
 
 	/// Regenerate a dropdown list with the unique values of a dialogue field
 	void PopulateList(wxComboBox *combo, boost::flyweight<std::string> AssDialogue::*field);

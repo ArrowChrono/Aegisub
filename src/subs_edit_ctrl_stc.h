@@ -73,6 +73,8 @@ class SubsStyledTextEditCtrl final : public wxStyledTextCtrl {
 
 	/// Project context, for splitting lines
 	agi::Context *context;
+	bool code_mode = false;
+	bool InsertCodeText(std::string const& text);
 
 	/// The word right-clicked on, used for spellchecker replacing
 	std::string currentWord;
@@ -211,6 +213,7 @@ public:
 	~SubsStyledTextEditCtrl();
 
 	void SetTextTo(std::string const& text);
+	void SetCodeMode(bool enabled);
 	void Paste() override;
 
 	std::pair<int, int> GetBoundsOfWordAtPosition(int pos);

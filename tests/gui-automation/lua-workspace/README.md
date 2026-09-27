@@ -82,3 +82,26 @@ ctest --test-dir build-dir -C RelWithDebInfo -R '^lua_workspace_virtual_sources$
 ```
 
 The supervising process has a finite 240-second limit and per-operation deadlines. As with S2/S3, it requires Windows, .NET 10, the current English application labels, an unlocked interactive desktop, and no concurrent keyboard, mouse, clipboard, or other UI automation input. It snapshots the existing clipboard without writing user contents to artifacts; after the worker and verified GUI host have stopped, it restores only when the clipboard sequence still matches a receipt from its own test transaction. An external or unreceipted change is preserved and fails the run.
+
+## S5 coding-line edit box E2E (E17)
+
+The main subtitle edit box remains a single physical ASS line, not a second multiline Workspace buffer. A comment whose Effect begins with the word `code` uses Lua highlighting when STC is enabled. It excludes ASS spelling, tag manipulation, character markers, and color swatches. Template lines and non-comment dialogue lines retain their normal ASS behavior. `Shift+Enter` on a code line opens the existing Lua Workspace instead of inserting an ASS `\N`; the code-only convenience button provides the same entry point. The existing `Subtitle/Use STC=false` preference keeps the plain editor, with the safe paste and Workspace entry behavior but without Lua highlighting.
+
+Single-line code paste is literal. Multiline paste serializes the complete replacement candidate through the existing Lua source serializer before making any edit. An invalid candidate produces a diagnostic directing the user to Workspace and leaves the source unchanged. Incomplete multiline editing therefore belongs in Workspace rather than being silently flattened or translated to ASS escapes. Code-mode character input also blocks raw newline characters that reach the control after hotkey handling; E17 checks Ctrl+Enter against an exact unchanged source in both modes.
+
+`coding-editbox-uia.cs` runs the same twelve-step E17 scenario separately for STC and plain controls. It uses five events with distinct timing, layer, actor, margins, effect, and comment state. Its complex paste contains Unicode, a multiline long string, a comment, and a loop. It saves the physical ASS, rejects an invalid multiline replacement atomically, tests literal paste and Undo, opens Workspace through the real shortcut, and switches repeatedly between code and ordinary subtitles. STC-specific steps exercise Tab, brace input without ASS auto-close, disabled ASS block movement, and context-menu mode separation; ordinary subtitle editing must still move an ASS block and convert multiline paste and `Shift+Enter` to exact literal `\N` text. Comment and Effect edits must reclassify an unchanged source immediately.
+
+The final save compares all five events' physical fields against independent fixture expectations. A separate bounded headless invocation executes the saved CodeA Lua and requires the result `漢字\nsecond:10`, verifies every remaining event, and confirms that verification itself did not mutate the saved events. Screenshots are retained for parent review of Lua/ASS highlighting; compilation and screenshots alone do not establish E17 completion.
+
+Ordinary-text Undo retains each control's existing grouping contract. STC starts a new main undo group on its native action marker; the plain editor coalesces consecutive, unsaved text edits. E17 keeps the consecutive paste/Shift+Enter/Undo scenario in both modes, checks the exact mode-specific snapshot, redoes the complete text, and undoes it again. It records these values in `ordinary-undo.json` rather than assuming STC granularity for the plain editor. Navigation input uses standard extended-key flags, empty Effect fields are checked after their native placeholder clears on focus, and Effect changes use real keyboard input rather than UIA value assignment that can bypass combo-box edit notifications.
+
+Run from the repository root, using fresh artifact directories and no other keyboard, mouse, clipboard, or GUI-driver activity:
+
+```powershell
+dotnet build tests/gui-automation/lua-workspace/coding-editbox-uia.cs -nologo -v:q
+dotnet run tests/gui-automation/lua-workspace/coding-editbox-uia.cs -- --stc --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/coding-editbox-stc
+dotnet run tests/gui-automation/lua-workspace/coding-editbox-uia.cs -- --plain --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/coding-editbox-plain
+ctest --test-dir build-dir -C RelWithDebInfo -R '^subs_edit_stc_smoke$' --output-on-failure
+```
+
+The driver enforces a 240-second supervising budget, operation-specific deadlines, and a 60-second limit for the independent headless process. It records source/executable hashes, each step's pass/fail/not-run status, input and output ASS, serialized and Workspace Lua, diagnostic/UIA screenshots, headless evidence, normal host shutdown, and guarded clipboard restoration. The existing STC smoke target separately checks ordinary ASS styling, UTF-8 caret handling, event/Undo preservation, native paint, and wrapping; it does not replace the real E17 application run. Both editor modes must finish all steps and close normally before S5 is accepted.

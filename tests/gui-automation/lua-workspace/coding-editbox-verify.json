@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "coding-editbox-saved-source",
+  "hosts": ["headless"],
+  "default_timeout_ms": 10000,
+  "resources": {
+    "script": "fixtures/coding-editbox-verify.lua",
+    "subtitle": "",
+    "output": ""
+  },
+  "steps": [
+    {
+      "action": "run_automation",
+      "script": "script",
+      "subtitle": "subtitle",
+      "output_subtitle": "output",
+      "macro": "Coding edit box saved verification"
+    }
+  ]
+}

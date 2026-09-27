@@ -31,6 +31,8 @@
 #include <string>
 #include <vector>
 
+#include <wx/textctrl.h>
+
 class Thesaurus;
 namespace agi {
 	class SpellChecker;
@@ -41,6 +43,7 @@ namespace agi {
 class SubsTextEditCtrl final : public wxTextCtrl {
 	/// Project context, for splitting lines
 	agi::Context *context;
+	bool code_mode = false;
 
 	/// The last seen line text, used to avoid reparsing the line for syntax
 	/// highlighting when possible
@@ -56,5 +59,6 @@ public:
 	SubsTextEditCtrl(wxWindow* parent, wxSize size, long style, agi::Context *context);
 	~SubsTextEditCtrl();
 
+	void SetCodeMode(bool enabled) { code_mode = enabled; }
 	void Paste() override;
 };

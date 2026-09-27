@@ -29,12 +29,19 @@
 
 #include "subs_edit_ctrl.h"
 
+#include "automation/lua_source_tools.h"
 #include "command/command.h"
 #include "compat.h"
 #include "options.h"
 #include "utils.h"
 
 #include <libaegisub/string_utils.h>
+
+#include <wx/clipbrd.h>
+#include <wx/dataobj.h>
+#include <wx/log.h>
+#include <wx/menu.h>
+#include <wx/msgdlg.h>
 
 // Maximum number of languages (locales)
 // It should be above 100 (at least 242) and probably not more than 1000
@@ -71,6 +78,14 @@ SubsTextEditCtrl::SubsTextEditCtrl(wxWindow* parent, wxSize wsize, long style, a
 	using std::bind;
 
 	Bind(wxEVT_CHAR_HOOK, &SubsTextEditCtrl::OnKeyDown, this);
+	Bind(wxEVT_CHAR, [this](wxKeyEvent& event) {
+		int const key = event.GetKeyCode();
+		int const unicode = event.GetUnicodeKey();
+		if (code_mode && (key == '\r' || key == '\n' || key == WXK_NUMPAD_ENTER || unicode == '\r' || unicode == '\n')) {
+			return;
+		}
+		event.Skip();
+	});
 
 	Bind(wxEVT_MENU, bind(&SubsTextEditCtrl::Cut, this), EDIT_MENU_CUT);
 	Bind(wxEVT_MENU, bind(&SubsTextEditCtrl::Copy, this), EDIT_MENU_COPY);
@@ -95,6 +110,10 @@ SubsTextEditCtrl::~SubsTextEditCtrl() {
 
 void SubsTextEditCtrl::OnKeyDown(wxKeyEvent& event) {
 	if (event.GetKeyCode() == WXK_RETURN && event.GetModifiers() == wxMOD_SHIFT) {
+		if (code_mode) {
+			event.Skip();
+			return;
+		}
 		long sel_start, sel_end;
 		GetSelection(&sel_start, &sel_end);
 		wxString data = GetRange(0, sel_start) + to_wx("\\N") + GetRange(sel_end, GetLastPosition());
@@ -120,14 +139,49 @@ void SubsTextEditCtrl::SetStyles() {
 }
 
 void SubsTextEditCtrl::Paste() {
-	std::string data = GetClipboard();
+	std::string data;
+	if (code_mode) {
+		wxTextDataObject clipboard_text;
+		wxClipboard *clipboard = wxClipboard::Get();
+		wxLogNull disable_logging;
+		bool const opened = clipboard->Open();
+		bool const read = opened && clipboard->GetData(clipboard_text);
+		if (opened) {
+			clipboard->Close();
+		}
+		if (!read) {
+			wxMessageBox(_("Could not read text from the clipboard. The code line was not changed."), _("Cannot paste Lua code"), wxOK | wxICON_ERROR, this);
+			return;
+		}
+		data = from_wx(clipboard_text.GetText());
+	}
+	else {
+		data = GetClipboard();
+	}
+	long sel_start;
+	long sel_end;
+	GetSelection(&sel_start, &sel_end);
+	if (code_mode) {
+		wxString pasted = to_wx(data);
+		if (pasted.Find('\r') == wxNOT_FOUND && pasted.Find('\n') == wxNOT_FOUND) {
+			Replace(sel_start, sel_end, pasted);
+			return;
+		}
+
+		wxString candidate = GetRange(0, sel_start) + pasted + GetRange(sel_end, GetLastPosition());
+		auto serialized = Automation4::SerializeLuaSource(from_wx(candidate));
+		if (!serialized.Succeeded()) {
+			wxMessageBox(to_wx(serialized.diagnostic->message) + _("\n\nOpen the Lua Workspace (Shift+Enter) to edit multiline code."), _("Cannot paste Lua code"), wxOK | wxICON_ERROR, this);
+			return;
+		}
+		Replace(0, GetLastPosition(), to_wx(serialized.source));
+		return;
+	}
 
 	agi::util::strings::replace_all_inplace(data, "\r\n", "\\N");
 	agi::util::strings::replace_all_inplace(data, "\n", "\\N");
 	agi::util::strings::replace_all_inplace(data, "\r", "\\N");
 
-	long sel_start, sel_end;
-	GetSelection(&sel_start, &sel_end);
 	wxString data_first_half = GetRange(0, sel_start) + to_wx(data);
 	wxString data_full = data_first_half + GetRange(sel_end, GetLastPosition());
 	Freeze();
@@ -155,7 +209,7 @@ void SubsTextEditCtrl::OnContextMenu(wxContextMenuEvent& event) {
 	menu.Append(EDIT_MENU_SELECT_ALL, _("Select &All"));
 
 	// Split
-	if (context) {
+	if (context && !code_mode) {
 		menu.AppendSeparator();
 		menu.Append(EDIT_MENU_SPLIT_PRESERVE, _("Split at cursor (preserve times)"));
 		menu.Append(EDIT_MENU_SPLIT_ESTIMATE, _("Split at cursor (estimate times)"));

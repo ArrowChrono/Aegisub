@@ -1,0 +1,22 @@
+[Script Info]
+Title: Coding edit box GUI E2E
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+PlayResX: 1280
+PlayResY: 720
+
+[Aegisub Project Garbage]
+Automation Scripts: ~coding-editbox-actions.lua
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 1,0:00:01.00,0:00:03.00,Default,CodeA,1,2,3,code once,return "seed-a"
+Dialogue: 2,0:00:03.00,0:00:05.00,Default,Ordinary,4,5,6,,Ordinary {\i1}subtitle
+Comment: 3,0:00:05.00,0:00:07.00,Default,CodeB,7,8,9,code line,return "seed-b"
+Comment: 4,0:00:07.00,0:00:09.00,Default,Template,10,11,12,template line,template remains
+Dialogue: 5,0:00:09.00,0:00:11.00,Default,FalseCode,13,14,15,code once,not a code comment
