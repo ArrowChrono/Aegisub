@@ -125,7 +125,8 @@ static int Run(string[] args)
     }
     if (exe is null || !File.Exists(exe) || artifacts is null)
         throw new ArgumentException("--exe and --artifacts are required");
-    Ensure(scenario is "basic" or "controls" or "files" or "dap" or "jit" or "language" or "language-unavailable", "Unknown debug scenario");
+    MenuObservation.Initialize(artifacts);
+    Ensure(scenario is "basic" or "launch" or "controls" or "files" or "dap" or "jit" or "language" or "language-unavailable", "Unknown debug scenario");
     var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.ass");
     var actions = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-actions.lua");
     var expectedFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.expected.json");
@@ -194,6 +195,7 @@ static int Run(string[] args)
     var steps = scenario == "controls"
         ? new[] { "host-ready", "controls-open-steps", "step-in-out-over", "step-save-undo", "loop-seed", "loop-pause-stop",
             "loop-live-rollback", "loop-undo-depth", "close-stop", "close-stop-rollback", "close-detach", "close-detach-save-undo", "normal-shutdown" }
+        : scenario == "launch" ? LaunchSteps()
         : scenario == "files" ? FileSteps()
         : scenario == "dap" ? DapSteps()
         : scenario == "jit" ? JitSteps()
@@ -227,7 +229,8 @@ static int Run(string[] args)
         SaveEvidence(main, artifacts, "main-before-open");
         if (scenario is not ("basic" or "language" or "language-unavailable"))
         {
-            if (scenario == "controls") RunControls();
+            if (scenario == "launch") RunLaunch();
+            else if (scenario == "controls") RunControls();
             else if (scenario == "files") RunFiles();
             else if (scenario == "dap") RunDap();
             else RunJit();
@@ -244,6 +247,7 @@ static int Run(string[] args)
             InvokeMenu(main, host, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
             InvokeMenu(main, host, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
             workspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(8));
+            SetPauseOnEntry(workspace, true);
             SaveEvidence(workspace, artifacts, "workspace-opened");
             editor = FindStyledText(workspace, insideNotebook: false);
             Ensure(editor is not null, "Workspace source editor has no unique UIA STC descendant");
@@ -302,7 +306,7 @@ static int Run(string[] args)
                 ? "\nlocal language_probe = missing_paused_revision" : "\n-- next revision only"));
             var after = Native.CopyStyledText(execution!, host);
             Ensure(Normalize(after) == edited, "Paused readonly source changed with a newer editor buffer");
-            Ensure(FindExactText(workspace!, text => text.Contains("[stale editor revision]", StringComparison.Ordinal)) is not null,
+            Ensure(HasWorkspaceStaticText(workspace!, text => text.Contains("[stale editor revision]", StringComparison.Ordinal)),
                 "Execution identity did not mark the captured revision stale after editing");
             File.WriteAllText(Path.Combine(artifacts, "stale-editor.lua"), CopySource(workspace!, host), new UTF8Encoding(false));
             SaveEvidence(workspace!, artifacts, "stale-paused-source");
@@ -468,6 +472,164 @@ static int Run(string[] args)
         host?.Dispose();
     }
 
+    string[] LaunchSteps() => new[] { "host-ready", "launch-open-code", "launch-default-breakpoint", "launch-last-pause",
+        "launch-no-breakpoint-completes", "launch-entry-opt-in", "launch-normal-shutdown" };
+
+    void RunLaunch()
+    {
+        var gui = main!;
+        var process = host!;
+        AutomationElement? sourceEditor = null;
+        Task? breakpointInvocation = null;
+        const string source = "local prefix = \"DBG:\"\ndecorate = function(value)\n  return prefix .. string.upper(value)\nend";
+
+        Step("launch-open-code", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+            InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            sourceEditor = FindStyledText(workspace, insideNotebook: false)
+                ?? throw new InvalidOperationException("Launch scenario has no unique source editor");
+            Ensure(ReadPauseOnEntry(workspace) == ToggleState.Off, "Pause on entry is not disabled by default");
+            Native.ReplaceWithClipboard(sourceEditor, process, source);
+            Ensure(Normalize(CopySource(workspace, process)) == source, "Launch source edit was not retained exactly");
+            Native.Focus(sourceEditor, process);
+            Native.SendCtrlHome(sourceEditor, process);
+            Native.SendKey(sourceEditor, process, 0x28);
+            Native.SendKey(sourceEditor, process, 0x28);
+            InvokeButton(workspace, "Toggle Breakpoint");
+            SaveEvidence(workspace, artifacts, "launch-default-ready");
+        });
+        Step("launch-default-breakpoint", () =>
+        {
+            breakpointInvocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            WaitUntil(() => ParsePauseStatus(ReadRunStatus(workspace!)) is { Reason: "breakpoint", Sequence: 1, Line: 3 },
+                TimeSpan.FromSeconds(20), "Default Debug did not run directly to code-source breakpoint #1");
+            AssertLivePauseControls(gui, workspace!);
+            Ensure(ReadPauseOnEntry(workspace!) == ToggleState.Off, "Default Debug changed Pause on entry");
+            Ensure(IsTabSelected(workspace!, "Stack and Variables"),
+                "Matching editable source did not keep the current-pause navigation on Stack and Variables");
+            Ensure(StackHasSourceLine(workspace!, "Code line ID ", 3),
+                "Default breakpoint pause did not expose its captured code-source stack frame");
+            WaitUntil(() => ReadDebugLocation(workspace!).StartsWith("Paused at ", StringComparison.Ordinal)
+                    && ReadDebugLocation(workspace!).Contains("[editable source]", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5), "Current debug location did not identify the mapped live editable source");
+            AssertVariableTreePause(workspace!, process);
+            File.WriteAllText(Path.Combine(artifacts, "launch-breakpoint-status.txt"), ReadRunStatus(workspace!));
+            File.WriteAllText(Path.Combine(artifacts, "launch-paused-location.txt"), ReadDebugLocation(workspace!));
+            File.WriteAllText(Path.Combine(artifacts, "launch-paused-variable-details.txt"), ReadVariableDetails(workspace!, process));
+            SaveEvidence(workspace!, artifacts, "launch-breakpoint-direct");
+            InvokeButton(workspace!, "Clear Breakpoints");
+            Ensure(ParsePauseStatus(ReadRunStatus(workspace!)) is { Reason: "breakpoint", Sequence: 1, Line: 3 },
+                "Clearing breakpoints changed the current pause identity");
+            SaveEvidence(workspace!, artifacts, "launch-current-marker-with-breakpoint-cleared");
+        });
+        Step("launch-last-pause", () =>
+        {
+            InvokeButton(workspace!, "Continue");
+            WaitUntil(() => ParsePauseStatus(ReadRunStatus(workspace!)) is { Reason: "breakpoint", Sequence: 2, Line: 3 },
+                TimeSpan.FromSeconds(15), "Continue did not reach the next captured line-3 breakpoint");
+            AssertLivePauseControls(gui, workspace!);
+            WaitUntil(() => ReadVariableDetails(workspace!, process).StartsWith("Paused value", StringComparison.Ordinal)
+                    && ReadVariableDetails(workspace!, process).Contains("\"beta\"", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5), "Second breakpoint did not refresh the selected local to beta");
+            SaveEvidence(workspace!, artifacts, "launch-second-breakpoint");
+            InvokeButton(workspace!, "Detach");
+            WaitUntil(() => ReadDebugLocation(workspace!).StartsWith("Last pause [last pause, not current]", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5), "Resumed debug location did not mark the retained snapshot as non-current");
+            WaitUntil(() => ReadVariableDetails(workspace!, process).StartsWith("Last pause [not live]", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5), "Resumed variable details did not mark the retained value as not live");
+            File.WriteAllText(Path.Combine(artifacts, "launch-last-pause-location.txt"), ReadDebugLocation(workspace!));
+            File.WriteAllText(Path.Combine(artifacts, "launch-last-pause-variable-details.txt"), ReadVariableDetails(workspace!, process));
+            SaveEvidence(workspace!, artifacts, "launch-last-pause");
+            WaitForInvocation(workspace!, process, breakpointInvocation!, "completed", artifacts, "launch-continued-detached");
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            VerifyOriginalBaseline("launch-breakpoint-undone");
+        });
+        Step("launch-no-breakpoint-completes", () =>
+        {
+            Ensure(ReadPauseOnEntry(workspace!) == ToggleState.Off, "No-breakpoint Debug did not start from the default entry policy");
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            WaitForInvocationWithoutPause(workspace!, process, invocation, artifacts, "launch-no-breakpoint");
+            Ensure(ReadRunStatus(workspace!).Contains("completed", StringComparison.OrdinalIgnoreCase),
+                "No-breakpoint Debug did not reach its natural completed terminal state");
+            File.WriteAllText(Path.Combine(artifacts, "launch-no-breakpoint-status.txt"), ReadRunStatus(workspace!));
+            SaveEvidence(workspace!, artifacts, "launch-no-breakpoint-completed");
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            VerifyOriginalBaseline("launch-no-breakpoint-undone");
+        });
+        Step("launch-entry-opt-in", () =>
+        {
+            SetPauseOnEntry(workspace!, true);
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
+            WaitUntil(() => ParsePauseStatus(ReadRunStatus(workspace!)) is { Reason: "entry", Sequence: 1 } pause
+                    && pause.SourcePath.EndsWith("/kara-templater.lua", StringComparison.OrdinalIgnoreCase),
+                TimeSpan.FromSeconds(15), "Explicit Pause on entry did not retain the entry #1 behavior");
+            AssertLivePauseControls(gui, workspace!);
+            var runStatus = CaptureRunStatusHandle(workspace!, process);
+            SaveEvidence(workspace!, artifacts, "launch-entry-opt-in");
+            InvokeButton(workspace!, "Stop");
+            var closedProgress = false;
+            WaitUntil(() =>
+            {
+                var progress = FindProgressPane(process, "Apply karaoke template");
+                if (!closedProgress && progress is not null)
+                {
+                    var close = progress.FindAll(TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)).Cast<AutomationElement>()
+                        .FirstOrDefault(item => item.Current.Name == "Close" && item.Current.IsEnabled
+                            && item.TryGetCurrentPattern(InvokePattern.Pattern, out _));
+                    if (close is not null)
+                    {
+                        SaveEvidence(progress, artifacts, "launch-entry-stop-progress-close");
+                        UiaDriver.Invoke(close);
+                        closedProgress = true;
+                    }
+                }
+                return invocation.IsCompleted && gui.Current.IsEnabled;
+            }, TimeSpan.FromSeconds(25), "Entry opt-in Stop did not return and release its progress UI");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "Entry opt-in Stop task did not finish after terminal UI release");
+            Ensure(Native.ReadStaticText(runStatus, process).Contains("cancelled", StringComparison.OrdinalIgnoreCase),
+                "Entry opt-in Stop did not reach cancelled");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                "Entry opt-in cancellation changed the physical ASS baseline");
+        });
+        Step("launch-normal-shutdown", () =>
+        {
+            Native.PostClose(workspace!, process);
+            var dialog = WaitWindow(process, "Unsaved Lua source", TimeSpan.FromSeconds(5));
+            SaveEvidence(dialog, artifacts, "launch-discard-unsaved-source");
+            InvokeButton(dialog, "Discard");
+            WaitUntil(() => FindWindow(process, "Lua Workspace") is null, TimeSpan.FromSeconds(5),
+                "Launch Workspace did not close after Discard");
+            Native.StabilizeOwnedClipboard(process.Id);
+            if (!gui.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern))
+                throw new InvalidOperationException("Launch main window lacks WindowPattern.Close");
+            ((WindowPattern)pattern).Close();
+            Ensure(process.WaitForExit(TimeSpan.FromSeconds(10)) && process.ExitCode == 0,
+                "Launch host did not exit normally with code zero");
+            File.WriteAllText(Path.Combine(artifacts, "launch-normal-shutdown.json"), JsonSerializer.Serialize(new
+            {
+                HostExitCode = process.ExitCode, Method = "WindowPattern.Close"
+            }));
+        });
+
+        void VerifyOriginalBaseline(string evidence)
+        {
+            WaitUntil(() => gui.Current.IsEnabled, TimeSpan.FromSeconds(5), "Debug completion did not release the main frame");
+            var before = File.ReadAllBytes(input);
+            var verifier = Task.Run(() => InvokeMenu(gui, process, "Workspace Debug Verify Original", TimeSpan.FromSeconds(8)));
+            var dialog = WaitWindowContainingText(process, "Debug original live baseline verified", TimeSpan.FromSeconds(8));
+            SaveEvidence(dialog, artifacts, evidence);
+            InvokeButton(dialog, "OK");
+            Ensure(verifier.Wait(TimeSpan.FromSeconds(10)), "Launch live-baseline verifier did not return");
+            WaitUntil(() => gui.Current.IsEnabled && FindProgressPane(process, "Workspace Debug Verify Original") is null,
+                TimeSpan.FromSeconds(8), "Launch live-baseline verifier did not release its execution UI");
+            Ensure(File.ReadAllBytes(input).SequenceEqual(before) && EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                "Launch live-baseline verifier changed or disagreed with the physical ASS baseline");
+        }
+    }
+
     string[] FileSteps() => new[] { "host-ready", "files-open-noentry", "files-noentry-first-run", "files-noentry-reload",
         "files-noentry-recover", "files-noentry-undo", "files-readonly-failure", "files-readonly-live-baseline",
         "files-readonly-recovery", "files-readonly-undo", "files-managed-beta", "files-managed-beta-undo",
@@ -517,7 +679,7 @@ static int Run(string[] args)
         void WaitNoEntry(int expectedCount)
         {
             WaitUntil(() => MarkerCount() == expectedCount
-                && FindExactText(workspace!, value => value.Contains("The reloaded Lua file has no registered macro to run", StringComparison.Ordinal)) is not null,
+                && HasWorkspaceStaticText(workspace!, value => value.Contains("The reloaded Lua file has no registered macro to run", StringComparison.Ordinal)),
                 TimeSpan.FromSeconds(8), "No-entry Run did not report the exact missing-macro condition after source load");
             Ensure(!FindButton(workspace!, "Run").Current.IsEnabled && !FindButton(workspace!, "Debug").Current.IsEnabled,
                 "No-entry revision left Run or Debug available");
@@ -686,7 +848,7 @@ static int Run(string[] args)
                 Native.ReplaceWithClipboard(editor, process, savedEdited);
                 Ensure(Normalize(CopySource(workspace!, process)) == Normalize(savedEdited), "Read-only source edit was not retained before Run");
                 InvokeButton(workspace!, "Run");
-                WaitUntil(() => FindExactText(workspace!, value => value.Contains("Save the Lua file successfully before Run/Debug", StringComparison.Ordinal)) is not null,
+                WaitUntil(() => HasWorkspaceStaticText(workspace!, value => value.Contains("Save the Lua file successfully before Run/Debug", StringComparison.Ordinal)),
                     TimeSpan.FromSeconds(6), "Run did not report the failed Lua-file Save boundary");
                 Ensure(File.ReadAllBytes(saveFile).SequenceEqual(originalBytes)
                     && Normalize(CopySource(workspace!, process)) == Normalize(savedEdited)
@@ -808,6 +970,7 @@ static int Run(string[] args)
                 InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
                 InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
                 workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+                SetPauseOnEntry(workspace, true);
                 editor = FindStyledText(workspace, insideNotebook: false)
                     ?? throw new InvalidOperationException("Workspace source editor is unavailable");
                 originalEditorSource = Normalize(CopySource(workspace, process));
@@ -833,7 +996,8 @@ static int Run(string[] args)
             Step("dap-remote-reject", () =>
             {
                 InvokeButton(workspace!, "Debug");
-                WaitUntil(() => FindExactText(workspace!, text => text.Contains("remote automation debug client", StringComparison.OrdinalIgnoreCase)) is not null,
+                WaitUntil(() => HasWorkspaceStaticText(workspace!,
+                        text => text.Contains("remote automation debug client", StringComparison.OrdinalIgnoreCase)),
                     TimeSpan.FromSeconds(5), "Workspace Debug did not reject the connected remote owner");
                 Ensure(FindButton(workspace!, "Debug").Current.IsEnabled && gui.Current.IsEnabled,
                     "Rejected local Debug left a live invocation or locked the main frame");
@@ -901,7 +1065,7 @@ static int Run(string[] args)
                 var buttonHwnd = new nint(run.Current.NativeWindowHandle);
                 var (parentHwnd, commandId) = ObservedWindowsCommand.PostButtonClick(buttonHwnd, process.Id);
                 const string rejection = "A Workspace invocation is already active or no source is open";
-                WaitUntil(() => FindExactText(workspace!, text => text == rejection) is not null, TimeSpan.FromSeconds(5),
+                WaitUntil(() => HasWorkspaceStaticText(workspace!, text => text == rejection), TimeSpan.FromSeconds(5),
                     "Observed Run BN_CLICKED did not reach the production StartRun rejection");
                 File.WriteAllText(Path.Combine(artifacts, "dap-paused-run-command.json"), JsonSerializer.Serialize(new
                 {
@@ -914,7 +1078,7 @@ static int Run(string[] args)
             Step("dap-paused-save-reject", () =>
             {
                 Native.SaveShortcut(editor!, process);
-                WaitUntil(() => FindExactText(workspace!, text => text.Contains("Apply/Save is unavailable", StringComparison.Ordinal)) is not null,
+                WaitUntil(() => HasWorkspaceStaticText(workspace!, text => text.Contains("Apply/Save is unavailable", StringComparison.Ordinal)),
                     TimeSpan.FromSeconds(5), "Ctrl+S did not explicitly reject Apply during the local pause");
                 Ensure(Normalize(CopySource(workspace!, process)) == edited, "Rejected Ctrl+S changed the dirty Workspace buffer");
                 Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Rejected Ctrl+S changed physical ASS");
@@ -1115,6 +1279,7 @@ static int Run(string[] args)
             InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
             InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
             workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            SetPauseOnEntry(workspace, true);
             OpenLuaFile(workspace, process, managedFile, artifacts, "jit-file-picker");
             Ensure(workspace.Current.Name.Contains("debug-jit.lua", StringComparison.Ordinal), "Workspace did not open the managed JIT file");
         });
@@ -1305,6 +1470,7 @@ static int Run(string[] args)
             InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
             InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
             workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            SetPauseOnEntry(workspace, true);
             SaveEvidence(workspace, artifacts, "controls-workspace-opened");
             OpenLuaFile(workspace, process, stepsArtifact, artifacts, "steps-file-picker");
             Ensure(workspace.Current.Name.Contains("debug-steps.lua", StringComparison.Ordinal), "Workspace did not bind the selected steps Lua file");
@@ -1452,8 +1618,13 @@ static int Run(string[] args)
         Step("close-detach-save-undo", () =>
         {
             SaveMainAss(gui, input, completed, artifacts, "close-detach-completed.ass");
+            File.Copy(input, Path.Combine(artifacts, "close-detach-before-first-undo.ass"));
+            SaveMainSaveState(gui, artifacts, "close-detach-save-before-first-undo.json");
             InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
-            SaveMainAss(gui, input, seeded, artifacts, "close-detach-undone-once.ass");
+            File.Copy(input, Path.Combine(artifacts, "close-detach-after-first-undo-before-save.ass"));
+            SaveMainSaveState(gui, artifacts, "close-detach-save-after-first-undo.json");
+            try { SaveMainAss(gui, input, seeded, artifacts, "close-detach-undone-once.ass"); }
+            finally { File.Copy(input, Path.Combine(artifacts, "close-detach-after-first-undo-save-attempt.ass"), overwrite: true); }
             InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
             SaveMainAss(gui, input, baseline, artifacts, "close-detach-undone-twice.ass");
         });
@@ -1484,7 +1655,7 @@ static int Run(string[] args)
     {
         StartedUtc = startedUtc, FinishedUtc = finishedUtc, BudgetSeconds = 240, ExeSha256 = hashes["exe"],
         Scenario = scenario,
-        AcceptanceScope = languageScenario ? "S6 language refresh/source isolation and unavailable-service Run/Debug/Undo/Save; not full S6 on its own." : "This scenario only. Full S4 requires basic, controls, files, dap, jit, native virtual-source E2E, and S2/S3 regressions.",
+        AcceptanceScope = languageScenario ? "S6 language refresh/source isolation and unavailable-service Run/Debug/Undo/Save; not full S6 on its own." : "This scenario only. Full S4 requires basic, launch, controls, files, dap, jit, native virtual-source E2E, and S2/S3 regressions.",
         Fixtures = new[] { fixture.Replace('\\', '/'), actions.Replace('\\', '/'), expectedFile.Replace('\\', '/'),
             stepsFile.Replace('\\', '/'), loopFile.Replace('\\', '/'), templater.Replace('\\', '/') },
         Sha256 = hashes, ExitStatus = exitStatus, Steps = results
@@ -1544,30 +1715,44 @@ static AutomationElement WaitWindow(Process host, string prefix, TimeSpan timeou
     return result!;
 }
 
-static AutomationElement? FindExactText(AutomationElement window, Func<string, bool> matches, bool allowHidden = false)
+static bool HasWorkspaceStaticText(AutomationElement workspace, Func<string, bool> matches, bool allowHidden = false)
 {
-    foreach (AutomationElement item in window.FindAll(TreeScope.Descendants,
-        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)))
-    {
-        try { if ((allowHidden || !item.Current.IsOffscreen) && matches(item.Current.Name ?? "")) return item; }
-        catch (ElementNotAvailableException) { }
-    }
-    return null;
+    using var host = Process.GetProcessById(workspace.Current.ProcessId);
+    var controls = Native.ChildTextControls(workspace, host, "Static", matches, allowHidden);
+    if (controls.Count == 0) return false;
+    Ensure(controls.Select(control => control.Text).Distinct(StringComparer.Ordinal).Count() == 1,
+        "Workspace exposed conflicting matching Static text");
+    return true;
+}
+
+static AutomationElement? FindWorkspaceStaticText(AutomationElement workspace, Func<string, bool> matches, bool allowHidden = false)
+{
+    using var host = Process.GetProcessById(workspace.Current.ProcessId);
+    var controls = Native.ChildTextControls(workspace, host, "Static", matches, allowHidden);
+    Ensure(controls.Count <= 1, $"More than one Workspace Static matched the requested text ({controls.Count})");
+    return controls.Count == 1 ? controls[0].Element : null;
 }
 
 static string ReadRunStatus(AutomationElement workspace, bool allowHidden = false)
 {
-    var text = FindExactText(workspace, value => value.StartsWith("Debug:", StringComparison.Ordinal)
-        || value.StartsWith("Invocation ", StringComparison.Ordinal)
+    using var host = Process.GetProcessById(workspace.Current.ProcessId);
+    var controls = Native.ChildTextControls(workspace, host, "Static", value => value.StartsWith("Debug:", StringComparison.Ordinal)
+        || value.StartsWith("Invocation failed", StringComparison.Ordinal)
+        || value.StartsWith("Invocation cancelled", StringComparison.Ordinal)
+        || value.StartsWith("Invocation completed", StringComparison.Ordinal)
+        || value.StartsWith("Invocation ended without an observed terminal result", StringComparison.Ordinal)
         || value.StartsWith("Stopping", StringComparison.Ordinal)
         || value.StartsWith("Detached;", StringComparison.Ordinal)
         || value.StartsWith("Run active", StringComparison.Ordinal), allowHidden);
-    return text?.Current.Name ?? "";
+    if (controls.Count == 0) return "";
+    var values = controls.Select(control => control.Text).Distinct(StringComparer.Ordinal).ToArray();
+    Ensure(values.Length == 1, "Workspace exposed conflicting invocation status text: " + string.Join(" | ", values));
+    return values[0];
 }
 
 static nint CaptureRunStatusHandle(AutomationElement workspace, Process host)
 {
-    var status = FindExactText(workspace, value => value.StartsWith("Debug:", StringComparison.Ordinal))
+    var status = FindWorkspaceStaticText(workspace, value => value.StartsWith("Debug:", StringComparison.Ordinal))
         ?? throw new InvalidOperationException("Visible debug status was not found before hiding Workspace");
     var current = status.Current;
     Ensure(current.ClassName == "Static" && current.ProcessId == host.Id && current.NativeWindowHandle != 0,
@@ -1593,7 +1778,10 @@ static void WaitPauseAt(AutomationElement workspace, string reason, int sequence
 static List<string> StackItems(AutomationElement workspace)
 {
     var names = new List<string>();
-    foreach (AutomationElement item in workspace.FindAll(TreeScope.Descendants,
+    var lists = Native.ChildElements(workspace, "ListBox").Where(item => item.Current.ProcessId == workspace.Current.ProcessId
+        && item.Current.ControlType == ControlType.List && !item.Current.IsOffscreen).ToArray();
+    Ensure(lists.Length == 1, $"Expected one visible Lua stack frame list, found {lists.Length}");
+    foreach (AutomationElement item in lists[0].FindAll(TreeScope.Children,
         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)))
     {
         try { if (!item.Current.IsOffscreen) names.Add(item.Current.Name); }
@@ -1644,6 +1832,114 @@ static void AssertLivePauseControls(AutomationElement main, AutomationElement wo
         "Workspace Apply/Save control was unexpected or enabled during a live pause");
 }
 
+static AutomationElement PauseOnEntry(AutomationElement workspace)
+{
+    var matches = Native.ChildElements(workspace, "Button").Where(item => item.Current.ProcessId == workspace.Current.ProcessId
+        && item.Current.ControlType == ControlType.CheckBox && item.Current.Name == "Pause on entry" && !item.Current.IsOffscreen).ToArray();
+    Ensure(matches.Length == 1, $"Expected one visible Pause on entry checkbox, found {matches.Length}");
+    Ensure(matches[0].TryGetCurrentPattern(TogglePattern.Pattern, out _), "Pause on entry has no TogglePattern");
+    return matches[0];
+}
+
+static ToggleState ReadPauseOnEntry(AutomationElement workspace)
+    => ((TogglePattern)PauseOnEntry(workspace).GetCurrentPattern(TogglePattern.Pattern)).Current.ToggleState;
+
+static void SetPauseOnEntry(AutomationElement workspace, bool enabled)
+{
+    var checkbox = PauseOnEntry(workspace);
+    var toggle = (TogglePattern)checkbox.GetCurrentPattern(TogglePattern.Pattern);
+    var expected = enabled ? ToggleState.On : ToggleState.Off;
+    if (toggle.Current.ToggleState != expected) toggle.Toggle();
+    WaitUntil(() => toggle.Current.ToggleState == expected, TimeSpan.FromSeconds(2),
+        "Pause on entry did not reach the explicitly requested state");
+}
+
+static string ReadDebugLocation(AutomationElement workspace)
+{
+    var location = FindWorkspaceStaticText(workspace, name => name.StartsWith("Paused at ", StringComparison.Ordinal)
+        || name.StartsWith("Last pause [last pause, not current]", StringComparison.Ordinal));
+    Ensure(location is not null, "Expected one visible Lua debug location, found none");
+    return location!.Current.Name;
+}
+
+static AutomationElement VariableTree(AutomationElement workspace)
+{
+    var trees = Native.ChildElements(workspace, "SysTreeView32").Where(item => item.Current.ProcessId == workspace.Current.ProcessId
+        && item.Current.ControlType == ControlType.Tree && !item.Current.IsOffscreen).ToArray();
+    Ensure(trees.Length == 1, $"Expected one visible Lua variables tree, found {trees.Length}");
+    return trees[0];
+}
+
+static AutomationElement FindTreeItem(AutomationElement root, Func<string, bool> predicate, string description)
+{
+    var items = root.FindAll(TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TreeItem)).Cast<AutomationElement>()
+        .Where(item => predicate(item.Current.Name ?? "")).ToArray();
+    Ensure(items.Length == 1, $"Expected one {description} tree item, found {items.Length}");
+    return items[0];
+}
+
+static ExpandCollapseState TreeExpansion(AutomationElement item)
+{
+    Ensure(item.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var pattern),
+        $"Tree item {item.Current.Name} has no ExpandCollapsePattern");
+    return ((ExpandCollapsePattern)pattern).Current.ExpandCollapseState;
+}
+
+static string SelectedTreeItemName(AutomationElement tree)
+{
+    Ensure(tree.TryGetCurrentPattern(SelectionPattern.Pattern, out var pattern), "Lua variables tree has no SelectionPattern");
+    var selected = ((SelectionPattern)pattern).Current.GetSelection();
+    Ensure(selected.Length == 1, $"Expected one selected Lua variable item, found {selected.Length}");
+    return selected[0].Current.Name;
+}
+
+static string ReadVariableDetails(AutomationElement workspace, Process host)
+{
+    var edits = Native.ChildElements(workspace, "Edit").Where(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen
+        && item.Current.ControlType == ControlType.Document && HasNotebookAncestor(item, workspace)).ToArray();
+    Ensure(edits.Length == 1, $"Expected one visible Lua variable details control, found {edits.Length}");
+    return Native.ReadEditText(edits[0], host);
+}
+
+static void AssertVariableTreePause(AutomationElement workspace, Process host)
+{
+    var tree = VariableTree(workspace);
+    var locals = FindTreeItem(tree, name => Regex.IsMatch(name, @"^Locals \([1-9][0-9]*\)$"), "nonempty Locals scope");
+    var upvalues = FindTreeItem(tree, name => Regex.IsMatch(name, @"^Upvalues \([1-9][0-9]*\)$"), "nonempty Upvalues scope");
+    Ensure(TreeExpansion(locals) == ExpandCollapseState.Expanded, "Locals scope is not initially expanded");
+    Ensure(TreeExpansion(upvalues) == ExpandCollapseState.Expanded, "Upvalues scope is not initially expanded");
+    _ = FindTreeItem(upvalues, name => name == "prefix = \"DBG:\"", "captured prefix upvalue");
+
+    var largeScopes = tree.FindAll(TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TreeItem)).Cast<AutomationElement>()
+        .Where(item => Regex.IsMatch(item.Current.Name ?? "", @"^(Globals|Functions|Runtime Globals) \([1-9][0-9]*\)$")).ToArray();
+    Ensure(largeScopes.Length == 3, $"Expected three nonempty large variable scopes, found {largeScopes.Length}");
+    var largeStates = largeScopes.Select(item => (item.Current.Name, State: TreeExpansion(item))).ToArray();
+    Ensure(largeStates.All(item => item.State is not (ExpandCollapseState.Expanded or ExpandCollapseState.PartiallyExpanded)),
+        "A large variable scope was expanded by default: " + string.Join(", ", largeStates.Select(item => $"{item.Name}={item.State}")));
+
+    var frame = FindTreeItem(locals, name => name == "__frame = decorate",
+        "decorate frame variable");
+    Ensure(TreeExpansion(frame) == ExpandCollapseState.Collapsed, "Nested frame variable was expanded by default");
+    Ensure(SelectedTreeItemName(tree) == "value = \"alpha\"", "Variable tree did not initially select its first local value");
+    Native.SendKeyToControl(tree, host, 0x28);
+    WaitUntil(() => SelectedTreeItemName(VariableTree(workspace)) == "__frame = decorate", TimeSpan.FromSeconds(2),
+        "Down navigation did not select the nested frame variable");
+    Native.SendKeyToControl(VariableTree(workspace), host, 0x27);
+    WaitUntil(() => TreeExpansion(FindTreeItem(VariableTree(workspace), name => name == "__frame = decorate",
+            "expanded decorate frame variable")) == ExpandCollapseState.Expanded,
+        TimeSpan.FromSeconds(2), "Right navigation did not expand the nested frame variable");
+    Native.SendKeyToControl(VariableTree(workspace), host, 0x28);
+    WaitUntil(() => SelectedTreeItemName(VariableTree(workspace)) == "function_name = decorate", TimeSpan.FromSeconds(2),
+        "Down navigation did not select the nested function_name value");
+    WaitUntil(() => ReadVariableDetails(workspace, host).StartsWith("Paused value", StringComparison.Ordinal),
+        TimeSpan.FromSeconds(2), "Selected variable details did not identify a live paused value");
+    var details = ReadVariableDetails(workspace, host);
+    Ensure(details.Contains("function_name", StringComparison.Ordinal) && details.Contains("decorate", StringComparison.Ordinal),
+        "Selected nested variable details lost its exact name or value");
+}
+
 static AutomationElement FindButton(AutomationElement window, string name)
 {
     var buttons = Native.ChildElements(window, "Button").Where(item => item.Current.ControlType == ControlType.Button
@@ -1684,9 +1980,23 @@ static void SelectTab(AutomationElement workspace, string name)
     WaitUntil(() => pattern.Current.IsSelected, TimeSpan.FromSeconds(3), $"Tab {name} did not select");
 }
 
+static bool IsTabSelected(AutomationElement workspace, string name)
+{
+    var notebooks = Native.ChildElements(workspace, "_wx_SysTabCtl32").ToArray();
+    var tabs = notebooks.SelectMany(notebook => notebook.FindAll(TreeScope.Children,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem)).Cast<AutomationElement>())
+        .Where(item => item.Current.Name == name).ToArray();
+    Ensure(tabs.Length == 1 && tabs[0].TryGetCurrentPattern(SelectionItemPattern.Pattern, out _),
+        $"Exact tab {name} was unavailable for selected-state observation");
+    return ((SelectionItemPattern)tabs[0].GetCurrentPattern(SelectionItemPattern.Pattern)).Current.IsSelected;
+}
+
 static bool StackHasSourceLine(AutomationElement workspace, string sourcePrefix, int line)
 {
-    foreach (AutomationElement item in workspace.FindAll(TreeScope.Descendants,
+    var lists = Native.ChildElements(workspace, "ListBox").Where(item => item.Current.ProcessId == workspace.Current.ProcessId
+        && item.Current.ControlType == ControlType.List && !item.Current.IsOffscreen).ToArray();
+    Ensure(lists.Length == 1, $"Expected one visible Lua stack frame list, found {lists.Length}");
+    foreach (AutomationElement item in lists[0].FindAll(TreeScope.Children,
         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)))
     {
         try
@@ -1725,6 +2035,23 @@ static void OpenLuaFile(AutomationElement workspace, Process host, string path, 
     WaitUntil(() => FindWindow(host, "Open Lua source") is null
         && workspace.Current.Name.Contains(Path.GetFileName(path), StringComparison.Ordinal), TimeSpan.FromSeconds(6),
         "Open Lua source did not close its picker and bind the requested saved file");
+}
+
+static void SaveMainSaveState(AutomationElement main, string artifacts, string evidenceName)
+{
+    var save = UiaDriver.FindDescendantByAutomationId(main, "Item 5002", ControlType.Button)
+        ?? throw new InvalidOperationException("Main Save control was unavailable for state evidence");
+    var current = save.Current;
+    File.WriteAllText(Path.Combine(artifacts, evidenceName), JsonSerializer.Serialize(new
+    {
+        current.Name,
+        current.AutomationId,
+        current.ProcessId,
+        current.NativeWindowHandle,
+        current.IsEnabled,
+        current.IsOffscreen,
+        HasInvokePattern = save.TryGetCurrentPattern(InvokePattern.Pattern, out _)
+    }, new JsonSerializerOptions { WriteIndented = true }));
 }
 
 static void SaveMainAss(AutomationElement main, string input, IReadOnlyList<AssEvent> expected, string artifacts, string evidenceName)
@@ -1839,7 +2166,22 @@ static void InvokeMenu(AutomationElement main, Process host, string name, TimeSp
     }
     AutomationElement? command = null;
     WaitUntil(() => (command = FindVisibleMenuCommand(host, name)) is not null, timeout, $"Menu command {name} was unavailable");
-    UiaDriver.Invoke(command!);
+    var current = command!.Current;
+    var hasInvoke = command.TryGetCurrentPattern(InvokePattern.Pattern, out _);
+    var menuSnapshot = MenuObservation.Capture(menuName, name, current, hasInvoke);
+    MenuObservation.Record(menuSnapshot, "before-invoke", null);
+    Ensure(current.IsEnabled && !current.IsOffscreen && hasInvoke,
+        $"Exact visible menu command {name} was not enabled and invokable");
+    try
+    {
+        UiaDriver.Invoke(command!);
+        MenuObservation.Record(menuSnapshot, "invoke-returned", null);
+    }
+    catch (Exception error)
+    {
+        MenuObservation.Record(menuSnapshot, "invoke-failed", error.Message);
+        throw;
+    }
 }
 
 static string CopySource(AutomationElement workspace, Process host)
@@ -1858,19 +2200,25 @@ static string CopySource(AutomationElement workspace, Process host)
 
 static void SaveEvidence(AutomationElement window, string artifacts, string name)
 {
-    var lines = new List<string>();
-    foreach (var item in new[] { window }.Concat(window.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>()).Take(700))
+    var timer = Stopwatch.StartNew();
+    try
     {
-        try
+        var current = window.Current;
+        var lines = new List<string>
         {
-            var current = item.Current;
-            lines.Add($"{current.ControlType.ProgrammaticName}\t{current.Name}\t{current.AutomationId}\t{current.ClassName}\t{current.NativeWindowHandle}\t{current.IsEnabled}\t{current.IsOffscreen}\t{string.Join(',', item.GetSupportedPatterns().Select(pattern => pattern.ProgrammaticName))}");
-        }
-        catch (ElementNotAvailableException) { lines.Add("<stale UIA element>"); }
+            $"root\thandle={current.NativeWindowHandle}\tprocess={current.ProcessId}\ttype={current.ControlType.ProgrammaticName}\tclass={current.ClassName}\tenabled={current.IsEnabled}\toffscreen={current.IsOffscreen}\tname={current.Name}"
+        };
+        lines.AddRange(Native.DescribeChildWindows(new nint(current.NativeWindowHandle), current.ProcessId));
+        File.WriteAllLines(Path.Combine(artifacts, name + "-uia.txt"), lines);
+        var capture = ScreenCapture.SaveWindowPng(window, Path.Combine(artifacts, name + ".png"));
+        Ensure(capture.NonBlackPixelCount > 0, $"{name} screenshot was black");
     }
-    File.WriteAllLines(Path.Combine(artifacts, name + "-uia.txt"), lines);
-    var capture = ScreenCapture.SaveWindowPng(window, Path.Combine(artifacts, name + ".png"));
-    Ensure(capture.NonBlackPixelCount > 0, $"{name} screenshot was black");
+    finally
+    {
+        timer.Stop();
+        File.AppendAllText(Path.Combine(artifacts, "evidence-timing.tsv"),
+            $"{DateTimeOffset.UtcNow:O}\t{name}\t{timer.Elapsed.TotalMilliseconds:F0}{Environment.NewLine}");
+    }
 }
 
 static void TryEvidence(AutomationElement window, string artifacts, string name)
@@ -1974,6 +2322,75 @@ static void WaitForInvocation(AutomationElement workspace, Process host, Task in
         return invocation.IsCompleted && ReadRunStatus(workspace).Contains(outcome, StringComparison.OrdinalIgnoreCase);
     }, TimeSpan.FromSeconds(25), $"Invocation did not reach {outcome} and release its progress UI");
     Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "UIA invocation did not return after terminal state");
+}
+
+static void WaitForInvocationWithoutPause(AutomationElement workspace, Process host, Task invocation, string artifacts, string label)
+{
+    var timer = Stopwatch.StartNew();
+    var closedProgress = false;
+    while (timer.Elapsed < TimeSpan.FromSeconds(25))
+    {
+        var progress = FindProgressPane(host, "Apply karaoke template");
+        if (!closedProgress && progress is not null)
+        {
+            var close = progress.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)).Cast<AutomationElement>()
+                .FirstOrDefault(item => item.Current.Name == "Close" && item.Current.IsEnabled
+                    && item.TryGetCurrentPattern(InvokePattern.Pattern, out _));
+            if (close is not null)
+            {
+                SaveEvidence(progress, artifacts, label + "-progress-close");
+                UiaDriver.Invoke(close);
+                closedProgress = true;
+            }
+        }
+        if (invocation.IsCompleted)
+        {
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "No-breakpoint UIA invocation did not return after terminal state");
+            Ensure(ReadRunStatus(workspace).Contains("completed", StringComparison.OrdinalIgnoreCase),
+                "No-breakpoint Debug returned without a completed terminal status");
+            return;
+        }
+        Thread.Sleep(25);
+    }
+    throw new TimeoutException("Debug without breakpoints did not complete naturally within its bounded deadline");
+}
+
+static class MenuObservation
+{
+    private static readonly object gate = new();
+    private static string? path;
+    public sealed record Snapshot(string Menu, string Command, string Name, string AutomationId, int ProcessId,
+        int NativeWindowHandle, bool IsEnabled, bool IsOffscreen, bool HasInvokePattern);
+
+    public static void Initialize(string artifacts)
+        => path = Path.Combine(artifacts, "menu-invocations.ndjson");
+
+    public static Snapshot Capture(string menu, string command,
+        AutomationElement.AutomationElementInformation current, bool hasInvoke)
+        => new(menu, command, current.Name, current.AutomationId, current.ProcessId, current.NativeWindowHandle,
+            current.IsEnabled, current.IsOffscreen, hasInvoke);
+
+    public static void Record(Snapshot snapshot, string phase, string? error)
+    {
+        if (path is null) throw new InvalidOperationException("Menu observation path was not initialized");
+        var line = JsonSerializer.Serialize(new
+        {
+            Utc = DateTimeOffset.UtcNow,
+            snapshot.Menu,
+            snapshot.Command,
+            Phase = phase,
+            snapshot.Name,
+            snapshot.AutomationId,
+            snapshot.ProcessId,
+            snapshot.NativeWindowHandle,
+            snapshot.IsEnabled,
+            snapshot.IsOffscreen,
+            snapshot.HasInvokePattern,
+            Error = error
+        });
+        lock (gate) File.AppendAllText(path, line + Environment.NewLine);
+    }
 }
 
 sealed record AssEvent(string Kind, int Layer, int StartMs, int EndMs, string Style, string Name, int MarginL, int MarginR, int MarginV, string Effect, string Text);
@@ -2102,6 +2519,8 @@ static class Native
     private static extern int PostMessageW(nint hwnd, uint message, nint wParam, nint lParam);
     [DllImport("user32.dll", EntryPoint = "GetClassNameW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetClassNameW(nint hwnd, [Out] char[] className, int maxCount);
+    [DllImport("user32.dll", EntryPoint = "GetParent", ExactSpelling = true)] private static extern nint GetParent(nint hwnd);
+    [DllImport("user32.dll", EntryPoint = "GetDlgCtrlID", ExactSpelling = true)] private static extern int GetDlgCtrlID(nint hwnd);
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern nint SendMessageTimeoutW(nint hwnd, uint message, nint wParam, [Out] char[] buffer,
         uint flags, uint timeout, out nint result);
@@ -2161,6 +2580,52 @@ static class Native
                 "Discovered HWND no longer belongs to the expected host");
             yield return element;
         }
+    }
+
+    public static IReadOnlyList<string> DescribeChildWindows(nint parent, int expectedProcessId)
+    {
+        var lines = new List<string>();
+        var visited = 0;
+        EnumChildWindows(parent, (handle, _) =>
+        {
+            if (++visited > 512) return false;
+            GetWindowThreadProcessId(handle, out var owner);
+            Ensure(owner == (uint)expectedProcessId, "Native evidence discovered a child owned by another process");
+            lines.Add($"child\thandle={handle}\tparent={GetParent(handle)}\tprocess={owner}\tclass={WindowClass(handle)}\tcontrol-id={GetDlgCtrlID(handle)}\tvisible={IsWindowVisible(handle) != 0}\ttitle={WindowText(handle)}");
+            return true;
+        }, 0);
+        Ensure(visited <= 512, "Native evidence exceeded its 512-window bound");
+        return lines;
+    }
+
+    public static IReadOnlyList<(AutomationElement Element, string Text)> ChildTextControls(
+        AutomationElement parent,
+        Process host,
+        string className,
+        Func<string, bool> predicate,
+        bool allowHidden)
+    {
+        var current = parent.Current;
+        Ensure(current.ProcessId == host.Id && current.NativeWindowHandle != 0,
+            "Native child-text root does not belong to the expected host");
+        var matches = new List<(AutomationElement, string)>();
+        EnumChildWindows(new nint(current.NativeWindowHandle), (handle, _) =>
+        {
+            GetWindowThreadProcessId(handle, out var owner);
+            if (owner != (uint)host.Id || WindowClass(handle) != className || (!allowHidden && IsWindowVisible(handle) == 0))
+                return true;
+            var element = AutomationElement.FromHandle(handle);
+            var observed = element.Current;
+            if (!predicate(observed.Name ?? "")) return true;
+            Ensure(observed.ProcessId == host.Id && observed.NativeWindowHandle == handle && observed.ClassName == className
+                && observed.ControlType == ControlType.Text && (allowHidden || !observed.IsOffscreen),
+                "Matched native text control failed its UIA identity or visibility check");
+            var text = ReadControlText(handle, host, className);
+            Ensure(predicate(text), "Matched native text control changed before its bounded text read");
+            matches.Add((element, text));
+            return true;
+        }, 0);
+        return matches;
     }
 
     public static uint ClipboardSequence() => GetClipboardSequenceNumber();
@@ -2278,6 +2743,30 @@ static class Native
     public static void SendKey(AutomationElement editor, Process host, ushort key) => Send(editor, host, Key(key, false), Key(key, true));
 
     public static void Focus(AutomationElement editor, Process host) => PrepareFocus(editor, host);
+    public static void SendKeyToControl(AutomationElement control, Process host, ushort virtualKey)
+    {
+        var frame = control;
+        while (frame.Current.ControlType != ControlType.Window)
+            frame = TreeWalker.ControlViewWalker.GetParent(frame)
+                ?? throw new InvalidOperationException("Native control has no top-level frame");
+        UiaDriver.FocusAndVerify(frame, host, TimeSpan.FromSeconds(3));
+        control.SetFocus();
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < TimeSpan.FromSeconds(3))
+        {
+            GetWindowThreadProcessId(GetForegroundWindow(), out var owner);
+            var focused = AutomationElement.FocusedElement.Current;
+            if (owner == (uint)host.Id && focused.ProcessId == host.Id
+                && (focused.ControlType == ControlType.Tree || focused.ControlType == ControlType.TreeItem))
+                break;
+            Thread.Sleep(50);
+        }
+        Ensure(timer.Elapsed < TimeSpan.FromSeconds(3), "Guarded input did not focus the Lua variables tree");
+        var inputs = new[] { Key(virtualKey, false), Key(virtualKey, true) };
+        if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>()) != inputs.Length)
+            throw new InvalidOperationException("Guarded native-control key input was partial");
+    }
+
     public static void SaveShortcut(AutomationElement editor, Process host)
     {
         PrepareFocus(editor, host);

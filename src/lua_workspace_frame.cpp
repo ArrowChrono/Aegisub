@@ -21,6 +21,7 @@
 #include <libaegisub/scope_exit.h>
 
 #include <wx/button.h>
+#include <wx/checkbox.h>
 #include <wx/choicdlg.h>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
@@ -36,6 +37,7 @@
 #include <wx/stc/stc.h>
 #include <wx/textctrl.h>
 #include <wx/timer.h>
+#include <wx/treectrl.h>
 #include <wx/utils.h>
 
 #include <algorithm>
@@ -51,6 +53,12 @@ namespace {
 constexpr int diagnostic_indicator = 8;
 constexpr std::size_t runtime_text_limit = 2048;
 constexpr std::string_view truncated_marker = "[truncated]";
+
+class DebugVariableItemData final : public wxTreeItemData {
+	public:
+	wxString detail;
+	explicit DebugVariableItemData(wxString value) : detail(std::move(value)) {}
+};
 
 std::string bounded(std::string const& value) {
 	if (value.size() <= runtime_text_limit)
@@ -292,6 +300,12 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 		run_actions->Add(button, 0, wxRIGHT, 6);
 	}
 	layout->Add(run_actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+	auto debug_options = new wxBoxSizer(wxHORIZONTAL);
+	pause_on_entry = new wxCheckBox(panel, wxID_ANY, _("Pause on entry"));
+	pause_on_entry->SetName(wxS("Pause on entry"));
+	debug_options->Add(pause_on_entry, 0, wxRIGHT, 12);
+	debug_options->Add(new wxStaticText(panel, wxID_ANY, _("Debug runs to the next breakpoint by default.")), 0, wxALIGN_CENTER_VERTICAL);
+	layout->Add(debug_options, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
 	auto step_actions = new wxBoxSizer(wxHORIZONTAL);
 	step_in_button = new wxButton(panel, wxID_ANY, _("Step In"));
 	step_over_button = new wxButton(panel, wxID_ANY, _("Step Over"));
@@ -332,7 +346,11 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	editor->SetMarginMask(1, 1 << 1);
 	editor->SetMarginWidth(1, 18);
 	editor->SetMarginSensitive(1, true);
+	editor->SetMarginType(2, wxSTC_MARGIN_SYMBOL);
+	editor->SetMarginMask(2, 1 << 2);
+	editor->SetMarginWidth(2, 18);
 	editor->MarkerDefine(1, wxSTC_MARK_CIRCLE, wxColour(180, 30, 30), wxColour(180, 30, 30));
+	editor->MarkerDefine(2, wxSTC_MARK_ARROW, wxColour(35, 70, 180), wxColour(35, 70, 180));
 	editor->IndicatorSetStyle(diagnostic_indicator, wxSTC_INDIC_SQUIGGLE);
 	editor->IndicatorSetForeground(diagnostic_indicator, wxColour(200, 40, 40));
 	editor->IndicatorSetUnder(diagnostic_indicator, true);
@@ -363,16 +381,25 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	execution_layout->Add(execution_source, 1, wxEXPAND | wxALL, 4);
 	execution_panel->SetSizer(execution_layout);
 	runtime_tabs->AddPage(execution_panel, _("Execution Source"));
+	execution_tab_index = static_cast<int>(runtime_tabs->GetPageCount()) - 1;
 	auto stack_panel = new wxPanel(runtime_tabs);
 	auto stack_layout = new wxBoxSizer(wxVERTICAL);
+	debug_location = new wxStaticText(stack_panel, wxID_ANY, _("No active debug pause."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
+	debug_location->SetName(wxS("Lua debug location"));
 	stack_frames = new wxListBox(stack_panel, wxID_ANY);
 	stack_frames->SetName(wxS("Lua stack frames"));
-	debug_variables = new wxTextCtrl(stack_panel, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
-	debug_variables->SetName(wxS("Lua variables"));
+	debug_variables = new wxTreeCtrl(stack_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_HIDE_ROOT | wxTR_SINGLE);
+	debug_variables->SetName(wxS("Lua variables tree"));
+	variable_details = new wxTextCtrl(stack_panel, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
+	variable_details->SetName(wxS("Lua variable details"));
+	variable_details->SetMinSize(wxSize(-1, 90));
+	stack_layout->Add(debug_location, 0, wxEXPAND | wxALL, 4);
 	stack_layout->Add(stack_frames, 1, wxEXPAND | wxALL, 4);
 	stack_layout->Add(debug_variables, 2, wxEXPAND | wxALL, 4);
+	stack_layout->Add(variable_details, 1, wxEXPAND | wxALL, 4);
 	stack_panel->SetSizer(stack_layout);
 	runtime_tabs->AddPage(stack_panel, _("Stack and Variables"));
+	stack_tab_index = static_cast<int>(runtime_tabs->GetPageCount()) - 1;
 	language = std::make_unique<LuaWorkspaceLanguage>(editor, runtime_tabs);
 	body->Add(runtime_tabs, 1, wxEXPAND | wxRIGHT, 8);
 	layout->Add(body, 1, wxEXPAND);
@@ -426,6 +453,10 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 			ToggleBreakpoint(editor->LineFromPosition(event.GetPosition()) + 1);
 	});
 	stack_frames->Bind(wxEVT_LISTBOX, [this](wxCommandEvent&) { ShowSelectedFrame(); });
+	debug_variables->Bind(wxEVT_TREE_SEL_CHANGED, [this](wxTreeEvent&) {
+		if (!rebuilding_debug_tree)
+			RefreshVariableDetails(active_session && active_session->GetStateSnapshot().current_pause.has_value());
+	});
 	debug_timer = new wxTimer(this);
 	Bind(wxEVT_TIMER, [this](wxTimerEvent&) { PollDebugState(); }, debug_timer->GetId());
 	editor->Bind(wxEVT_STC_CHANGE, [this](wxStyledTextEvent&) {
@@ -606,6 +637,7 @@ void LuaWorkspaceFrame::UpdateRunControls() {
 	bool available = context && document && target_state.state == LuaWorkspaceDocumentState::Ready && no_macro_revision != document->GetRevision();
 	run_button->Enable(!busy && available);
 	debug_button->Enable(!busy && available);
+	pause_on_entry->Enable(!busy);
 	open_button->Enable(!busy);
 	bool paused = false;
 	bool attached = false;
@@ -635,6 +667,7 @@ void LuaWorkspaceFrame::PollDebugState() {
 		return;
 	last_debug_version = state.version;
 	if (state.current_pause) {
+		bool first_pause = !last_debug_snapshot;
 		last_debug_snapshot = state;
 		stack_frames->Clear();
 		for (auto const& frame : state.current_pause->frames) {
@@ -647,6 +680,24 @@ void LuaWorkspaceFrame::PollDebugState() {
 			stack_frames->SetSelection(0);
 			ShowSelectedFrame();
 		}
+		bool current_editor_source = UpdatePausedEditorMarker(state);
+		auto const& pause = *state.current_pause;
+		debug_location->SetLabel(_("Paused at ") + to_wx(pause.location.display_name) + wxString::Format(wxS(":%d"), pause.location.line) + wxS(" [") + to_wx(ToString(pause.reason)) + wxS("]") + (current_editor_source ? _(" [editable source]") : _(" [captured source]")));
+		debug_location->SetToolTip(debug_location->GetLabel());
+		if (first_pause)
+			runtime_tabs->SetSelection(current_editor_source ? stack_tab_index : execution_tab_index);
+	}
+	else {
+		UpdatePausedEditorMarker({});
+		if (last_debug_snapshot && !stack_frames->IsEmpty()) {
+			execution_source->MarkerDeleteAll(2);
+			RefreshExecutionIdentity();
+			RefreshVariableDetails(false);
+			debug_location->SetLabel(_("Last pause [last pause, not current] - invocation is running or has ended."));
+		}
+		else
+			debug_location->SetLabel(_("Debug running; waiting for the next breakpoint or manual pause."));
+		debug_location->SetToolTip(debug_location->GetLabel());
 	}
 	if (active_run_request && active_run_request->stop_requested->load())
 		run_status->SetLabel(_("Stopping at the next safe Lua checkpoint; subtitle commit is still locked."));
@@ -677,42 +728,94 @@ void LuaWorkspaceFrame::ShowSelectedFrame() {
 	execution_source->MarkerDeleteAll(2);
 	execution_source->SetText(source ? to_wx(source->text) : wxString{});
 	execution_source->SetReadOnly(true);
-	if (source) {
-		bool stale = document && (document->GetSourceIdentity() != source->source_identity || document->GetRevision() != source->revision);
-		auto identity = to_wx(source->source_identity) + wxString::Format(wxS(" / revision %llu"), static_cast<unsigned long long>(source->revision));
-		if (stale)
-			identity += wxS(" [stale editor revision]");
-		if (!is_current_pause)
-			identity += wxS(" [last pause, not current]");
-		execution_identity->SetLabel(identity);
-		execution_identity->SetToolTip(execution_identity->GetLabel());
-		if (frame.location.line > 0 && frame.location.line <= execution_source->GetLineCount()) {
-			execution_source->MarkerAdd(frame.location.line - 1, 2);
-			execution_source->ScrollToLine(frame.location.line - 1);
-		}
+	RefreshExecutionIdentity();
+	if (source && is_current_pause && frame.location.line > 0 && frame.location.line <= execution_source->GetLineCount()) {
+		execution_source->MarkerAdd(frame.location.line - 1, 2);
+		execution_source->ScrollToLine(frame.location.line - 1);
 	}
-	else
-		execution_identity->SetLabel(_("Source is not in the immutable invocation registry."));
-	wxString values;
-	auto append_values = [&values](auto const& entries, wxString const& title) {
-		values += title + wxS("\n");
-		for (auto const& variable : entries) {
-			values += wxS("  ") + to_wx(variable.name) + wxS(" = ") + to_wx(variable.value) + wxS("\n");
-			for (auto const& child : variable.children) {
-				values += wxS("    ") + to_wx(child.name) + wxS(" = ") + to_wx(child.value) + wxS("\n");
-				if (!child.children.empty())
-					values += wxS("      [deeper children omitted]\n");
-			}
-		}
+	rebuilding_debug_tree = true;
+	auto resume_tree_events = agi::make_scope_exit([this] { rebuilding_debug_tree = false; });
+	debug_variables->DeleteAllItems();
+	auto root = debug_variables->AddRoot(wxS("Variables"));
+	std::function<wxTreeItemId(wxTreeItemId const&, AutomationDebugVariable const&)> append_variable;
+	append_variable = [&](wxTreeItemId const& parent, AutomationDebugVariable const& variable) {
+		wxString name = to_wx(variable.name), value = to_wx(variable.value);
+		wxString summary = value.size() > 80 ? value.Left(77) + wxS("...") : value;
+		auto detail = wxS("Captured value: ") + value + wxS("\nName: ") + name + wxS("\nType: ") + to_wx(variable.value_type);
+		auto item = debug_variables->AppendItem(parent, name + wxS(" = ") + summary, -1, -1, new DebugVariableItemData(std::move(detail)));
+		for (auto const& child : variable.children)
+			append_variable(item, child);
+		return item;
 	};
-	append_values(frame.locals, wxS("Locals"));
-	append_values(frame.upvalues, wxS("Upvalues"));
+	wxTreeItemId first_variable;
+	auto append_group = [&](wxString const& title, auto const& entries, bool expand) {
+		auto group = debug_variables->AppendItem(root, title + wxString::Format(wxS(" (%zu)"), entries.size()));
+		for (auto const& variable : entries) {
+			auto item = append_variable(group, variable);
+			if (expand && !first_variable.IsOk())
+				first_variable = item;
+		}
+		if (expand)
+			debug_variables->Expand(group);
+	};
+	append_group(_("Locals"), frame.locals, true);
+	append_group(_("Upvalues"), frame.upvalues, true);
 	for (auto const& scope : state.current_pause->scopes)
-		append_values(scope.variables, to_wx(scope.name));
-	if (values.size() > 32768)
-		values = values.Left(32752) + wxS("\n[truncated]\n");
-	values += wxS("Nested variables are shown one level deep; deeper children are omitted.\n");
-	debug_variables->ChangeValue(values);
+		append_group(to_wx(scope.name), scope.variables, false);
+	if (first_variable.IsOk())
+		debug_variables->SelectItem(first_variable);
+	RefreshVariableDetails(is_current_pause);
+}
+
+void LuaWorkspaceFrame::RefreshExecutionIdentity() {
+	auto current = active_session ? active_session->GetStateSnapshot() : AutomationDebugStateSnapshot{};
+	auto state = current.current_pause ? current : last_debug_snapshot.value_or(AutomationDebugStateSnapshot{});
+	if (!state.current_pause)
+		return;
+	int selected = stack_frames->GetSelection();
+	if (selected == wxNOT_FOUND || static_cast<std::size_t>(selected) >= state.current_pause->frames.size())
+		return;
+	auto source = last_sources ? last_sources->Find(state.current_pause->frames[selected].location.source_path) : nullptr;
+	if (!source) {
+		execution_identity->SetLabel(_("Source is not in the immutable invocation registry."));
+		return;
+	}
+	bool stale = document && (document->GetSourceIdentity() != source->source_identity || document->GetRevision() != source->revision);
+	auto identity = to_wx(source->source_identity) + wxString::Format(wxS(" / revision %llu"), static_cast<unsigned long long>(source->revision));
+	if (stale)
+		identity += wxS(" [stale editor revision]");
+	if (!current.current_pause)
+		identity += wxS(" [last pause, not current]");
+	execution_identity->SetLabel(identity);
+	execution_identity->SetToolTip(identity);
+}
+
+void LuaWorkspaceFrame::RefreshVariableDetails(bool live) {
+	wxString prefix = live ? _("Paused value\n") : _("Last pause [not live]\n");
+	auto selection = debug_variables->GetSelection();
+	auto *data = selection.IsOk() ? static_cast<DebugVariableItemData *>(debug_variables->GetItemData(selection)) : nullptr;
+	variable_details->ChangeValue(prefix + (data ? data->detail : _("Select a variable to inspect its captured value.")));
+}
+
+bool LuaWorkspaceFrame::UpdatePausedEditorMarker(AutomationDebugStateSnapshot const& state) {
+	int line = -1;
+	if (state.current_pause && !state.current_pause->frames.empty() && document) {
+		auto const& location = state.current_pause->frames.front().location;
+		auto source = last_sources ? last_sources->Find(location.source_path) : nullptr;
+		if (source && source->source_identity == document->GetSourceIdentity() && source->revision == document->GetRevision() && location.line > 0 && location.line <= editor->GetLineCount())
+			line = location.line - 1;
+	}
+	if (editor->MarkerNext(0, 1 << 2) == line)
+		return line >= 0;
+	bool was_loading = loading;
+	loading = true;
+	auto restore_loading = agi::make_scope_exit([&] { loading = was_loading; });
+	editor->MarkerDeleteAll(2);
+	if (line >= 0) {
+		editor->MarkerAdd(line, 2);
+		editor->ScrollToLine(line);
+	}
+	return line >= 0;
 }
 
 void LuaWorkspaceFrame::StartRun(bool debug) {
@@ -744,7 +847,7 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 		auto *service = config::automation_debug_service;
 		AutomationDebugLaunchRequest launch;
 		launch.enabled = debug;
-		launch.stop_on_entry = debug;
+		launch.stop_on_entry = debug && pause_on_entry->GetValue();
 		launch.nonblocking = false;
 		std::shared_ptr<AutomationDebugSession> lease;
 		try {
@@ -936,11 +1039,16 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 		last_debug_snapshot.reset();
 		last_debug_version = 0;
 		stack_frames->Clear();
-		debug_variables->Clear();
+		rebuilding_debug_tree = true;
+		debug_variables->DeleteAllItems();
+		rebuilding_debug_tree = false;
+		variable_details->Clear();
+		UpdatePausedEditorMarker({});
 		execution_source->SetReadOnly(false);
 		execution_source->SetText(wxString{});
 		execution_source->SetReadOnly(true);
 		execution_identity->SetLabel(_("No paused source."));
+		debug_location->SetLabel(_("Debug running; waiting for the next breakpoint or manual pause."));
 		context->lua_workspace_invocation_active = true;
 		run_status->SetLabel(debug ? _("Debug running; source and breakpoints are frozen for this invocation.")
 								   : _("Run active; unapplied source may still commit generated subtitles."));
@@ -971,6 +1079,16 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 			context->lua_workspace_invocation_active = false;
 			active_run_request.reset();
 			active_session.reset();
+			UpdatePausedEditorMarker({});
+			if (last_debug_snapshot && !stack_frames->IsEmpty()) {
+				execution_source->MarkerDeleteAll(2);
+				RefreshExecutionIdentity();
+				RefreshVariableDetails(false);
+				debug_location->SetLabel(_("Last pause [last pause, not current] - invocation has ended."));
+			}
+			else
+				debug_location->SetLabel(_("Invocation ended without stopping at a breakpoint."));
+			debug_location->SetToolTip(debug_location->GetLabel());
 			if (!failure.empty())
 				run_status->SetLabel(to_wx("Invocation failed: " + failure));
 			else if (outcome == AutomationInvocationOutcome::Failed)
@@ -981,6 +1099,8 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 				run_status->SetLabel(_("Invocation completed."));
 			else
 				run_status->SetLabel(_("Invocation ended without an observed terminal result."));
+			wxString last_progress = run_log->GetValue();
+			run_log->ChangeValue(run_status->GetLabel() + (last_progress.empty() ? wxString{} : _("\nLast reported progress (not live):\n") + last_progress));
 			RefreshDocument();
 			UpdateRunControls();
 			if (close_after_run) {
@@ -1157,8 +1277,9 @@ void LuaWorkspaceFrame::FinishPendingDiscard(bool commit) {
 void LuaWorkspaceFrame::SetEditorSource() {
 	FinishPendingDiscard(false);
 	ClearRuntimeObservation();
-	editor->MarkerDeleteAll(1);
 	loading = true;
+	editor->MarkerDeleteAll(1);
+	editor->MarkerDeleteAll(2);
 	editor->SetReadOnly(false);
 	editor->SetText(document ? to_wx(document->GetSource()) : wxString{});
 	editor->EmptyUndoBuffer();
@@ -1220,8 +1341,10 @@ void LuaWorkspaceFrame::RefreshDocument(bool check_target) {
 	SetTitle(title);
 	ShowResult(target_state, false);
 	UpdateRunControls();
+	if (active_session)
+		UpdatePausedEditorMarker(active_session->GetStateSnapshot());
 	if (last_debug_snapshot && last_debug_snapshot->current_pause)
-		ShowSelectedFrame();
+		RefreshExecutionIdentity();
 }
 
 bool LuaWorkspaceFrame::FinishOpen(std::unique_ptr<LuaWorkspaceDocument> candidate, LuaWorkspaceDocumentResult const& result) {

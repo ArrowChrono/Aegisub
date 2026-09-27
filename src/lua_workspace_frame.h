@@ -13,12 +13,14 @@
 #include <string>
 
 class wxButton;
+class wxCheckBox;
 class wxStaticText;
 class wxStyledTextCtrl;
 class wxTextCtrl;
 class wxListBox;
 class wxNotebook;
 class wxTimer;
+class wxTreeCtrl;
 namespace agi {
 struct Context;
 }
@@ -48,7 +50,13 @@ class LuaWorkspaceFrame : public wxFrame {
 	wxStyledTextCtrl *execution_source = nullptr;
 	wxStaticText *execution_identity = nullptr;
 	wxListBox *stack_frames = nullptr;
-	wxTextCtrl *debug_variables = nullptr;
+	wxTreeCtrl *debug_variables = nullptr;
+	wxTextCtrl *variable_details = nullptr;
+	wxStaticText *debug_location = nullptr;
+	wxCheckBox *pause_on_entry = nullptr;
+	int execution_tab_index = -1;
+	int stack_tab_index = -1;
+	bool rebuilding_debug_tree = false;
 	wxTextCtrl *run_log = nullptr;
 	wxStaticText *run_status = nullptr;
 	wxButton *run_button = nullptr;
@@ -93,6 +101,9 @@ class LuaWorkspaceFrame : public wxFrame {
 	void UpdateRunControls();
 	void PollDebugState();
 	void ShowSelectedFrame();
+	void RefreshExecutionIdentity();
+	bool UpdatePausedEditorMarker(Automation4::AutomationDebugStateSnapshot const& state);
+	void RefreshVariableDetails(bool live);
 	void ToggleBreakpoint(int line);
 	std::vector<Automation4::AutomationDebugBreakpoint> CaptureBreakpoints(std::string const& source_uri) const;
 
