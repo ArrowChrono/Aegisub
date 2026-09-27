@@ -37,7 +37,7 @@ bool NeedsSpace(Token const *previous, Token const& current) {
 	auto member_access = [](Token const& token) {
 		return token.kind == TokenKind::Symbol && (token.text == "." || token.text == ":");
 	};
-	return previous && !member_access(*previous) && !member_access(current);
+	return previous && !member_access(*previous) && !member_access(current) && !(current.kind == TokenKind::Symbol && current.text == ";");
 }
 
 bool IsNewline(char c) { return c == '\r' || c == '\n'; }

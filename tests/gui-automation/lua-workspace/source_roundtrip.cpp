@@ -110,6 +110,11 @@ void CheckMemberAccessFormat(std::string_view source, std::string_view stage) {
 	Require(source.find("n .. .5") != std::string_view::npos, std::string(stage) + " merged concatenation and leading-decimal number");
 }
 
+void CheckSemicolonFormat(std::string_view source, std::string_view stage) {
+	for (auto const text : {"2;", "3;", "total + value;", "choose ( 7 );"})
+		Require(source.find(text) != std::string_view::npos, std::string(stage) + " inserted space before a semicolon at " + text);
+}
+
 void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std::string const& name) {
 	fs::create_directories(artifacts);
 	auto const original = ReadFile(fixtures / (name + ".lua"));
@@ -129,6 +134,11 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 		Require(formatted.source.find("--[=[Unicode Ω . : ... ]=]") != std::string::npos, "Formatting changed long-comment token content");
 		Require(formatted.source.find("-- Ω . : .. ... - - 雪") != std::string::npos, "Formatting changed line-comment token content");
 	}
+	if (name == "semicolons") {
+		CheckSemicolonFormat(formatted.source, "Formatting");
+		for (auto const text : {"\"雪 ; 🌟\"", "[=[文 ; 本]=]", "-- punctuation ; stays inside this comment", "--[=[long comment ; punctuation]=]"})
+			Require(formatted.source.find(text) != std::string::npos, "Formatting changed literal or comment semicolon spacing");
+	}
 	ExpectResult(formatted.source, expected, artifacts / "formatted.actual");
 
 	auto const serialized = Automation4::SerializeLuaSource(formatted.source);
@@ -139,6 +149,10 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 	if (name == "member-access") {
 		CheckMemberAccessFormat(serialized.source, "Serialization");
 		WriteFile(artifacts / "format-contract.txt", "Chained members and method calls stay adjacent; numeric concatenation remains separate.\n");
+	}
+	if (name == "semicolons") {
+		CheckSemicolonFormat(serialized.source, "Serialization");
+		WriteFile(artifacts / "format-contract.txt", "Statement and table separators have no preceding space; literals and comments retain their content.\n");
 	}
 	ExpectResult(serialized.source, expected, artifacts / "serialized.actual");
 
@@ -387,7 +401,7 @@ int main(int argc, char **argv) {
 			WriteFile(artifacts / "manifest.txt", manifest);
 		};
 		run("classifier", [&] { fs::create_directories(artifacts / "classifier"); CheckClassifier(artifacts / "classifier"); });
-		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access"})
+		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access", "semicolons"})
 			run(name, [&] { RunExecutableCase(fixtures, artifacts / name, name); });
 		run("validate_only", [&] { RunValidateOnlyCase(fixtures, artifacts / "validate_only"); });
 		for (auto const& name : {"invalid_escape", "binary"})
