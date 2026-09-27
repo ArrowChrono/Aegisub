@@ -6,6 +6,8 @@ The harness accepts a repository-relative fixture directory and an explicit arti
 
 Each case retains source variants, actual and expected results, diagnostics where applicable, the input and output ASS files, and `status.txt`. The top-level `manifest.txt` records all cases and remains available after a failure. `classifier` writes several effect lines to ASS, reopens them, runs the repository's `kara-templater.lua` parser with minimal Automation host stubs, and compares its parsed code entries to the C++ classifier. The comment text in lexical fixtures is synthetic tokenizer input, including delimiter-shaped bytes; it is not an issue citation or project documentation.
 
+The `member-access` case additionally checks chained member access and method definitions/calls without spaces around single `.` and `:` tokens. It combines Unicode, long strings, comments, varargs, labels, separated minus tokens, and numeric concatenation (`1 .. 2` and `n .. .5`). Targeted spacing checks complement the independent business result at all four execution stages; they do not replace semantic round-trip verification.
+
 From the repository root, with the configured `build-dir` and `RelWithDebInfo` configuration:
 
 ```powershell

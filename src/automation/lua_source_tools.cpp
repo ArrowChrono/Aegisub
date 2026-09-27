@@ -33,6 +33,13 @@ struct Token {
 	bool line_comment = false;
 };
 
+bool NeedsSpace(Token const *previous, Token const& current) {
+	auto member_access = [](Token const& token) {
+		return token.kind == TokenKind::Symbol && (token.text == "." || token.text == ":");
+	};
+	return previous && !member_access(*previous) && !member_access(current);
+}
+
 bool IsNewline(char c) { return c == '\r' || c == '\n'; }
 bool IsSpace(char c) { return c == ' ' || c == '\t' || c == '\v' || c == '\f' || IsNewline(c); }
 bool IsDigit(char c) { return c >= '0' && c <= '9'; }
@@ -268,8 +275,9 @@ LuaSourceResult SerializeLuaSource(std::string_view source) {
 	if (auto diagnostic = Tokenize(source, tokens))
 		return Failure(source, *diagnostic);
 	std::string output;
+	Token const *previous = nullptr;
 	for (auto const& token : tokens) {
-		if (!output.empty())
+		if (NeedsSpace(previous, token))
 			output += ' ';
 		if (token.kind == TokenKind::String) {
 			auto literal = SerializeString(token);
@@ -281,6 +289,7 @@ LuaSourceResult SerializeLuaSource(std::string_view source) {
 			output += SerializeComment(token.comment_body);
 		else
 			output += token.text;
+		previous = &token;
 	}
 	if (auto diagnostic = ValidateLuaSource(output))
 		return Failure(source, *diagnostic);
@@ -296,6 +305,7 @@ LuaSourceResult FormatLuaSource(std::string_view source) {
 	std::string output;
 	int indent = 0;
 	bool function_parameters = false;
+	Token const *previous = nullptr;
 	auto newline = [&] {
 		if (!output.empty() && output.back() != '\n')
 			output += '\n';
@@ -312,9 +322,10 @@ LuaSourceResult FormatLuaSource(std::string_view source) {
 			newline();
 		if (output.empty() || output.back() == '\n')
 			output.append(static_cast<size_t>(indent), '\t');
-		else
+		else if (NeedsSpace(previous, token))
 			output += ' ';
 		output += text;
+		previous = &token;
 		if (keyword && text == "function") {
 			++indent;
 			function_parameters = true;

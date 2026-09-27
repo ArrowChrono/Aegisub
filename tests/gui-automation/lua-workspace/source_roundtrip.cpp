@@ -100,6 +100,16 @@ void ExpectResult(std::string_view source, std::string_view expected, fs::path c
 	Require(actual == expected, "Business result differs from the independent expected value at " + artifact.generic_string());
 }
 
+void CheckMemberAccessFormat(std::string_view source, std::string_view stage) {
+	auto const method = source.find("object.branch:tag");
+	Require(method != std::string_view::npos && source.find("object.branch:tag", method + 1) != std::string_view::npos,
+			std::string(stage) + " separated a chained method definition or call");
+	Require(source.find("object.branch.name") != std::string_view::npos, std::string(stage) + " separated chained member access");
+	Require(source.find("self.name") != std::string_view::npos, std::string(stage) + " separated member access inside the method");
+	Require(source.find("1 .. 2") != std::string_view::npos, std::string(stage) + " merged numeric concatenation into a number token");
+	Require(source.find("n .. .5") != std::string_view::npos, std::string(stage) + " merged concatenation and leading-decimal number");
+}
+
 void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std::string const& name) {
 	fs::create_directories(artifacts);
 	auto const original = ReadFile(fixtures / (name + ".lua"));
@@ -113,6 +123,12 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 	Require(formatted.Succeeded(), "Formatting failed: " + (formatted.diagnostic ? formatted.diagnostic->message : std::string()));
 	WriteFile(artifacts / "formatted.lua", formatted.source);
 	Require(!Automation4::ValidateLuaSource(formatted.source), "Formatted source failed validation");
+	if (name == "member-access") {
+		CheckMemberAccessFormat(formatted.source, "Formatting");
+		Require(formatted.source.find("[==[长串 . : .. -- ]=] intact]==]") != std::string::npos, "Formatting changed long-string token content");
+		Require(formatted.source.find("--[=[Unicode Ω . : ... ]=]") != std::string::npos, "Formatting changed long-comment token content");
+		Require(formatted.source.find("-- Ω . : .. ... - - 雪") != std::string::npos, "Formatting changed line-comment token content");
+	}
 	ExpectResult(formatted.source, expected, artifacts / "formatted.actual");
 
 	auto const serialized = Automation4::SerializeLuaSource(formatted.source);
@@ -120,6 +136,10 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 	WriteFile(artifacts / "serialized.lua", serialized.source);
 	Require(serialized.source.find_first_of("\r\n") == std::string::npos, "Serialized source contains a physical line break");
 	Require(!Automation4::ValidateLuaSource(serialized.source), "Serialized source failed validation");
+	if (name == "member-access") {
+		CheckMemberAccessFormat(serialized.source, "Serialization");
+		WriteFile(artifacts / "format-contract.txt", "Chained members and method calls stay adjacent; numeric concatenation remains separate.\n");
+	}
 	ExpectResult(serialized.source, expected, artifacts / "serialized.actual");
 
 	AssFile file;
@@ -367,7 +387,7 @@ int main(int argc, char **argv) {
 			WriteFile(artifacts / "manifest.txt", manifest);
 		};
 		run("classifier", [&] { fs::create_directories(artifacts / "classifier"); CheckClassifier(artifacts / "classifier"); });
-		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty"})
+		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access"})
 			run(name, [&] { RunExecutableCase(fixtures, artifacts / name, name); });
 		run("validate_only", [&] { RunValidateOnlyCase(fixtures, artifacts / "validate_only"); });
 		for (auto const& name : {"invalid_escape", "binary"})
