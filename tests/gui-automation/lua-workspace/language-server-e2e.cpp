@@ -356,6 +356,9 @@ int RunSilentServer(std::string_view mode) {
 			response = R"({"jsonrpc":"2.0","id":)" + std::to_string(number) + R"(,"result":{"capabilities":{"positionEncoding":"utf-16"}}})";
 		else if (method == "textDocument/documentSymbol")
 			response = R"({"jsonrpc":"2.0","id":)" + std::to_string(number) + R"(,"result":[]})";
+		else if (method == "textDocument/hover" && mode == "presentation")
+			response = R"({"jsonrpc":"2.0","id":)" + std::to_string(number) +
+					   R"JSON(,"result":{"contents":{"kind":"markdown","value":"```lua\n(global) sample: string\n    local indented = \"#foo\"\n```\n---\n```lua\nsample = \"first 漢😀\"\n```\n---\n```lua\nsample = \"second\"\n```\n#not-heading\n>0\n# Heading\n> Quote\n*See* [`sample`](https://example.invalid/sample)"}}})JSON";
 		else if (method == "textDocument/signatureHelp")
 			response = R"({"jsonrpc":"2.0","id":)" + std::to_string(number) + R"(,"error":{"code":-32603,"message":"controlled signature failure"}})";
 		else if (method == "shutdown")
@@ -382,7 +385,7 @@ std::string Manifest(std::vector<std::pair<std::string, std::string>> const& res
 							 "file-to-virtual-quick-request-and-stale-isolation", "actual-karaoke-environment", "ordinary-host-isolation",
 							 "include-module-completion-and-signature", "selected-completion-replacement",
 							 "karaoke-scope-matrix", "chunk-identity-local-isolation", "unicode-config-switch", "null-document-disable-and-reopen",
-							 "owned-server-termination-and-recovery", "missing-and-incomplete-server-no-fallback", "startup-timeout", "request-timeout"}) {
+							 "owned-server-termination-and-recovery", "missing-and-incomplete-server-no-fallback", "hover-markdown-presentation", "startup-timeout", "request-timeout"}) {
 		if (std::ranges::any_of(results, [&](auto const& step) { return step.first == name; }))
 			continue;
 		if (text.back() != '[')
@@ -401,7 +404,7 @@ int main(int argc, char **argv) {
 		auto const marker = fs::current_path() / "main.lua";
 		if (fs::is_regular_file(marker)) {
 			auto const mode = ReadFile(marker);
-			if (mode == "startup-silence" || mode == "request-silence")
+			if (mode == "startup-silence" || mode == "request-silence" || mode == "presentation")
 				return RunSilentServer(mode);
 		}
 	}
@@ -457,20 +460,27 @@ int main(int argc, char **argv) {
 			Require(signature.text.find("scale(value") != std::string::npos, "Method signature is absent");
 		});
 		step("versioned-undefined-diagnostic", [&] {
-			source = ReplaceOnce(source, "candidate + called", "candidate + called + missing_symbol_abc");
+			source = ReplaceOnce(source, "local result = candidate + called", "lowercase_workspace_probe = 1\r\nlocal result = candidate + called + missing_symbol_abc");
 			generation = server.Update(configuration, Document("file-source", input, source, 2));
 			observer.Ready(generation);
 			auto diagnostic = observer.Wait([&](auto const& event) {
 				return event.kind == LuaLanguageEvent::Kind::Diagnostics && event.generation == generation &&
-					   std::ranges::any_of(event.diagnostics, [](auto const& item) { return item.message.find("missing_symbol_abc") != std::string::npos; });
+					   std::ranges::any_of(event.diagnostics, [](auto const& item) { return item.message.find("missing_symbol_abc") != std::string::npos; }) &&
+					   std::ranges::any_of(event.diagnostics, [](auto const& item) { return item.message.starts_with("lowercase_workspace_probe: "); });
 			},
-											15s, "versioned undefined-global diagnostic");
+											15s, "versioned global diagnostics");
 			auto const start = source.find("missing_symbol_abc");
 			Require(std::ranges::any_of(diagnostic.diagnostics, [&](auto const& item) { return item.start == start && item.end == start + 18; }),
 					"Undefined-global diagnostic has a wrong UTF-8 byte range");
+			auto const lowercase = source.find("lowercase_workspace_probe");
+			Require(std::ranges::any_of(diagnostic.diagnostics, [&](auto const& item) {
+						return item.start == lowercase && item.end == lowercase + 25 && item.message.starts_with("lowercase_workspace_probe: ");
+					}),
+					"Lowercase-global diagnostic lost its exact UTF-8 source subject");
 		});
 		step("unversioned-empty-is-unconfirmed", [&] {
 			source = ReplaceOnce(source, " + missing_symbol_abc", "");
+			source = ReplaceOnce(source, "lowercase_workspace_probe = 1\r\n", "");
 			generation = server.Update(configuration, Document("file-source", input, source, 3));
 			observer.Ready(generation);
 			auto invalidation = observer.Wait([&](auto const& event) {
@@ -876,6 +886,57 @@ return unicode_prefix, completion_probe, selected_probe, called
 		},
 					  5s, "real LuaLS close before isolated timeout fixtures");
 		WaitOwnedChildExit(copied_executable, deadline);
+		step("hover-markdown-presentation", [&] {
+			auto const directory = artifacts / "presentation";
+			auto const release = directory / "release";
+			fs::create_directories(release / "bin");
+			fs::create_directories(release / "script");
+			fs::create_directories(release / "meta");
+			auto const executable = fs::absolute(argv[0]);
+			fs::copy_file(executable, release / "bin/lua-language-server.exe");
+			std::string copied;
+			for (auto const& entry : fs::directory_iterator(executable.parent_path())) {
+				if (!entry.is_regular_file() || entry.path().extension() != ".dll")
+					continue;
+				fs::copy_file(entry.path(), release / "bin" / entry.path().filename());
+				copied += agi::fs::PathToGenericString(entry.path().filename()) + '\n';
+			}
+			Require(!copied.empty(), "Presentation fixture runtime DLL list is empty");
+			WriteFile(directory / "copied-runtime-dlls.txt", copied);
+			WriteFile(release / "main.lua", "presentation");
+			fs::create_directories(directory / "cache");
+			LuaLanguageServer presentation_server;
+			Observer presentation_observer(presentation_server, deadline, directory);
+			LuaLanguageConfiguration presentation_configuration{.directory = release, .cache_directory = directory / "cache"};
+			std::string presentation_source = "local sample = 'hover'\nreturn sample\n";
+			auto presentation_generation = presentation_server.Update(
+				presentation_configuration, Document("presentation/source", {}, presentation_source));
+			presentation_observer.Ready(presentation_generation);
+			auto const position = After(presentation_source, "return sample");
+			auto const request = presentation_server.Request(LuaLanguageRequest::Hover, position, position, position);
+			auto const hover = presentation_observer.Response(LuaLanguageEvent::Kind::Hover, presentation_generation, request);
+			for (auto const& expected : {"Candidate 1 of 3", "Candidate 2 of 3", "Candidate 3 of 3", "(global) sample: string",
+										 "    local indented = \"#foo\"", "sample = \"first 漢😀\"", "sample = \"second\"", "\n#not-heading\n", "\n>0\n",
+										 "\nHeading\nQuote\n", "See sample (https://example.invalid/sample)"})
+				Require(hover.text.find(expected) != std::string::npos, "Plain hover omitted a Markdown candidate or its content");
+			Require(hover.text.find("```") == std::string::npos && hover.text.find("\n---\n") == std::string::npos && hover.text.find("[`sample`]") == std::string::npos,
+					"Plain hover retained Markdown presentation syntax");
+			for (std::size_t start = 0; start <= hover.text.size();) {
+				auto end = hover.text.find('\n', start);
+				if (end == std::string::npos)
+					end = hover.text.size();
+				Require(end - start <= 120, "Plain hover contains an unbounded display line");
+				if (end == hover.text.size())
+					break;
+				start = end + 1;
+			}
+			presentation_generation = presentation_server.Update(presentation_configuration, std::nullopt);
+			presentation_observer.Wait([&](auto const& event) {
+				return event.kind == LuaLanguageEvent::Kind::Status && event.generation == presentation_generation && event.text == "LuaLS: inactive";
+			},
+									   3s, "presentation fixture close");
+			WaitOwnedChildExit(fs::absolute(release / "bin/lua-language-server.exe"), deadline);
+		});
 		auto timeout_case = [&](std::string_view mode) {
 			auto const directory = artifacts / std::string(mode);
 			auto const release = directory / "release";

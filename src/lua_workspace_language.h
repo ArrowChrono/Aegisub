@@ -48,8 +48,10 @@ class LuaWorkspaceLanguage final : public wxEvtHandler {
 	void ClearDiagnostics();
 	void ClearTip();
 	void Request(Automation4::LuaLanguageRequest kind, int position);
+	void AfterCharacter(int character);
 	void OnTimer(wxTimerEvent& event);
 	void OnCharHook(wxKeyEvent& event);
+	void OnChar(wxKeyEvent& event);
 	void OnCharacter(wxStyledTextEvent& event);
 	void OnSelection(wxStyledTextEvent& event);
 	void OnUpdateUI(wxStyledTextEvent& event);

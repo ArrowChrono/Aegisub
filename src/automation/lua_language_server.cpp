@@ -12,10 +12,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -24,6 +26,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 constexpr std::size_t message_limit = 8 * 1024 * 1024;
+constexpr std::size_t documentation_candidate_limit = 24;
+constexpr std::size_t documentation_candidate_length = 2048;
+constexpr std::size_t documentation_line_length = 100;
 
 json::UnknownElement Parse(std::string const& text) {
 	json::UnknownElement value;
@@ -151,30 +156,201 @@ std::size_t Offset(std::string_view source, json::Object const& position) {
 	return i;
 }
 
-std::string Documentation(json::UnknownElement const& value) {
+std::string_view Trim(std::string_view text) {
+	while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+		text.remove_prefix(1);
+	while (!text.empty() && (text.back() == ' ' || text.back() == '\t'))
+		text.remove_suffix(1);
+	return text;
+}
+
+bool MarkdownRule(std::string_view line) {
+	line = Trim(line);
+	if (line.size() < 3)
+		return false;
+	auto marker = line.front();
+	if (marker != '-' && marker != '*' && marker != '_')
+		return false;
+	std::size_t count = 0;
+	for (auto character : line) {
+		if (character == marker)
+			++count;
+		else if (character != ' ' && character != '\t')
+			return false;
+	}
+	return count >= 3;
+}
+
+std::string PlainMarkdownLine(std::string_view line) {
+	line = Trim(line);
+	std::size_t heading = 0;
+	while (heading < line.size() && heading < 6 && line[heading] == '#')
+		++heading;
+	if (heading > 0 && (heading == line.size() || line[heading] == ' ' || line[heading] == '\t')) {
+		line.remove_prefix(heading);
+		line = Trim(line);
+	}
+	while (line.starts_with('>') && (line.size() == 1 || line[1] == ' ' || line[1] == '\t' || line[1] == '>')) {
+		line.remove_prefix(1);
+		line = Trim(line);
+	}
+
+	std::string result;
+	bool emphasis = false;
+	for (std::size_t i = 0; i < line.size();) {
+		if (line[i] == '`') {
+			auto close = line.find('`', i + 1);
+			if (close != std::string_view::npos) {
+				result.append(line.substr(i + 1, close - i - 1));
+				i = close + 1;
+				continue;
+			}
+		}
+		if (line[i] == '*' && (emphasis || line.find('*', i + 1) != std::string_view::npos)) {
+			emphasis = !emphasis;
+			++i;
+			continue;
+		}
+		if (line[i] == '[') {
+			auto label_end = line.find(']', i + 1);
+			if (label_end != std::string_view::npos && label_end + 1 < line.size() && line[label_end + 1] == '(') {
+				auto url_end = line.find(')', label_end + 2);
+				if (url_end != std::string_view::npos) {
+					result += PlainMarkdownLine(line.substr(i + 1, label_end - i - 1));
+					auto url = line.substr(label_end + 2, url_end - label_end - 2);
+					if (!url.empty()) {
+						result += " (";
+						result += url;
+						result += ')';
+					}
+					i = url_end + 1;
+					continue;
+				}
+			}
+		}
+		result += line[i++];
+	}
+	return result;
+}
+
+std::vector<std::string> MarkdownSections(std::string_view text) {
+	std::vector<std::string> result(1);
+	bool fence = false;
+	for (std::size_t start = 0; start <= text.size();) {
+		auto end = text.find('\n', start);
+		if (end == std::string_view::npos)
+			end = text.size();
+		auto line = text.substr(start, end - start);
+		if (!line.empty() && line.back() == '\r')
+			line.remove_suffix(1);
+		auto trimmed = Trim(line);
+		if (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
+			fence = !fence;
+		else if (!fence && MarkdownRule(trimmed)) {
+			if (!result.back().empty())
+				result.emplace_back();
+		}
+		else {
+			auto plain = fence ? std::string(line) : PlainMarkdownLine(line);
+			if (!plain.empty() || (!result.back().empty() && !result.back().ends_with("\n\n"))) {
+				if (!result.back().empty())
+					result.back() += '\n';
+				result.back() += plain;
+			}
+		}
+		if (end == text.size())
+			break;
+		start = end + 1;
+	}
+	std::erase_if(result, [](auto const& section) { return section.empty(); });
+	return result;
+}
+
+std::vector<std::string> DocumentationSections(json::UnknownElement const& value) {
 	try {
-		return static_cast<json::String const&>(value);
+		return MarkdownSections(static_cast<json::String const&>(value));
 	}
 	catch (json::Exception const&) {
 	}
 	try {
 		auto const& object = static_cast<json::Object const&>(value);
-		return String(object, "value");
+		auto text = String(object, "value");
+		if (String(object, "kind") == "plaintext" || object.contains("language"))
+			return text.empty() ? std::vector<std::string>{} : std::vector<std::string>{std::move(text)};
+		return MarkdownSections(text);
 	}
 	catch (json::Exception const&) {
 	}
 	try {
-		std::string text;
+		std::vector<std::string> result;
 		for (auto const& item : static_cast<json::Array const&>(value)) {
-			if (!text.empty())
-				text += '\n';
-			text += Documentation(item);
+			auto sections = DocumentationSections(item);
+			result.insert(result.end(), std::make_move_iterator(sections.begin()), std::make_move_iterator(sections.end()));
 		}
-		return text;
+		return result;
 	}
 	catch (json::Exception const&) {
 	}
 	return {};
+}
+
+std::size_t DocumentationLinePrefix(std::string_view line) {
+	std::size_t offset = 0;
+	for (std::size_t characters = 0; offset < line.size() && characters < documentation_line_length; ++characters)
+		offset += CharacterSize(line, offset);
+	return offset;
+}
+
+std::string WrapDocumentation(std::string_view text) {
+	std::string result;
+	for (std::size_t line_start = 0; line_start <= text.size();) {
+		auto line_end = text.find('\n', line_start);
+		if (line_end == std::string_view::npos)
+			line_end = text.size();
+		auto line = text.substr(line_start, line_end - line_start);
+		while (line.size() > DocumentationLinePrefix(line)) {
+			auto prefix = DocumentationLinePrefix(line);
+			auto split = line.rfind(' ', prefix);
+			if (split == std::string_view::npos || split == 0)
+				split = prefix;
+			if (!result.empty())
+				result += '\n';
+			result += line.substr(0, split);
+			line.remove_prefix(split);
+			while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
+				line.remove_prefix(1);
+		}
+		if (!result.empty())
+			result += '\n';
+		result += line;
+		if (line_end == text.size())
+			break;
+		line_start = line_end + 1;
+	}
+	if (result.size() > documentation_candidate_length) {
+		auto cut = documentation_candidate_length;
+		while (cut > 0 && (static_cast<unsigned char>(result[cut]) & 0xc0) == 0x80)
+			--cut;
+		result.resize(cut);
+		result += "\n[content truncated]";
+	}
+	return result;
+}
+
+std::string Documentation(json::UnknownElement const& value) {
+	auto sections = DocumentationSections(value);
+	std::string result;
+	auto displayed = std::min(sections.size(), documentation_candidate_limit);
+	for (std::size_t i = 0; i < displayed; ++i) {
+		if (!result.empty())
+			result += "\n\n";
+		if (sections.size() > 1)
+			result += "Candidate " + std::to_string(i + 1) + " of " + std::to_string(sections.size()) + "\n";
+		result += WrapDocumentation(sections[i]);
+	}
+	if (displayed < sections.size())
+		result += "\n\n[" + std::to_string(sections.size() - displayed) + " additional candidates not shown]";
+	return result;
 }
 
 void WriteFile(agi::fs::path const& path, std::string const& text) {
@@ -524,7 +700,12 @@ struct LuaLanguageServer::Impl {
 			try {
 				auto const& object = static_cast<json::Object const&>(item);
 				auto edit = ReadEdit(object);
-				event.diagnostics.push_back({.start = edit.start, .end = edit.end, .severity = static_cast<int>(Integer(object, "severity", 1)), .message = String(object, "message")});
+				auto message = String(object, "message");
+				if (String(object, "code") == "lowercase-global" && edit.start < edit.end && edit.end <= source.size()) {
+					message.insert(0, ": ");
+					message.insert(0, source, edit.start, edit.end - edit.start);
+				}
+				event.diagnostics.push_back({.start = edit.start, .end = edit.end, .severity = static_cast<int>(Integer(object, "severity", 1)), .message = std::move(message)});
 			}
 			catch (std::exception const&) {
 			}

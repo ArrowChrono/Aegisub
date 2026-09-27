@@ -27,6 +27,38 @@ using namespace Automation4;
 
 namespace {
 constexpr int language_indicator = 9;
+
+bool IsLuaStringStyle(int style) {
+	switch (style) {
+		case wxSTC_LUA_STRING:
+		case wxSTC_LUA_CHARACTER:
+		case wxSTC_LUA_LITERALSTRING:
+		case wxSTC_LUA_STRINGEOL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+bool IsLuaTextStyle(int style) {
+	return style == wxSTC_LUA_COMMENT || style == wxSTC_LUA_COMMENTLINE || style == wxSTC_LUA_COMMENTDOC || IsLuaStringStyle(style);
+}
+
+bool CanPairAt(wxStyledTextCtrl *editor, int position) {
+	if (position <= 0)
+		return true;
+	editor->Colourise(0, position);
+	auto style = editor->GetStyleAt(position - 1);
+	auto previous = editor->GetCharAt(position - 1);
+	if ((previous == '\r' || previous == '\n') && (style == wxSTC_LUA_COMMENTLINE || style == wxSTC_LUA_STRINGEOL))
+		return true;
+	return !IsLuaTextStyle(style);
+}
+
+bool CanSkipClosingAt(wxStyledTextCtrl *editor, int position) {
+	editor->Colourise(0, position + 1);
+	return !IsLuaTextStyle(editor->GetStyleAt(position));
+}
 }
 
 LuaWorkspaceLanguage::LuaWorkspaceLanguage(wxStyledTextCtrl *editor, wxNotebook *notebook)
@@ -53,6 +85,7 @@ LuaWorkspaceLanguage::LuaWorkspaceLanguage(wxStyledTextCtrl *editor, wxNotebook 
 	editor->AutoCompSetMaxHeight(12);
 	editor->SetMouseDwellTime(500);
 	editor->Bind(wxEVT_CHAR_HOOK, &LuaWorkspaceLanguage::OnCharHook, this);
+	editor->Bind(wxEVT_CHAR, &LuaWorkspaceLanguage::OnChar, this);
 	editor->Bind(wxEVT_STC_CHARADDED, &LuaWorkspaceLanguage::OnCharacter, this);
 	editor->Bind(wxEVT_STC_AUTOCOMP_SELECTION, &LuaWorkspaceLanguage::OnSelection, this);
 	editor->Bind(wxEVT_STC_UPDATEUI, &LuaWorkspaceLanguage::OnUpdateUI, this);
@@ -65,6 +98,7 @@ LuaWorkspaceLanguage::LuaWorkspaceLanguage(wxStyledTextCtrl *editor, wxNotebook 
 LuaWorkspaceLanguage::~LuaWorkspaceLanguage() {
 	timer.Stop();
 	editor->Unbind(wxEVT_CHAR_HOOK, &LuaWorkspaceLanguage::OnCharHook, this);
+	editor->Unbind(wxEVT_CHAR, &LuaWorkspaceLanguage::OnChar, this);
 	editor->Unbind(wxEVT_STC_CHARADDED, &LuaWorkspaceLanguage::OnCharacter, this);
 	editor->Unbind(wxEVT_STC_AUTOCOMP_SELECTION, &LuaWorkspaceLanguage::OnSelection, this);
 	editor->Unbind(wxEVT_STC_UPDATEUI, &LuaWorkspaceLanguage::OnUpdateUI, this);
@@ -198,16 +232,53 @@ void LuaWorkspaceLanguage::OnCharHook(wxKeyEvent& event) {
 	event.Skip();
 }
 
-void LuaWorkspaceLanguage::OnCharacter(wxStyledTextEvent& event) {
+void LuaWorkspaceLanguage::OnChar(wxKeyEvent& event) {
+	int character = event.GetUnicodeKey();
+	if (character <= 127)
+		character = event.GetKeyCode();
+	bool text_modifier = (!event.ControlDown() && !event.AltDown()) || (event.ControlDown() && event.AltDown());
+	if (character != WXK_NONE && text_modifier && !event.MetaDown() && !editor->GetReadOnly() && editor->GetSelectionEmpty()) {
+		auto position = editor->GetCurrentPos();
+		auto quote = character == '\'' || character == '"';
+		auto closing_character = character == ')' || character == ']' || character == '}';
+		editor->Colourise(0, position);
+		if ((closing_character || quote) && editor->GetCharAt(position) == character &&
+			((closing_character && CanSkipClosingAt(editor, position)) || (quote && position > 0 && IsLuaStringStyle(editor->GetStyleAt(position - 1))))) {
+			editor->GotoPos(position + 1);
+			return;
+		}
+		char closing = character == '(' ? ')' : character == '[' ? ']'
+											: character == '{'   ? '}'
+											: character == '\''  ? '\''
+											: character == '"'   ? '"'
+																 : 0;
+		if (closing && CanPairAt(editor, position)) {
+			char pair[]{static_cast<char>(character), closing, 0};
+			editor->BeginUndoAction();
+			editor->ReplaceSelection(to_wx(pair));
+			editor->GotoPos(position + 1);
+			editor->EndUndoAction();
+			AfterCharacter(character);
+			return;
+		}
+	}
+	event.Skip();
+}
+
+void LuaWorkspaceLanguage::AfterCharacter(int character) {
 	if (completion_refresh_pending) {
 		completion_position = editor->GetCurrentPos();
 		selection_start = editor->GetSelectionStart();
 		selection_end = editor->GetSelectionEnd();
 	}
-	if (event.GetKey() == '.' || event.GetKey() == ':')
+	if (character == '.' || character == ':')
 		Request(LuaLanguageRequest::Completion, editor->GetCurrentPos());
-	else if (event.GetKey() == '(' || event.GetKey() == ',')
+	else if (character == '(' || character == ',')
 		Request(LuaLanguageRequest::Signature, editor->GetCurrentPos());
+}
+
+void LuaWorkspaceLanguage::OnCharacter(wxStyledTextEvent& event) {
+	AfterCharacter(event.GetKey());
 	event.Skip();
 }
 
@@ -292,7 +363,7 @@ void LuaWorkspaceLanguage::OnTimer(wxTimerEvent&) {
 				if (std::cmp_greater(diagnostic.end, editor->GetTextLength()))
 					continue;
 				if (!text.empty())
-					text += wxS("\n\n");
+					text += wxS("\n");
 				text += wxString::Format(wxS("%d: "), editor->LineFromPosition(static_cast<int>(diagnostic.start)) + 1) + to_wx(diagnostic.message);
 				editor->SetIndicatorCurrent(language_indicator);
 				editor->IndicatorFillRange(static_cast<int>(diagnostic.start), static_cast<int>(diagnostic.end - diagnostic.start));
