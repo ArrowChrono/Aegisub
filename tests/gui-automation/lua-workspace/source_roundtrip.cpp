@@ -108,11 +108,57 @@ void CheckMemberAccessFormat(std::string_view source, std::string_view stage) {
 	Require(source.find("self.name") != std::string_view::npos, std::string(stage) + " separated member access inside the method");
 	Require(source.find("1 .. 2") != std::string_view::npos, std::string(stage) + " merged numeric concatenation into a number token");
 	Require(source.find("n .. .5") != std::string_view::npos, std::string(stage) + " merged concatenation and leading-decimal number");
+	for (auto const text : {"object.branch:tag(suffix)", "object.branch:tag(\"点\")", "collect(3, 4)", "tostring(collect(3, 4))"})
+		Require(source.find(text) != std::string_view::npos, std::string(stage) + " inserted padding inside a function call at " + text);
+	Require(source.find("local positive = - - n") != std::string_view::npos, std::string(stage) + " merged unary minus tokens into a Lua comment");
 }
 
 void CheckSemicolonFormat(std::string_view source, std::string_view stage) {
-	for (auto const text : {"2;", "3;", "total + value;", "choose ( 7 );"})
+	for (auto const text : {"2;", "3;", "total + value;", "choose(7);"})
 		Require(source.find(text) != std::string_view::npos, std::string(stage) + " inserted space before a semicolon at " + text);
+	Require(source.find("ipairs(values)") != std::string_view::npos, std::string(stage) + " inserted padding inside a function call");
+	Require(source.find("log[# log + 1]") != std::string_view::npos, std::string(stage) + " inserted padding around an index expression");
+	Require(source.find("table.concat(log, \",\")") != std::string_view::npos, std::string(stage) + " inserted padding before a call argument comma");
+}
+
+void RunPunctuationCase(fs::path const& artifacts) {
+	fs::create_directories(artifacts);
+	constexpr std::string_view original = R"lua(
+local style = { fontname = "Arial", bold = true, italic = false }
+local line = { text_stripped = "shape" }
+local lookup = { [ [==[snow]==] ] = "雪" }
+local Yutils = { decode = {} }
+function Yutils.decode.create_font(name, bold, italic)
+    return { text_to_shape = function(self, text) return text end }
+end
+local font_shape = Yutils.decode.create_font(style.fontname, style.bold, style.italic).text_to_shape(nil, line.text_stripped)
+local positive = - -4
+return font_shape .. "|" .. lookup [ [==[snow]==] ] .. "|" .. tostring(positive)
+)lua";
+	constexpr std::string_view expected = "shape|雪|4";
+	WriteFile(artifacts / "original.lua", original);
+	Require(!Automation4::ValidateLuaSource(original), "Punctuation source failed validation");
+	ExpectResult(original, expected, artifacts / "original.actual");
+
+	auto const formatted = Automation4::FormatLuaSource(original);
+	Require(formatted.Succeeded(), "Punctuation source failed formatting");
+	WriteFile(artifacts / "formatted.lua", formatted.source);
+	Require(formatted.source.find("create_font(style.fontname, style.bold, style.italic).text_to_shape(nil, line.text_stripped)") != std::string_view::npos,
+			"Formatting inserted padding around call parentheses or before an argument comma");
+	Require(formatted.source.find("lookup[ [==[snow]==]]") != std::string_view::npos, "Formatting merged an index opener with a long-string opener");
+	Require(formatted.source.find("local positive = - - 4") != std::string_view::npos, "Formatting merged unary minus tokens into a Lua comment");
+	Require(!Automation4::ValidateLuaSource(formatted.source), "Formatted punctuation source failed validation");
+	ExpectResult(formatted.source, expected, artifacts / "formatted.actual");
+
+	auto const serialized = Automation4::SerializeLuaSource(formatted.source);
+	Require(serialized.Succeeded(), "Punctuation source failed serialization");
+	WriteFile(artifacts / "serialized.lua", serialized.source);
+	Require(serialized.source.find("create_font(style.fontname, style.bold, style.italic).text_to_shape(nil, line.text_stripped)") != std::string_view::npos,
+			"Serialization inserted padding around call parentheses or before an argument comma");
+	Require(serialized.source.find("lookup[\"snow\"]") != std::string_view::npos, "Serialization inserted padding around an index expression");
+	Require(serialized.source.find("local positive = - - 4") != std::string_view::npos, "Serialization merged unary minus tokens into a Lua comment");
+	Require(!Automation4::ValidateLuaSource(serialized.source), "Serialized punctuation source failed validation");
+	ExpectResult(serialized.source, expected, artifacts / "serialized.actual");
 }
 
 void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std::string const& name) {
@@ -148,11 +194,11 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 	Require(!Automation4::ValidateLuaSource(serialized.source), "Serialized source failed validation");
 	if (name == "member-access") {
 		CheckMemberAccessFormat(serialized.source, "Serialization");
-		WriteFile(artifacts / "format-contract.txt", "Chained members and method calls stay adjacent; numeric concatenation remains separate.\n");
+		WriteFile(artifacts / "format-contract.txt", "Chained members, calls, parameters, and indexes stay adjacent; argument commas have no preceding padding; numeric concatenation and unary minus remain lexically separate.\n");
 	}
 	if (name == "semicolons") {
 		CheckSemicolonFormat(serialized.source, "Serialization");
-		WriteFile(artifacts / "format-contract.txt", "Statement and table separators have no preceding space; literals and comments retain their content.\n");
+		WriteFile(artifacts / "format-contract.txt", "Calls, indexes, statement separators, and table separators have no unwanted inner or preceding padding; literals and comments retain their content.\n");
 	}
 	ExpectResult(serialized.source, expected, artifacts / "serialized.actual");
 
@@ -401,6 +447,7 @@ int main(int argc, char **argv) {
 			WriteFile(artifacts / "manifest.txt", manifest);
 		};
 		run("classifier", [&] { fs::create_directories(artifacts / "classifier"); CheckClassifier(artifacts / "classifier"); });
+		run("punctuation", [&] { RunPunctuationCase(artifacts / "punctuation"); });
 		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access", "semicolons"})
 			run(name, [&] { RunExecutableCase(fixtures, artifacts / name, name); });
 		run("validate_only", [&] { RunValidateOnlyCase(fixtures, artifacts / "validate_only"); });

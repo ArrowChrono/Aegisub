@@ -34,10 +34,16 @@ struct Token {
 };
 
 bool NeedsSpace(Token const *previous, Token const& current) {
-	auto member_access = [](Token const& token) {
-		return token.kind == TokenKind::Symbol && (token.text == "." || token.text == ":");
+	if (previous && previous->kind == TokenKind::Symbol && previous->text == "[" && current.text.starts_with("["))
+		return true;
+	auto tight_before = [](Token const& token) {
+		return token.kind == TokenKind::Symbol &&
+			   (token.text == "." || token.text == ":" || token.text == "(" || token.text == "[" || token.text == ")" || token.text == "]" || token.text == "," || token.text == ";");
 	};
-	return previous && !member_access(*previous) && !member_access(current) && !(current.kind == TokenKind::Symbol && current.text == ";");
+	auto tight_after = [](Token const& token) {
+		return token.kind == TokenKind::Symbol && (token.text == "." || token.text == ":" || token.text == "(" || token.text == "[");
+	};
+	return previous && !tight_after(*previous) && !tight_before(current);
 }
 
 bool IsNewline(char c) { return c == '\r' || c == '\n'; }
@@ -277,7 +283,10 @@ LuaSourceResult SerializeLuaSource(std::string_view source) {
 	std::string output;
 	Token const *previous = nullptr;
 	for (auto const& token : tokens) {
-		if (NeedsSpace(previous, token))
+		Token emitted = token;
+		if (emitted.kind == TokenKind::String)
+			emitted.text = "\"";
+		if (NeedsSpace(previous, emitted))
 			output += ' ';
 		if (token.kind == TokenKind::String) {
 			auto literal = SerializeString(token);
