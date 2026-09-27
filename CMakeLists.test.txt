@@ -33,6 +33,12 @@ if(BUILD_TESTING)
     )
 endif()
 
+add_executable(lua-workspace-language-e2e EXCLUDE_FROM_ALL
+    tests/gui-automation/lua-workspace/language-server-e2e.cpp
+)
+target_compile_features(lua-workspace-language-e2e PRIVATE cxx_std_20)
+target_link_libraries(lua-workspace-language-e2e PRIVATE aegisub_core luajit)
+
 add_executable(lua-workspace-virtual-source-e2e EXCLUDE_FROM_ALL
     tests/gui-automation/lua-workspace/virtual-source-e2e.cpp
     src/automation/automation_lua_debug_backend.cpp

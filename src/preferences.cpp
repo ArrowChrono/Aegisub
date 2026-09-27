@@ -1015,6 +1015,11 @@ void BuildAutomationPage(OptionPage *p) {
 	auto token = p->OptionAdd(live_debug, _("Attach token (blank = auto-generate)"), "Automation/Debug/Token");
 	p->EnableIfChecked(require_token, token);
 
+	auto *lua_workspace = p->PageSizer(_("Lua Workspace"));
+	auto *enable_lua_ls = p->OptionAdd(lua_workspace, _("Enable LuaLS"), "Automation/Lua Workspace/Enable LuaLS");
+	p->CellSkip(lua_workspace);
+	p->OptionBrowse(lua_workspace, _("LuaLS directory"), "Automation/Lua Workspace/LuaLS Directory", enable_lua_ls, true);
+
 	p->SetSizerAndFit(p->sizer);
 }
 

@@ -1,4 +1,5 @@
 #include "lua_workspace_frame.h"
+#include "lua_workspace_language.h"
 
 #include "ass_dialogue.h"
 #include "ass_file.h"
@@ -372,6 +373,7 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	stack_layout->Add(debug_variables, 2, wxEXPAND | wxALL, 4);
 	stack_panel->SetSizer(stack_layout);
 	runtime_tabs->AddPage(stack_panel, _("Stack and Variables"));
+	language = std::make_unique<LuaWorkspaceLanguage>(editor, runtime_tabs);
 	body->Add(runtime_tabs, 1, wxEXPAND | wxRIGHT, 8);
 	layout->Add(body, 1, wxEXPAND);
 	diagnostics = new wxStaticText(panel, wxID_ANY, _("Open a karaoke code line or a Lua source file."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
@@ -443,6 +445,7 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 		RefreshDocument(false);
 	});
 	editor->Bind(wxEVT_STC_CHARADDED, [this](wxStyledTextEvent& event) {
+		event.Skip();
 		if (event.GetKey() != '\n')
 			return;
 		int line = editor->GetCurrentLine();
@@ -451,7 +454,8 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 			editor->GotoPos(editor->GetLineIndentPosition(line));
 		}
 	});
-	editor->Bind(wxEVT_STC_UPDATEUI, [this](wxStyledTextEvent&) {
+	editor->Bind(wxEVT_STC_UPDATEUI, [this](wxStyledTextEvent& event) {
+		event.Skip();
 		int pos = editor->GetCurrentPos() - 1;
 		int character = pos >= 0 ? editor->GetCharAt(pos) : 0;
 		if (character > 0 && std::string_view("()[]{}").find(static_cast<char>(character)) != std::string_view::npos) {
@@ -514,6 +518,10 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 		}
 		Hide();
 	});
+	Bind(wxEVT_SHOW, [this](wxShowEvent& event) {
+		language->SetActive(event.IsShown());
+		event.Skip();
+	});
 	Bind(wxEVT_ACTIVATE, [this](wxActivateEvent& event) {
 		if (event.GetActive())
 			RefreshDocument();
@@ -531,6 +539,7 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 }
 
 LuaWorkspaceFrame::~LuaWorkspaceFrame() {
+	language.reset();
 	DetachContext();
 	debug_timer->Stop();
 	delete debug_timer;
@@ -547,6 +556,8 @@ void LuaWorkspaceFrame::DetachContext() {
 	context = nullptr;
 	if (document)
 		document->DetachContext();
+	if (language)
+		language->SetActive(false);
 }
 
 std::shared_ptr<LuaWorkspaceRunRequest const> LuaWorkspaceFrame::GetWorkspaceRunRequest(AutomationInvocation const& invocation) const {
@@ -1187,6 +1198,8 @@ void LuaWorkspaceFrame::ShowResult(LuaWorkspaceDocumentResult const& result, boo
 }
 
 void LuaWorkspaceFrame::RefreshDocument(bool check_target) {
+	if (language)
+		language->Update(document.get(), document ? document->GetCodeScopes() : 0);
 	if (document && check_target)
 		target_state = document->Check();
 	apply->Enable(!IsInvocationRunning() && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);

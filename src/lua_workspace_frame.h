@@ -28,6 +28,7 @@ class AutomationInvocationObserver;
 }
 
 struct LuaWorkspaceRuntimeObservation;
+class LuaWorkspaceLanguage;
 
 class LuaWorkspaceFrame : public wxFrame {
 	agi::Context *context;
@@ -35,6 +36,7 @@ class LuaWorkspaceFrame : public wxFrame {
 	Automation4::LuaWorkspaceDocument const *pending_discard_document = nullptr;
 	std::uint64_t pending_discard_revision = 0;
 	wxStyledTextCtrl *editor = nullptr;
+	std::unique_ptr<LuaWorkspaceLanguage> language;
 	wxButton *open_button = nullptr;
 	wxButton *apply = nullptr;
 	wxButton *format = nullptr;

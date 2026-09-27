@@ -126,6 +126,10 @@
 			"Require Token" : true,
 			"Token" : ""
 		},
+		"Lua Workspace" : {
+			"Enable LuaLS" : true,
+			"LuaLS Directory" : "?data/runtimes/LuaLS"
+		},
 		"Trace Level" : 3
 	},
 

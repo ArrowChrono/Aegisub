@@ -128,6 +128,10 @@ LuaWorkspaceDocumentResult LuaWorkspaceDocument::LoadSnapshot(LuaWorkspaceSnapsh
 	return result;
 }
 
+unsigned LuaWorkspaceDocument::GetCodeScopes() const {
+	return kind == LuaWorkspaceDocumentKind::KaraokeCode ? ClassifyKaraokeLine(baseline.comment, baseline.effect).scopes : 0;
+}
+
 void LuaWorkspaceDocument::SetSource(std::string value) {
 	if (source != value) {
 		source = std::move(value);

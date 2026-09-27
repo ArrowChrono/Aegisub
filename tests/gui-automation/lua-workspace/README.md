@@ -8,6 +8,8 @@ Each case retains source variants, actual and expected results, diagnostics wher
 
 The `member-access` case additionally checks chained member access and method definitions/calls without spaces around single `.` and `:` tokens. It combines Unicode, long strings, comments, varargs, labels, separated minus tokens, and numeric concatenation (`1 .. 2` and `n .. .5`). Targeted spacing checks complement the independent business result at all four execution stages; they do not replace semantic round-trip verification.
 
+The `semicolons` case covers statement and table separators, a required boundary before a parenthesized call, and Unicode strings/comments containing literal semicolons. Formatting and serialization omit only whitespace before actual semicolon tokens; the four execution stages must retain the independent result `12|2,3|雪 ; 🌟|文 ; 本`.
+
 From the repository root, with the configured `build-dir` and `RelWithDebInfo` configuration:
 
 ```powershell
@@ -107,3 +109,54 @@ ctest --test-dir build-dir -C RelWithDebInfo -R '^subs_edit_stc_smoke$' --output
 ```
 
 The driver enforces a 240-second supervising budget, operation-specific deadlines, and a 60-second limit for the independent headless process. It records source/executable hashes, each step's pass/fail/not-run status, input and output ASS, serialized and Workspace Lua, diagnostic/UIA screenshots, headless evidence, normal host shutdown, and guarded clipboard restoration. The existing STC smoke target separately checks ordinary ASS styling, UTF-8 caret handling, event/Undo preservation, native paint, and wrapping; it does not replace the real E17 application run. Both editor modes must finish all steps and close normally before S5 is accepted.
+
+## S6 Lua language assistance E2E
+
+Lua Workspace can use a complete prebuilt LuaLS release. Preferences → Automation → Lua Workspace enables LuaLS by default and sets its release-root directory to `?data/runtimes/LuaLS`; the user can browse to another complete release root. The release must include `bin/lua-language-server.exe`, `main.lua`, `script`, and `meta`. An absent or incomplete release reports unavailability rather than silently substituting another language server. The test commands below use a release copied beside the built executable; they do not download or package LuaLS.
+
+`lua-workspace-language-e2e` is the native integration executable. It accepts the repository-relative LuaLS release root, repository-relative fixture directory, and a fresh artifact directory. Its 19 required steps use the complete real release for Unicode/CRLF positions, hover and signature, versioned diagnostics, unconfirmed empty diagnostics, a nonidentifier completion with additional edits, replacement of a nonempty selected member range, a real `require` through the configured Automation include path, an independently executed saved-source result, file-to-virtual switching and stale isolation, actual karaoke and ordinary host definitions, karaoke scope filtering, chunk identity isolation, and missing/incomplete server handling. Windows-only lifecycle steps copy the complete release to an artifact path containing Unicode and spaces, switch configuration and edit source, disable the document and reopen with a fresh generation, then terminate only the verified LuaLS child of the test process. Two further Windows-only fault-injection steps self-launch a supervised stdio fixture to test bounded initialization and request timeouts. The request fixture first returns an explicit error for signature help, requiring a ready-state error and an empty terminal response, then stays silent for completion. These fixtures do not stand in for real LuaLS language capability: after each timeout and source edit, explicit close/reopen must recover a completion from the complete real release. The test has a 110-second internal deadline and writes `manifest.json`, request/response events, source/result files, copied-runtime-DLL lists, timeout receipts, and server configuration/stderr evidence under its artifact directory. It is a separate executable, not a CTest registration; a build alone does not run it.
+
+From the repository root with the configured `RelWithDebInfo` build:
+
+```powershell
+cmake --build build-dir --config RelWithDebInfo --target lua-workspace-language-e2e --parallel
+build-dir/RelWithDebInfo/lua-workspace-language-e2e.exe build-dir/RelWithDebInfo/runtimes/LuaLS tests/gui-automation/lua-workspace/fixtures build-dir/artifacts/lua-workspace/language-native
+```
+
+`editor-uia.cs --scenario language` checks the real Windows Workspace path rather than replacing the native protocol test. It opens an ordinary Lua file via the file picker, edits a Unicode source line through guarded keyboard/clipboard input, requests and accepts an exact member completion, checks the physically saved Lua file, cancels a second completion and undoes one edit, types `.` to trigger the broad member list automatically before typing `v` to filter it, requests a signature, observes current diagnostics, and closes the host normally. Document-end positioning uses an extended Ctrl+End chord; a plain End would address the current line after Select All. Guarded input requires verified editor focus. The custom-painted Scintilla completion and calltip windows do not expose their drawn labels to UIA, and the calltip may appear as a generic `panel`; the driver identifies its unique visible Workspace-owned native popup and captures it before any focus-changing evidence read. Automatic source, file, Undo, popup-presence, and popup-dismissal checks are supplemented by `visual-review.json` with screenshot hashes and expected labels/absence; the manifest remains `awaiting-visual-review` until those images are inspected. Popup presence alone does not establish correct completion or signature content. This GUI branch does not cover the native karaoke scope matrix, server-failure matrix, or all protocol timing cases.
+
+```powershell
+dotnet build tests/gui-automation/lua-workspace/editor-uia.cs -nologo -v:q
+dotnet run tests/gui-automation/lua-workspace/editor-uia.cs -- --scenario language --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/language-gui
+```
+
+Use a new artifact directory for each run. The GUI driver requires an unlocked Windows/.NET 10 desktop with no concurrent keyboard, mouse, clipboard, or GUI-driver activity. Its supervisor has a 120-second total timeout plus bounded discovery/request deadlines; `manifest.json` distinguishes `passed`, `failed`, and `not-run` steps and retains executable/runtime/fixture/driver hashes, UIA captures, screenshots, clipboard receipts, and cleanup status. Neither a compiled driver nor partial or older artifacts establish a passing GUI run.
+
+`--scenario language-settings` is the E19a settings acceptance rather than a control inventory. It starts from an isolated default profile, verifies the default enabled state and `?data/runtimes/LuaLS`, proves Cancel does not change either the active server or persisted controls, and proves Apply disables and re-enables the service. It copies the complete release to an artifact directory containing Unicode and spaces, requires the ready child executable to come from that exact directory, then applies separate incomplete and missing directories while the default release remains present to reject silent fallback. Ordinary-file Save and one local Undo must still work while the service is unavailable. Restoring the default setting must produce and accept a real completion, one Undo must remove that completion, and the subtitle fixture must remain byte-identical. The manifest records each observed status, release executable hashes, relative verified child path, screenshot hashes, exact source artifacts, normal shutdown, and clipboard cleanup.
+
+```powershell
+dotnet run tests/gui-automation/lua-workspace/editor-uia.cs -- --scenario language-settings --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/language-settings
+```
+
+The editor regression remains the complete 19-step scenario under the same 120-second supervisor. Its frequently repeated Workspace editor and modal-button discovery uses bounded native child-window enumeration followed by same-process UIA type, visibility, semantic-name, and pattern validation; this avoids unbounded full-descendant provider walks without caching controls across recreated Workspace windows. Shell picker evidence uses a bounded native control inventory plus its real screenshot. No scenario, assertion, or operation deadline is removed by this discovery optimization.
+
+`--scenario editor-unavailable` is a separate no-fallback variant and does not replace the normal editor run. Its isolated profile selects `?user/missing-luals` while the complete default release remains beside the executable. After opening Workspace it requires an explicit unavailable status and no child process from the default release, then runs the same 19 editor steps—including coding-source Apply, physical Save, local and main Undo/Redo, conflicts, invalid source, reload, and document-generation invalidation. The original editor scenario retains its 120-second total and 110-second worker limits. The unavailable variant has a finite 150-second total and 140-second worker limit because its measured complete editor matrix already consumes about 105 seconds before the final document-generation step, and the additional real unavailable-state/no-fallback setup must run in the same fresh host. Every operation-specific deadline and assertion remains unchanged.
+
+```powershell
+dotnet run tests/gui-automation/lua-workspace/editor-uia.cs -- --scenario editor-unavailable --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/editor-unavailable
+```
+
+The debug driver has two S6-specific 240-second scenarios. `language` first executes the original basic business assertions, then proves that diagnostics follow the current edited buffer while a paused invocation retains its captured Execution Source and pause identity. It terminates only the path-verified real LuaLS child, requires explicit unavailable state, and continues through Stop, Undo, Run, Debug, and Save degradation checks. `language-unavailable` starts with `?user/missing-luals` while the complete default release is still installed, rejects fallback, and runs the complete basic Workspace flow with language assistance unavailable. Both scenarios retain finite per-operation deadlines, source/ASS evidence, verified process-path evidence, screenshots, manifests, normal shutdown, and clipboard restoration.
+
+```powershell
+dotnet run tests/gui-automation/lua-workspace/debug-uia.cs -- --scenario language --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/debug-language
+dotnet run tests/gui-automation/lua-workspace/debug-uia.cs -- --scenario language-unavailable --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/debug-language-unavailable
+```
+
+For isolated calltip diagnosis, `--scenario language-tip` runs only host readiness, ordinary-file open, signature capture, current diagnostics, and normal close. Its manifest explicitly marks it as a diagnostic subset; it cannot substitute for the eight-step `language` run. The GUI driver reads clipboard text from bounded native `CF_UNICODETEXT`: a valid first UTF-16 NUL means an empty string, whereas open/data/lock/termination failures throw instead of being reported as empty. Only `ERROR_ACCESS_DENIED` while opening the clipboard is retried for at most 500 ms; the existing ownership, sequence, backup, and restoration guards remain in force.
+
+`--scenario language-settings-discovery` is a separate bounded UIA inventory, not E19a acceptance. It opens Preferences from the real main toolbar, selects the Automation page, saves the before/after UIA trees and screenshots, chooses Cancel, and closes the host normally. Its manifest explicitly marks the discovery-only scope. Run it with a fresh artifact directory before authoring control-specific Apply/Cancel assertions from the observed Automation page:
+
+```powershell
+dotnet run tests/gui-automation/lua-workspace/editor-uia.cs -- --scenario language-settings-discovery --exe build-dir/RelWithDebInfo/Aegisub.exe --artifacts build-dir/artifacts/lua-workspace/language-settings-discovery
+```

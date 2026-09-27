@@ -125,7 +125,7 @@ static int Run(string[] args)
     }
     if (exe is null || !File.Exists(exe) || artifacts is null)
         throw new ArgumentException("--exe and --artifacts are required");
-    Ensure(scenario is "basic" or "controls" or "files" or "dap" or "jit", "--scenario must be basic, controls, files, dap, or jit");
+    Ensure(scenario is "basic" or "controls" or "files" or "dap" or "jit" or "language" or "language-unavailable", "Unknown debug scenario");
     var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.ass");
     var actions = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-actions.lua");
     var expectedFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.expected.json");
@@ -164,6 +164,25 @@ static int Run(string[] args)
     Directory.CreateDirectory(Path.Combine(artifacts, "profile"));
     if (scenario == "files") PrepareFiles();
     if (scenario == "jit") PrepareJit();
+    var languageScenario = scenario is "language" or "language-unavailable";
+    var runtimeExe = Path.Combine(Path.GetDirectoryName(exe)!, "runtimes", "LuaLS", "bin", "lua-language-server.exe");
+    if (languageScenario)
+    {
+        Ensure(File.Exists(runtimeExe), "The complete real LuaLS release is required even for unavailable-path isolation");
+        hashes["luals_exe"] = Hash(runtimeExe);
+        if (scenario == "language-unavailable")
+        {
+            var user = Path.Combine(artifacts, "profile", "user");
+            Directory.CreateDirectory(user);
+            File.WriteAllText(Path.Combine(user, "config.json"), JsonSerializer.Serialize(new
+            {
+                Automation = new Dictionary<string, object> { ["Lua Workspace"] = new Dictionary<string, object>
+                {
+                    ["Enable LuaLS"] = true, ["LuaLS Directory"] = "?user/missing-luals"
+                } }
+            }));
+        }
+    }
     var dapToken = "lua-workspace-e2e";
     var dapPort = scenario == "dap" ? PrepareDap() : 0;
     ClipboardReceipt.Initialize(Path.Combine(artifacts, "clipboard-receipt.json"), uint.Parse(
@@ -180,6 +199,13 @@ static int Run(string[] args)
         : scenario == "jit" ? JitSteps()
         : new[] { "host-ready", "open-workspace", "edit-unapplied", "breakpoint-debug-pause", "stale-source", "stop-rollback",
             "stop-live-rollback", "run-generated", "undo-restores", "debug-detach", "basic-normal-shutdown" };
+    if (languageScenario)
+        steps = steps.Take(2).Concat(new[] { "language-initial-state" }).Concat(steps.Skip(2)).ToArray();
+    if (scenario == "language")
+    {
+        var index = Array.IndexOf(steps, "stop-rollback");
+        steps = steps.Take(index).Concat(new[] { "language-current-paused-revision", "language-process-exit" }).Concat(steps.Skip(index)).ToArray();
+    }
     var results = new List<StepResult>();
     Process? host = null;
     AutomationElement? main = null;
@@ -199,7 +225,7 @@ static int Run(string[] args)
         });
         main = AutomationElement.FromHandle(host.MainWindowHandle);
         SaveEvidence(main, artifacts, "main-before-open");
-        if (scenario != "basic")
+        if (scenario is not ("basic" or "language" or "language-unavailable"))
         {
             if (scenario == "controls") RunControls();
             else if (scenario == "files") RunFiles();
@@ -221,6 +247,15 @@ static int Run(string[] args)
             SaveEvidence(workspace, artifacts, "workspace-opened");
             editor = FindStyledText(workspace, insideNotebook: false);
             Ensure(editor is not null, "Workspace source editor has no unique UIA STC descendant");
+        });
+        if (languageScenario) Step("language-initial-state", () =>
+        {
+            SelectTab(workspace!, "Language");
+            var expectedState = scenario == "language" ? ": ready" : "LuaLS unavailable:";
+            WaitUntil(() => ReadLanguageStatus(workspace!, host).Contains(expectedState, StringComparison.Ordinal),
+                TimeSpan.FromSeconds(15), "LuaLS did not report the expected initial state");
+            File.WriteAllText(Path.Combine(artifacts, "language-initial-status.txt"), ReadLanguageStatus(workspace!, host));
+            SaveEvidence(workspace!, artifacts, "language-initial");
         });
         const string edited = "decorate = function(value)\n  return \"DBG:\" .. string.upper(value)\nend";
         File.WriteAllText(Path.Combine(artifacts, "edited.lua"), edited, new UTF8Encoding(false));
@@ -263,7 +298,8 @@ static int Run(string[] args)
             var captured = Native.CopyStyledText(execution!, host);
             File.WriteAllText(Path.Combine(artifacts, "paused-source.lua"), captured, new UTF8Encoding(false));
             Ensure(Normalize(captured) == edited, "Paused readonly source did not match the immutable invocation revision");
-            Native.ReplaceWithClipboard(editor!, host, edited + "\n-- next revision only");
+            Native.ReplaceWithClipboard(editor!, host, edited + (scenario == "language"
+                ? "\nlocal language_probe = missing_paused_revision" : "\n-- next revision only"));
             var after = Native.CopyStyledText(execution!, host);
             Ensure(Normalize(after) == edited, "Paused readonly source changed with a newer editor buffer");
             Ensure(FindExactText(workspace!, text => text.Contains("[stale editor revision]", StringComparison.Ordinal)) is not null,
@@ -271,6 +307,38 @@ static int Run(string[] args)
             File.WriteAllText(Path.Combine(artifacts, "stale-editor.lua"), CopySource(workspace!, host), new UTF8Encoding(false));
             SaveEvidence(workspace!, artifacts, "stale-paused-source");
         });
+        if (scenario == "language")
+        {
+            Step("language-current-paused-revision", () =>
+            {
+                var pause = ParsePauseStatus(ReadRunStatus(workspace!));
+                Ensure(pause is { Reason: "breakpoint" }, "Language refresh must run while the original breakpoint stays paused");
+                SelectTab(workspace!, "Language");
+                WaitUntil(() => ReadLanguageDiagnostics(workspace!, host).Contains("missing_paused_revision", StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(10), "Language diagnostics did not analyze the new editable revision during pause");
+                File.WriteAllText(Path.Combine(artifacts, "paused-current-diagnostics.txt"), ReadLanguageDiagnostics(workspace!, host));
+                SaveEvidence(workspace!, artifacts, "language-paused-current");
+                SelectTab(workspace!, "Execution Source");
+                var execution = FindStyledText(workspace!, insideNotebook: true)!;
+                Ensure(Normalize(Native.CopyStyledText(execution, host)) == edited,
+                    "Language refresh changed the captured execution source");
+                Ensure(ParsePauseStatus(ReadRunStatus(workspace!)) == pause, "Language refresh advanced the suspended invocation");
+                File.WriteAllText(Path.Combine(artifacts, "language-paused-execution.lua"), Native.CopyStyledText(execution, host));
+            });
+            Step("language-process-exit", () =>
+            {
+                LuaLanguageChild.TerminateVerified(host, runtimeExe, Path.Combine(artifacts, "language-terminated-child.json"));
+                SelectTab(workspace!, "Language");
+                WaitUntil(() => ReadLanguageStatus(workspace!, host).Contains("LuaLS unavailable:", StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(8), "The terminated real LuaLS was not reported unavailable");
+                Ensure(ReadLanguageDiagnostics(workspace!, host).Contains("No version-confirmed diagnostics", StringComparison.Ordinal),
+                    "Failed language service retained stale diagnostic text");
+                Ensure(Normalize(CopySource(workspace!, host)) == edited + "\nlocal language_probe = missing_paused_revision",
+                    "LuaLS termination changed the source buffer");
+                File.WriteAllText(Path.Combine(artifacts, "language-exit-status.txt"), ReadLanguageStatus(workspace!, host));
+                SaveEvidence(workspace!, artifacts, "language-exit-paused");
+            });
+        }
         Step("stop-rollback", () =>
         {
             InvokeButton(workspace!, "Stop");
@@ -280,6 +348,13 @@ static int Run(string[] args)
             Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Stopped debug invocation modified the physical ASS baseline");
             Native.Undo(editor!, host);
             Ensure(Normalize(CopySource(workspace!, host)) == edited, "One Workspace-local Undo did not restore the invocation source after stale edit");
+            if (languageScenario)
+            {
+                SelectTab(workspace!, "Language");
+                WaitUntil(() => ReadLanguageStatus(workspace!, host).Contains("LuaLS unavailable:", StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(5), "Undo silently restarted or replaced the unavailable language server");
+                File.WriteAllText(Path.Combine(artifacts, "language-after-undo-status.txt"), ReadLanguageStatus(workspace!, host));
+            }
             SaveEvidence(workspace!, artifacts, "debug-stopped");
         });
         Step("stop-live-rollback", () =>
@@ -1409,11 +1484,33 @@ static int Run(string[] args)
     {
         StartedUtc = startedUtc, FinishedUtc = finishedUtc, BudgetSeconds = 240, ExeSha256 = hashes["exe"],
         Scenario = scenario,
-        AcceptanceScope = "This scenario only. Full S4 requires basic, controls, files, dap, jit, native virtual-source E2E, and S2/S3 regressions.",
+        AcceptanceScope = languageScenario ? "S6 language refresh/source isolation and unavailable-service Run/Debug/Undo/Save; not full S6 on its own." : "This scenario only. Full S4 requires basic, controls, files, dap, jit, native virtual-source E2E, and S2/S3 regressions.",
         Fixtures = new[] { fixture.Replace('\\', '/'), actions.Replace('\\', '/'), expectedFile.Replace('\\', '/'),
             stepsFile.Replace('\\', '/'), loopFile.Replace('\\', '/'), templater.Replace('\\', '/') },
         Sha256 = hashes, ExitStatus = exitStatus, Steps = results
     }, new JsonSerializerOptions { WriteIndented = true }));
+}
+
+static AutomationElement LanguageStatusElement(AutomationElement workspace)
+{
+    var matches = workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text))
+        .Cast<AutomationElement>().Where(item => item.Current.ClassName == "Static" && !item.Current.IsOffscreen
+            && item.Current.NativeWindowHandle != 0 && item.Current.Name.StartsWith("LuaLS", StringComparison.Ordinal)).ToArray();
+    Ensure(matches.Length == 1, $"Expected one visible LuaLS status, found {matches.Length}");
+    return matches[0];
+}
+
+static string ReadLanguageStatus(AutomationElement workspace, Process host)
+    => Native.ReadStaticText(new nint(LanguageStatusElement(workspace).Current.NativeWindowHandle), host);
+
+static string ReadLanguageDiagnostics(AutomationElement workspace, Process host)
+{
+    var panel = TreeWalker.ControlViewWalker.GetParent(LanguageStatusElement(workspace))
+        ?? throw new InvalidOperationException("Language status has no containing panel");
+    var edits = panel.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document))
+        .Cast<AutomationElement>().Where(item => item.Current.ClassName == "Edit" && !item.Current.IsOffscreen).ToArray();
+    Ensure(edits.Length == 1, "Language panel does not have exactly one diagnostics Edit");
+    return Native.ReadEditText(edits[0], host);
 }
 
 static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
@@ -1433,25 +1530,11 @@ static void WaitUntil(Func<bool> predicate, TimeSpan timeout, string failure)
 
 static AutomationElement? FindWindow(Process host, string prefix)
 {
-    var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
-    var matches = new Dictionary<int, AutomationElement>();
-    foreach (AutomationElement root in roots)
-    {
-        foreach (var item in new[] { root }.Concat(root.FindAll(TreeScope.Descendants,
-            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window)).Cast<AutomationElement>()))
-        {
-            try
-            {
-                var current = item.Current;
-                if (current.ProcessId == host.Id && !current.IsOffscreen && current.NativeWindowHandle != 0
-                    && (current.Name ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    matches.TryAdd(current.NativeWindowHandle, item);
-            }
-            catch (ElementNotAvailableException) { }
-        }
-    }
-    Ensure(matches.Count <= 1, $"Window prefix {prefix} matched {matches.Count} same-PID visible HWNDs");
-    return matches.Count == 1 ? matches.Values.Single() : null;
+    var matches = Native.HostWindows(host.Id).Where(handle => Native.WindowText(handle).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        .Select(AutomationElement.FromHandle).Where(item => item.Current.ProcessId == host.Id
+            && item.Current.ControlType == ControlType.Window && !item.Current.IsOffscreen).ToArray();
+    Ensure(matches.Length <= 1, $"More than one visible {prefix} window belongs to the host");
+    return matches.SingleOrDefault();
 }
 
 static AutomationElement WaitWindow(Process host, string prefix, TimeSpan timeout)
@@ -1563,8 +1646,8 @@ static void AssertLivePauseControls(AutomationElement main, AutomationElement wo
 
 static AutomationElement FindButton(AutomationElement window, string name)
 {
-    var buttons = window.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button))
-        .Cast<AutomationElement>().Where(item => item.Current.Name == name).ToArray();
+    var buttons = Native.ChildElements(window, "Button").Where(item => item.Current.ControlType == ControlType.Button
+        && item.Current.Name == name).ToArray();
     Ensure(buttons.Length == 1, $"Expected one exact {name} button, found {buttons.Length}");
     return buttons[0];
 }
@@ -1572,7 +1655,7 @@ static AutomationElement FindButton(AutomationElement window, string name)
 static AutomationElement? FindStyledText(AutomationElement workspace, bool insideNotebook)
 {
     var candidates = new List<AutomationElement>();
-    foreach (AutomationElement item in workspace.FindAll(TreeScope.Descendants, Condition.TrueCondition))
+    foreach (var item in Native.ChildElements(workspace, "wxWindow"))
     {
         try
         {
@@ -1591,8 +1674,10 @@ static AutomationElement? FindStyledText(AutomationElement workspace, bool insid
 
 static void SelectTab(AutomationElement workspace, string name)
 {
-    var tabs = workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem))
-        .Cast<AutomationElement>().Where(item => item.Current.Name == name).ToArray();
+    var notebooks = Native.ChildElements(workspace, "_wx_SysTabCtl32").ToArray();
+    var tabs = notebooks.SelectMany(notebook => notebook.FindAll(TreeScope.Children,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem)).Cast<AutomationElement>())
+        .Where(item => item.Current.Name == name).ToArray();
     Ensure(tabs.Length == 1 && tabs[0].TryGetCurrentPattern(SelectionItemPattern.Pattern, out _), $"Exact tab {name} was unavailable");
     var pattern = (SelectionItemPattern)tabs[0].GetCurrentPattern(SelectionItemPattern.Pattern);
     pattern.Select();
@@ -1617,11 +1702,10 @@ static bool StackHasSourceLine(AutomationElement workspace, string sourcePrefix,
 
 static void InvokeButton(AutomationElement window, string name)
 {
-    var buttons = window.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button))
-        .Cast<AutomationElement>().Where(item => item.Current.Name == name && item.Current.IsEnabled
-            && item.TryGetCurrentPattern(InvokePattern.Pattern, out _)).ToArray();
-    Ensure(buttons.Length == 1, $"Expected one enabled exact {name} button, found {buttons.Length}");
-    UiaDriver.Invoke(buttons[0]);
+    var button = FindButton(window, name);
+    Ensure(button.Current.IsEnabled && !button.Current.IsOffscreen && button.TryGetCurrentPattern(InvokePattern.Pattern, out _),
+        $"Exact {name} button is not visibly enabled and invokable");
+    UiaDriver.Invoke(button);
 }
 
 static void OpenLuaFile(AutomationElement workspace, Process host, string path, string artifacts, string evidenceName)
@@ -1679,30 +1763,16 @@ static AutomationElement WaitWindowContainingText(Process host, string exactText
     AutomationElement? found = null;
     WaitUntil(() =>
     {
-        var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
-        foreach (AutomationElement root in roots)
+        foreach (var handle in Native.HostWindows(host.Id))
         {
-            foreach (AutomationElement label in root.FindAll(TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)))
-            {
-                try
-                {
-                    if (label.Current.Name != exactText) continue;
-                    var parent = TreeWalker.ControlViewWalker.GetParent(label);
-                    while (parent is not null)
-                    {
-                        var current = parent.Current;
-                        if (current.ProcessId == host.Id && current.ClassName == "#32770" && current.NativeWindowHandle != 0
-                            && !current.IsOffscreen && (current.ControlType == ControlType.Window || current.ControlType == ControlType.Pane))
-                        {
-                            found = parent;
-                            return true;
-                        }
-                        parent = TreeWalker.ControlViewWalker.GetParent(parent);
-                    }
-                }
-                catch (ElementNotAvailableException) { }
-            }
+            if (Native.WindowClass(handle) != "#32770") continue;
+            var dialog = AutomationElement.FromHandle(handle);
+            if (!dialog.Current.IsEnabled || dialog.Current.IsOffscreen) continue;
+            var labels = Native.ChildElements(dialog, "Static").Where(label => label.Current.ControlType == ControlType.Text
+                && label.Current.Name == exactText && !label.Current.IsOffscreen).ToArray();
+            if (labels.Length != 1) continue;
+            found = dialog;
+            return true;
         }
         return false;
     }, timeout, $"Exact dialog label {exactText} was not exposed");
@@ -1725,27 +1795,26 @@ static void VerifySeed(AutomationElement main, Process host, string input, IRead
 
 static AutomationElement? FindVisibleMenuCommand(Process host, string name)
 {
-    var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
-    foreach (AutomationElement root in roots)
-    {
-        foreach (AutomationElement item in root.FindAll(TreeScope.Descendants,
-            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem)))
-        {
-            try
-            {
-                if (!item.Current.IsOffscreen && (item.Current.Name ?? "").Replace("&", "", StringComparison.Ordinal)
-                    .Contains(name, StringComparison.OrdinalIgnoreCase)) return item;
-            }
-            catch (ElementNotAvailableException) { }
-        }
-    }
-    return null;
+    var matches = Native.HostWindows(host.Id).Where(handle => Native.WindowClass(handle) == "#32768")
+        .Select(AutomationElement.FromHandle).SelectMany(root => root.FindAll(TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem)).Cast<AutomationElement>())
+        .Where(item => !item.Current.IsOffscreen && (item.Current.Name ?? "").Replace("&", "", StringComparison.Ordinal)
+            .Contains(name, StringComparison.OrdinalIgnoreCase)).ToArray();
+    var exact = matches.Where(item => item.Current.Name.Replace("&", "", StringComparison.Ordinal).Split('\t')[0]
+        .Equals(name, StringComparison.OrdinalIgnoreCase)).ToArray();
+    if (exact.Length == 1) return exact[0];
+    Ensure(exact.Length == 0 && matches.Length <= 1, $"Ambiguous visible menu command: {name}");
+    return matches.SingleOrDefault();
 }
 
 static void InvokeMenu(AutomationElement main, Process host, string name, TimeSpan timeout, string menuName = "Automation")
 {
     AutomationElement? menu = null;
-    WaitUntil(() => main.Current.IsEnabled && (menu = main.FindAll(TreeScope.Descendants,
+    var menuBar = main.FindFirst(TreeScope.Children, new AndCondition(
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuBar),
+        new PropertyCondition(AutomationElement.AutomationIdProperty, "MenuBar")))
+        ?? throw new InvalidOperationException("Main application menu bar is missing");
+    WaitUntil(() => main.Current.IsEnabled && (menu = menuBar.FindAll(TreeScope.Children,
         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem))
         .Cast<AutomationElement>().FirstOrDefault(item => !item.Current.IsOffscreen
             && (item.Current.Name ?? "").Replace("&", "", StringComparison.Ordinal)
@@ -1781,7 +1850,7 @@ static string CopySource(AutomationElement workspace, Process host)
     WaitUntil(() => Native.ClipboardSequence() != before, TimeSpan.FromSeconds(3), "Copy source did not publish clipboard text");
     var sequence = Native.ClipboardSequence();
     Native.AssertClipboardState(sequence, host.Id);
-    var text = ClipboardSafety.ReadText();
+    var text = ClipboardText.ReadUnicodeText(sequence, host.Id);
     Native.AssertClipboardState(sequence, host.Id);
     ClipboardReceipt.Record("workspace-copy-source", host.Id, sequence);
     return text;
@@ -1876,24 +1945,12 @@ static void AssertGenerated(string saved, List<AssEvent> baseline, ExpectedOutpu
 
 static AutomationElement? FindProgressPane(Process host, string exactTitle)
 {
-    var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
-    var matches = new List<AutomationElement>();
-    foreach (AutomationElement root in roots)
-    {
-        foreach (var item in new[] { root }.Concat(root.FindAll(TreeScope.Descendants,
-            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Pane)).Cast<AutomationElement>()))
-        {
-            try
-            {
-                if (item.Current.ProcessId == host.Id && item.Current.ControlType == ControlType.Pane && item.Current.ClassName == "#32770"
-                    && item.Current.Name == exactTitle && item.Current.NativeWindowHandle != 0 && !item.Current.IsOffscreen)
-                    matches.Add(item);
-            }
-            catch (ElementNotAvailableException) { }
-        }
-    }
-    Ensure(matches.Count <= 1, "More than one exact progress dialog was found");
-    return matches.Count == 1 ? matches[0] : null;
+    var matches = Native.HostWindows(host.Id).Where(handle => Native.WindowClass(handle) == "#32770"
+        && Native.WindowText(handle) == exactTitle).Select(AutomationElement.FromHandle)
+        .Where(item => item.Current.ProcessId == host.Id && item.Current.ControlType == ControlType.Pane
+            && !item.Current.IsOffscreen).ToArray();
+    Ensure(matches.Length <= 1, "More than one exact progress dialog was found");
+    return matches.SingleOrDefault();
 }
 
 static void WaitForInvocation(AutomationElement workspace, Process host, Task invocation, string outcome, string artifacts, string label)
@@ -1962,8 +2019,6 @@ static class ClipboardReceipt
 static class ClipboardSafety
 {
     public static T OnSta<T>(Func<T> operation) => ClipboardSta.Invoke(operation);
-
-    public static string ReadText() => OnSta(() => Clipboard.GetText());
 
     public static uint SetText(string text) => OnSta(() =>
     {
@@ -2051,6 +2106,63 @@ static class Native
     private static extern nint SendMessageTimeoutW(nint hwnd, uint message, nint wParam, [Out] char[] buffer,
         uint flags, uint timeout, out nint result);
 
+    private delegate bool EnumWindowCallback(nint window, nint data);
+    [DllImport("user32.dll")] private static extern int EnumWindows(EnumWindowCallback callback, nint data);
+    [DllImport("user32.dll")] private static extern int EnumChildWindows(nint root, EnumWindowCallback callback, nint data);
+    [DllImport("user32.dll")] private static extern int IsWindowVisible(nint window);
+    [DllImport("user32.dll", EntryPoint = "GetWindowTextW", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(nint window, [Out] char[] text, int capacity);
+
+    public static string WindowClass(nint handle)
+    {
+        var text = new char[128];
+        return new string(text, 0, GetClassNameW(handle, text, text.Length));
+    }
+    public static string WindowText(nint handle)
+    {
+        var text = new char[2048];
+        return new string(text, 0, GetWindowTextW(handle, text, text.Length));
+    }
+    public static IReadOnlyList<nint> HostWindows(int processId)
+    {
+        var result = new HashSet<nint>();
+        EnumWindowCallback child = (handle, _) =>
+        {
+            GetWindowThreadProcessId(handle, out var owner);
+            if (owner == processId && IsWindowVisible(handle) != 0) result.Add(handle);
+            return true;
+        };
+        EnumWindows((handle, _) =>
+        {
+            GetWindowThreadProcessId(handle, out var owner);
+            if (owner == processId)
+            {
+                child(handle, 0);
+                EnumChildWindows(handle, child, 0);
+            }
+            return true;
+        }, 0);
+        return result.ToArray();
+    }
+    public static IEnumerable<AutomationElement> ChildElements(AutomationElement parent, string className)
+    {
+        var current = parent.Current;
+        var handles = new List<nint>();
+        EnumChildWindows(new nint(current.NativeWindowHandle), (handle, _) =>
+        {
+            GetWindowThreadProcessId(handle, out var owner);
+            if (owner == current.ProcessId && WindowClass(handle) == className) handles.Add(handle);
+            return true;
+        }, 0);
+        foreach (var handle in handles)
+        {
+            var element = AutomationElement.FromHandle(handle);
+            Ensure(element.Current.ProcessId == current.ProcessId && element.Current.NativeWindowHandle == handle,
+                "Discovered HWND no longer belongs to the expected host");
+            yield return element;
+        }
+    }
+
     public static uint ClipboardSequence() => GetClipboardSequenceNumber();
 
     public static void AssertClipboardState(uint expectedSequence, int expectedOwnerPid)
@@ -2113,7 +2225,7 @@ static class Native
         if (receipt is null || receipt.OwnerProcessId != hostPid) return;
         ClipboardReceipt.VerifyCurrent();
         AssertClipboardState(receipt.Sequence, hostPid);
-        var text = ClipboardSafety.ReadText();
+        var text = ClipboardText.ReadUnicodeText(receipt.Sequence, hostPid);
         AssertClipboardState(receipt.Sequence, hostPid);
         _ = ClipboardSafety.SetText(text);
     }
@@ -2187,7 +2299,7 @@ static class Native
         WaitUntil(() => ClipboardSequence() != before, TimeSpan.FromSeconds(3), "STC copy did not change the clipboard");
         var copiedSequence = ClipboardSequence();
         AssertClipboardState(copiedSequence, host.Id);
-        var copied = ClipboardSafety.ReadText();
+        var copied = ClipboardText.ReadUnicodeText(copiedSequence, host.Id);
         AssertClipboardState(copiedSequence, host.Id);
         ClipboardReceipt.Record("host-stc-copy", host.Id, copiedSequence);
         return copied;
@@ -2200,7 +2312,7 @@ static class Native
         var publishedSequence = ClipboardSafety.SetText(text);
         Ensure(ClipboardSequence() == publishedSequence && IsClipboardFormatAvailable(13) != 0,
             "Published test text is not a stable CF_UNICODETEXT clipboard value");
-        Ensure(ClipboardSafety.ReadText() == text && ClipboardSequence() == publishedSequence,
+        Ensure(ClipboardText.ReadUnicodeText(publishedSequence, Environment.ProcessId) == text && ClipboardSequence() == publishedSequence,
             "Published test paste source was not preserved before guarded input");
         AssertClipboardState(publishedSequence, Environment.ProcessId);
         Chord(editor, host, 'A');
@@ -2218,7 +2330,7 @@ static class Native
             Console.Error.WriteLine($"paste.failure.sequence={sequence};published={publishedSequence};owner={owner};unicode={IsClipboardFormatAvailable(13)}");
             if (sequence == publishedSequence && owner == (uint)Environment.ProcessId)
             {
-                var retained = ClipboardSafety.ReadText();
+                var retained = ClipboardText.ReadUnicodeText(sequence, Environment.ProcessId);
                 AssertClipboardState(sequence, Environment.ProcessId);
                 Console.Error.WriteLine($"paste.failure.retained_length={retained.Length};expected_length={text.Length};retained_equals_expected={retained == text}");
             }
@@ -2226,7 +2338,7 @@ static class Native
         }
         var copiedSequence = ClipboardSequence();
         AssertClipboardState(copiedSequence, host.Id);
-        var copied = ClipboardSafety.ReadText();
+        var copied = ClipboardText.ReadUnicodeText(copiedSequence, host.Id);
         AssertClipboardState(copiedSequence, host.Id);
         ClipboardReceipt.Record("host-copy-after-paste", host.Id, copiedSequence);
         Ensure(Normalize(copied) == Normalize(text), "Editor host copy differs from the pasted source");
@@ -2261,4 +2373,55 @@ static class DebugInvocation
     private static Task? active;
     public static void Set(Task task) => active = task;
     public static bool Wait(TimeSpan timeout) => active is not null && active.Wait(timeout);
+}
+
+static class LuaLanguageChild
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry
+    {
+        public uint Size, Usage, ProcessId;
+        public nuint DefaultHeap;
+        public uint ModuleId, Threads, ParentId;
+        public int Priority;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Executable;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern nint CreateToolhelp32Snapshot(uint flags, uint processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern int Process32FirstW(nint snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern int Process32NextW(nint snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll")] private static extern int CloseHandle(nint handle);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern int TerminateProcess(Microsoft.Win32.SafeHandles.SafeProcessHandle process, uint exitCode);
+
+    public static void TerminateVerified(Process host, string expectedExe, string receipt)
+    {
+        var snapshotUtc = DateTime.UtcNow;
+        var snapshot = CreateToolhelp32Snapshot(2, 0);
+        if (snapshot == -1) throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+        var candidates = new List<int>();
+        try
+        {
+            var entry = new ProcessEntry { Size = (uint)Marshal.SizeOf<ProcessEntry>() };
+            if (Process32FirstW(snapshot, ref entry) == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+            do
+            {
+                if (entry.ParentId == host.Id && entry.Executable.Equals("lua-language-server.exe", StringComparison.OrdinalIgnoreCase))
+                    candidates.Add((int)entry.ProcessId);
+            } while (Process32NextW(snapshot, ref entry) != 0);
+        }
+        finally { CloseHandle(snapshot); }
+        if (candidates.Count != 1) throw new InvalidOperationException($"Expected one real LuaLS child of the test host, found {candidates.Count}");
+        using var process = Process.GetProcessById(candidates[0]);
+        var retainedHandle = process.SafeHandle;
+        var observedExe = process.MainModule?.FileName ?? "";
+        if (!Path.GetFullPath(observedExe).Equals(Path.GetFullPath(expectedExe), StringComparison.OrdinalIgnoreCase)
+            || process.StartTime < host.StartTime || process.StartTime.ToUniversalTime() > snapshotUtc)
+            throw new InvalidOperationException("LuaLS candidate did not match this host's executable and lifetime; preserved");
+        var started = process.StartTime.ToUniversalTime();
+        if (TerminateProcess(retainedHandle, 19) == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
+        if (!process.WaitForExit(TimeSpan.FromSeconds(5))) throw new TimeoutException("Verified LuaLS child did not stop");
+        File.WriteAllText(receipt, JsonSerializer.Serialize(new { ProcessId = process.Id, ParentId = host.Id,
+            StartedUtc = started, ExecutableSha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(expectedExe))),
+            ExitCode = process.ExitCode }, new JsonSerializerOptions { WriteIndented = true }));
+    }
 }

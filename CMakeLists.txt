@@ -961,6 +961,9 @@ set(AEGISUB_CORE_SOURCES
     src/automation/automation_runtime_journal.cpp
     src/automation/karaoke_line_classifier.cpp
     src/automation/lua_source_tools.cpp
+    src/automation/lua_language_environment.cpp
+    src/automation/lua_language_server.cpp
+    src/automation/lua_language_server_process.cpp
     src/automation/engine/automation_engine_registry.cpp
     # CSRI bridge (renderer discovery + native library bridge)
     src/csri_renderer_discovery.cpp
@@ -1609,6 +1612,7 @@ if(WITH_WXSTC)
     target_compile_definitions(Aegisub PRIVATE "WITH_WXSTC")
     target_sources(Aegisub PRIVATE
         src/lua_workspace_frame.cpp
+        src/lua_workspace_language.cpp
         src/automation/lua_workspace_document.cpp
     )
     target_sources(Aegisub PRIVATE src/subs_edit_ctrl_stc.cpp)

@@ -68,6 +68,7 @@ class LuaWorkspaceDocument {
 	int GetDialogueId() const { return dialogue_id; }
 	agi::fs::path const& GetFilename() const { return filename; }
 	std::uint64_t GetRevision() const { return revision; }
+	unsigned GetCodeScopes() const;
 	bool IsDirty() const { return source != clean_source; }
 	void SetSource(std::string value);
 	void DiscardChanges();
