@@ -11,6 +11,7 @@
 #include "compat.h"
 #include "include/aegisub/context.h"
 #include "include/aegisub/context_ui.h"
+#include "libresrc/libresrc.h"
 #include "options.h"
 #include "selection_controller.h"
 #include "subs_controller.h"
@@ -22,6 +23,7 @@
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
+#include <wx/bmpbndl.h>
 #include <wx/choicdlg.h>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
@@ -33,12 +35,14 @@
 #include <wx/notebook.h>
 #include <wx/panel.h>
 #include <wx/sizer.h>
+#include <wx/splitter.h>
 #include <wx/stattext.h>
 #include <wx/stc/stc.h>
 #include <wx/textctrl.h>
 #include <wx/timer.h>
 #include <wx/treectrl.h>
 #include <wx/utils.h>
+#include <wx/wrapsizer.h>
 
 #include <algorithm>
 #include <functional>
@@ -53,6 +57,8 @@ namespace {
 constexpr int diagnostic_indicator = 8;
 constexpr std::size_t runtime_text_limit = 2048;
 constexpr std::string_view truncated_marker = "[truncated]";
+constexpr char source_width_option[] = "Automation/Lua Workspace/Layout/Source Width Percent";
+constexpr char output_height_option[] = "Automation/Lua Workspace/Layout/Output Height Percent";
 
 class DebugVariableItemData final : public wxTreeItemData {
 	public:
@@ -271,69 +277,77 @@ class WorkspaceInvocationObserver final : public AutomationInvocationObserver {
 LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	: wxFrame(value ? value->GetUI().parent : nullptr, wxID_ANY, wxS("Lua Workspace"), wxDefaultPosition, wxSize(1000, 720)), context(value) {
 	SetName(wxS("Lua Workspace"));
+	SetIcon(GETICON(automation_toolbutton_16));
 	auto panel = new wxPanel(this);
 	auto layout = new wxBoxSizer(wxVERTICAL);
-	auto actions = new wxBoxSizer(wxHORIZONTAL);
-	auto open = new wxButton(panel, wxID_OPEN, _("Open File"));
+	auto actions = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
+	int const button_height = panel->FromDIP(30);
+	auto group = [panel, actions] {
+		auto row = new wxBoxSizer(wxHORIZONTAL);
+		actions->Add(row, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, panel->FromDIP(8));
+		return row;
+	};
+	auto icon_button = [panel, button_height](wxBoxSizer *row, int id, wxString const& name, wxBitmapBundle const& icon) {
+		auto button = new wxButton(panel, id, {}, wxDefaultPosition, wxSize(panel->FromDIP(32), button_height), wxBU_EXACTFIT | wxBU_NOTEXT);
+		button->SetBitmap(icon);
+		button->SetLabel(name);
+		button->SetName(name);
+		button->SetToolTip(name);
+		row->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, panel->FromDIP(2));
+		return button;
+	};
+	auto text_button = [panel, button_height](wxBoxSizer *row, wxString const& name) {
+		auto button = new wxButton(panel, wxID_ANY, name, wxDefaultPosition, wxSize(-1, button_height), wxBU_EXACTFIT);
+		button->SetName(name);
+		row->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, panel->FromDIP(2));
+		return button;
+	};
+	auto file_actions = group();
+	auto open = icon_button(file_actions, wxID_OPEN, _("Open File"), CMD_ICON_BUNDLE_GET(open_toolbutton, wxLayout_Default));
 	open_button = open;
-	apply = new wxButton(panel, wxID_SAVE, _("Apply"));
-	format = new wxButton(panel, wxID_ANY, _("Format"));
-	reload = new wxButton(panel, wxID_ANY, _("Reload"));
-	auto copy = new wxButton(panel, wxID_COPY, _("Copy source"));
-	open->SetName(wxS("Open File"));
-	apply->SetName(wxS("Apply"));
-	format->SetName(wxS("Format"));
-	reload->SetName(wxS("Reload"));
-	copy->SetName(wxS("Copy source"));
-	for (auto button : {open, apply, format, reload, copy})
-		actions->Add(button, 0, wxRIGHT, 6);
-	layout->Add(actions, 0, wxEXPAND | wxALL, 8);
-	auto run_actions = new wxBoxSizer(wxHORIZONTAL);
-	run_button = new wxButton(panel, wxID_ANY, _("Run"));
-	debug_button = new wxButton(panel, wxID_ANY, _("Debug"));
-	continue_button = new wxButton(panel, wxID_ANY, _("Continue"));
-	pause_button = new wxButton(panel, wxID_ANY, _("Pause"));
-	stop_button = new wxButton(panel, wxID_ANY, _("Stop"));
-	detach_button = new wxButton(panel, wxID_ANY, _("Detach"));
-	for (auto button : {run_button, debug_button, continue_button, pause_button, stop_button, detach_button}) {
-		button->SetName(button->GetLabel());
-		run_actions->Add(button, 0, wxRIGHT, 6);
-	}
-	layout->Add(run_actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
-	auto debug_options = new wxBoxSizer(wxHORIZONTAL);
+	apply = icon_button(file_actions, wxID_SAVE, _("Apply"), CMD_ICON_BUNDLE_GET(save_toolbutton, wxLayout_Default));
+	format = text_button(file_actions, _("Format"));
+	reload = text_button(file_actions, _("Reload"));
+	auto copy = icon_button(file_actions, wxID_COPY, _("Copy source"), CMD_ICON_BUNDLE_GET(copy_button, wxLayout_Default));
+	auto run_actions = group();
+	run_button = icon_button(run_actions, wxID_ANY, _("Run"), CMD_ICON_BUNDLE_GET(button_play, wxLayout_Default));
+	debug_button = text_button(run_actions, _("Debug"));
 	pause_on_entry = new wxCheckBox(panel, wxID_ANY, _("Pause on entry"));
 	pause_on_entry->SetName(wxS("Pause on entry"));
-	debug_options->Add(pause_on_entry, 0, wxRIGHT, 12);
-	debug_options->Add(new wxStaticText(panel, wxID_ANY, _("Debug runs to the next breakpoint by default.")), 0, wxALIGN_CENTER_VERTICAL);
-	layout->Add(debug_options, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
-	auto step_actions = new wxBoxSizer(wxHORIZONTAL);
-	step_in_button = new wxButton(panel, wxID_ANY, _("Step In"));
-	step_over_button = new wxButton(panel, wxID_ANY, _("Step Over"));
-	step_out_button = new wxButton(panel, wxID_ANY, _("Step Out"));
-	auto toggle_breakpoint = new wxButton(panel, wxID_ANY, _("Toggle Breakpoint"));
-	auto clear_breakpoints = new wxButton(panel, wxID_ANY, _("Clear Breakpoints"));
-	for (auto button : {step_in_button, step_over_button, step_out_button, toggle_breakpoint, clear_breakpoints}) {
-		button->SetName(button->GetLabel());
-		step_actions->Add(button, 0, wxRIGHT, 6);
-	}
-	layout->Add(step_actions, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+	pause_on_entry->SetToolTip(_("By default, Debug runs to the next breakpoint or completes if none is set."));
+	run_actions->Add(pause_on_entry, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, panel->FromDIP(5));
+	continue_button = text_button(run_actions, _("Continue"));
+	pause_button = icon_button(run_actions, wxID_ANY, _("Pause"), CMD_ICON_BUNDLE_GET(button_pause, wxLayout_Default));
+	stop_button = icon_button(run_actions, wxID_ANY, _("Stop"), CMD_ICON_BUNDLE_GET(button_stop, wxLayout_Default));
+	detach_button = text_button(run_actions, _("Detach"));
+	auto step_actions = group();
+	step_in_button = text_button(step_actions, _("Step In"));
+	step_over_button = text_button(step_actions, _("Step Over"));
+	step_out_button = text_button(step_actions, _("Step Out"));
+	auto breakpoint_actions = group();
+	auto toggle_breakpoint = text_button(breakpoint_actions, _("Toggle Breakpoint"));
+	auto clear_breakpoints = text_button(breakpoint_actions, _("Clear Breakpoints"));
+	auto toolbar_buttons = {open, apply, format, reload, copy, run_button, debug_button, continue_button, pause_button, stop_button,
+							detach_button, step_in_button, step_over_button, step_out_button, toggle_breakpoint, clear_breakpoints};
+	int uniform_height = button_height;
+	for (auto button : toolbar_buttons)
+		uniform_height = std::max(uniform_height, button->GetBestSize().y);
+	for (auto button : toolbar_buttons)
+		button->SetMinSize(wxSize(button->GetMinSize().x, uniform_height));
+	pause_on_entry->SetMinSize(wxSize(-1, uniform_height));
+	layout->Add(actions, 0, wxEXPAND | wxALL, panel->FromDIP(6));
 	run_status = new wxStaticText(panel, wxID_ANY, _("No Workspace invocation."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
 	run_status->SetName(wxS("Lua run status"));
 	layout->Add(run_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
-	editor = new wxStyledTextCtrl(panel, wxID_ANY);
+	output_splitter = new wxSplitterWindow(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_NOBORDER | wxSP_LIVE_UPDATE);
+	source_splitter = new wxSplitterWindow(output_splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_NOBORDER | wxSP_LIVE_UPDATE);
+	output_splitter->SetName(wxS("Lua output splitter"));
+	source_splitter->SetName(wxS("Lua source splitter"));
+	editor = new wxStyledTextCtrl(source_splitter, wxID_ANY);
 	editor->SetName(wxS("Lua source"));
 	editor->SetCodePage(wxSTC_CP_UTF8);
 	editor->SetLexer(wxSTC_LEX_LUA);
 	editor->SetKeyWords(0, wxS("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"));
-	editor->StyleSetFont(wxSTC_STYLE_DEFAULT, wxFont(wxFontInfo(11).Family(wxFONTFAMILY_TELETYPE)));
-	editor->StyleClearAll();
-	editor->StyleSetForeground(wxSTC_LUA_COMMENT, wxColour(80, 125, 80));
-	editor->StyleSetForeground(wxSTC_LUA_COMMENTLINE, wxColour(80, 125, 80));
-	editor->StyleSetForeground(wxSTC_LUA_WORD, wxColour(35, 70, 180));
-	editor->StyleSetForeground(wxSTC_LUA_STRING, wxColour(155, 60, 45));
-	editor->StyleSetForeground(wxSTC_LUA_CHARACTER, wxColour(155, 60, 45));
-	editor->StyleSetForeground(wxSTC_LUA_LITERALSTRING, wxColour(155, 60, 45));
-	editor->StyleSetForeground(wxSTC_LUA_NUMBER, wxColour(125, 55, 135));
 	editor->SetTabWidth(4);
 	editor->SetIndent(4);
 	editor->SetUseTabs(true);
@@ -355,9 +369,7 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	editor->IndicatorSetForeground(diagnostic_indicator, wxColour(200, 40, 40));
 	editor->IndicatorSetUnder(diagnostic_indicator, true);
 	editor->SetReadOnly(true);
-	auto body = new wxBoxSizer(wxHORIZONTAL);
-	body->Add(editor, 1, wxEXPAND | wxLEFT | wxRIGHT, 8);
-	runtime_tabs = new wxNotebook(panel, wxID_ANY);
+	runtime_tabs = new wxNotebook(source_splitter, wxID_ANY);
 	runtime_tabs->SetMinSize(wxSize(280, -1));
 	runtime_context = new wxTextCtrl(runtime_tabs, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
 	generated_output = new wxTextCtrl(runtime_tabs, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
@@ -373,6 +385,7 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	execution_source->SetName(wxS("Lua execution source"));
 	execution_source->SetCodePage(wxSTC_CP_UTF8);
 	execution_source->SetLexer(wxSTC_LEX_LUA);
+	execution_source->SetKeyWords(0, wxS("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"));
 	execution_source->SetMarginType(0, wxSTC_MARGIN_NUMBER);
 	execution_source->SetMarginWidth(0, 42);
 	execution_source->MarkerDefine(2, wxSTC_MARK_ARROW, wxColour(35, 70, 180), wxColour(35, 70, 180));
@@ -401,20 +414,74 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	runtime_tabs->AddPage(stack_panel, _("Stack and Variables"));
 	stack_tab_index = static_cast<int>(runtime_tabs->GetPageCount()) - 1;
 	language = std::make_unique<LuaWorkspaceLanguage>(editor, runtime_tabs);
-	body->Add(runtime_tabs, 1, wxEXPAND | wxRIGHT, 8);
-	layout->Add(body, 1, wxEXPAND);
-	diagnostics = new wxStaticText(panel, wxID_ANY, _("Open a karaoke code line or a Lua source file."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
+	source_splitter->SetMinimumPaneSize(FromDIP(180));
+	source_splitter->SplitVertically(editor, runtime_tabs);
+	auto output_panel = new wxPanel(output_splitter);
+	auto output_layout = new wxBoxSizer(wxVERTICAL);
+	diagnostics = new wxStaticText(output_panel, wxID_ANY, _("Open a karaoke code line or a Lua source file."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
 	diagnostics->SetName(wxS("Lua diagnostics"));
-	layout->Add(diagnostics, 0, wxEXPAND | wxALL, 8);
-	run_log = new wxTextCtrl(panel, wxID_ANY, {}, wxDefaultPosition, wxSize(-1, 82), wxTE_MULTILINE | wxTE_READONLY);
+	output_layout->Add(diagnostics, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4);
+	run_log = new wxTextCtrl(output_panel, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
 	run_log->SetName(wxS("Lua run log"));
-	layout->Add(run_log, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
+	output_layout->Add(run_log, 1, wxEXPAND | wxALL, 4);
+	output_panel->SetSizer(output_layout);
+	output_splitter->SetMinimumPaneSize(FromDIP(56));
+	output_splitter->SplitHorizontally(source_splitter, output_panel);
+	layout->Add(output_splitter, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
 	panel->SetSizer(layout);
+	ApplyEditorPreferences();
+	editor_font_face_connection = OPT_SUB("Automation/Lua Workspace/Editor/Font Face", [this] { ApplyEditorPreferences(); });
+	editor_font_size_connection = OPT_SUB("Automation/Lua Workspace/Editor/Font Size", [this] { ApplyEditorPreferences(); });
+	editor_wrap_connection = OPT_SUB("Automation/Lua Workspace/Editor/Wrap", [this] { ApplyEditorPreferences(); });
 	ClearRuntimeObservation();
 	auto frame_layout = new wxBoxSizer(wxVERTICAL);
 	frame_layout->Add(panel, 1, wxEXPAND);
 	SetSizer(frame_layout);
 	SetMinSize(wxSize(600, 400));
+	auto source_percent = std::clamp(static_cast<int>(OPT_GET(source_width_option)->GetInt()), 10, 90);
+	auto output_percent = std::clamp(static_cast<int>(OPT_GET(output_height_option)->GetInt()), 8, 65);
+	source_splitter->SetSashGravity(source_percent / 100.0);
+	output_splitter->SetSashGravity(1.0 - output_percent / 100.0);
+	source_splitter->Bind(wxEVT_SPLITTER_SASH_POS_CHANGING, [this](wxSplitterEvent& event) {
+		source_drag_pending = true;
+		event.Skip();
+	});
+	source_splitter->Bind(wxEVT_SPLITTER_SASH_POS_RESIZE, [this](wxSplitterEvent& event) {
+		source_drag_pending = false;
+		event.SetSashPosition(event.GetNewSize() * std::clamp(static_cast<int>(OPT_GET(source_width_option)->GetInt()), 10, 90) / 100);
+	});
+	source_splitter->Bind(wxEVT_SPLITTER_SASH_POS_CHANGED, [this](wxSplitterEvent& event) {
+		if (!restoring_splitters && source_drag_pending && source_splitter->GetClientSize().x > 0) {
+			int percent = 100 * event.GetSashPosition() / source_splitter->GetClientSize().x;
+			OPT_SET(source_width_option)->SetInt(percent);
+			source_splitter->SetSashGravity(percent / 100.0);
+		}
+		source_drag_pending = false;
+		event.Skip();
+	});
+	output_splitter->Bind(wxEVT_SPLITTER_SASH_POS_CHANGING, [this](wxSplitterEvent& event) {
+		output_drag_pending = true;
+		event.Skip();
+	});
+	output_splitter->Bind(wxEVT_SPLITTER_SASH_POS_RESIZE, [this](wxSplitterEvent& event) {
+		output_drag_pending = false;
+		event.SetSashPosition(event.GetNewSize() * (100 - std::clamp(static_cast<int>(OPT_GET(output_height_option)->GetInt()), 8, 65)) / 100);
+	});
+	output_splitter->Bind(wxEVT_SPLITTER_SASH_POS_CHANGED, [this](wxSplitterEvent& event) {
+		if (!restoring_splitters && output_drag_pending && output_splitter->GetClientSize().y > 0) {
+			int percent = 100 * (output_splitter->GetClientSize().y - event.GetSashPosition()) / output_splitter->GetClientSize().y;
+			OPT_SET(output_height_option)->SetInt(percent);
+			output_splitter->SetSashGravity(1.0 - percent / 100.0);
+		}
+		output_drag_pending = false;
+		event.Skip();
+	});
+	CallAfter([this, source_percent, output_percent] {
+		restoring_splitters = true;
+		source_splitter->SetSashPosition(source_splitter->GetClientSize().x * source_percent / 100);
+		output_splitter->SetSashPosition(output_splitter->GetClientSize().y * (100 - output_percent) / 100);
+		restoring_splitters = false;
+	});
 
 	open->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
 		wxFileDialog dialog(this, _("Open Lua source"), {}, {}, _("Lua source (*.lua)|*.lua|All files|*.*"), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
@@ -562,6 +629,8 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 		commit_connection = context->ass->AddCommitListener([this](int, AssDialogue const *) { RefreshDocument(); });
 		file_connection = context->subsController->AddFileOpenListener([this](agi::fs::path const&, bool) {
 			ClearRuntimeObservation();
+			if (!IsInvocationRunning())
+				ClearInvocationPresentation();
 			RefreshDocument();
 		});
 	}
@@ -1274,6 +1343,53 @@ void LuaWorkspaceFrame::FinishPendingDiscard(bool commit) {
 	}
 }
 
+void LuaWorkspaceFrame::ApplyEditorPreferences() {
+	bool was_loading = loading;
+	loading = true;
+	auto restore_loading = agi::make_scope_exit([this, was_loading] { loading = was_loading; });
+	int size = std::clamp(static_cast<int>(OPT_GET("Automation/Lua Workspace/Editor/Font Size")->GetInt()), 3, 42);
+	wxFont font(wxFontInfo(size).Family(wxFONTFAMILY_TELETYPE));
+	auto face = OPT_GET("Automation/Lua Workspace/Editor/Font Face")->GetString();
+	if (!face.empty())
+		font.SetFaceName(to_wx(face));
+	int wrap = OPT_GET("Automation/Lua Workspace/Editor/Wrap")->GetBool() ? wxSTC_WRAP_WORD : wxSTC_WRAP_NONE;
+	for (auto source : {editor, execution_source}) {
+		source->StyleSetFont(wxSTC_STYLE_DEFAULT, font);
+		source->StyleClearAll();
+		source->StyleSetForeground(wxSTC_LUA_COMMENT, wxColour(80, 125, 80));
+		source->StyleSetForeground(wxSTC_LUA_COMMENTLINE, wxColour(80, 125, 80));
+		source->StyleSetForeground(wxSTC_LUA_WORD, wxColour(35, 70, 180));
+		source->StyleSetForeground(wxSTC_LUA_STRING, wxColour(155, 60, 45));
+		source->StyleSetForeground(wxSTC_LUA_CHARACTER, wxColour(155, 60, 45));
+		source->StyleSetForeground(wxSTC_LUA_LITERALSTRING, wxColour(155, 60, 45));
+		source->StyleSetForeground(wxSTC_LUA_NUMBER, wxColour(125, 55, 135));
+		source->SetWrapMode(wrap);
+		source->SetMarginWidth(0, std::max(FromDIP(source == editor ? 52 : 42), source->TextWidth(wxSTC_STYLE_LINENUMBER, wxS("99999"))));
+	}
+}
+
+void LuaWorkspaceFrame::ClearInvocationPresentation() {
+	last_sources.reset();
+	last_debug_snapshot.reset();
+	last_debug_version = 0;
+	stack_frames->Clear();
+	rebuilding_debug_tree = true;
+	auto resume_tree_events = agi::make_scope_exit([this] { rebuilding_debug_tree = false; });
+	debug_variables->DeleteAllItems();
+	variable_details->Clear();
+	execution_source->SetReadOnly(false);
+	execution_source->SetText(wxString{});
+	execution_source->SetReadOnly(true);
+	execution_identity->SetLabel(_("No paused source."));
+	execution_identity->SetToolTip(execution_identity->GetLabel());
+	debug_location->SetLabel(_("No active debug pause."));
+	debug_location->SetToolTip(debug_location->GetLabel());
+	run_status->SetLabel(_("No Workspace invocation."));
+	run_status->SetToolTip(run_status->GetLabel());
+	run_log->Clear();
+	runtime_tabs->SetSelection(0);
+}
+
 void LuaWorkspaceFrame::SetEditorSource() {
 	FinishPendingDiscard(false);
 	ClearRuntimeObservation();
@@ -1326,7 +1442,10 @@ void LuaWorkspaceFrame::RefreshDocument(bool check_target) {
 	apply->Enable(!IsInvocationRunning() && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
 	format->Enable(document != nullptr);
 	reload->Enable(!IsInvocationRunning() && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
-	apply->SetLabel(document && document->GetKind() == LuaWorkspaceDocumentKind::LuaFile ? _("Save") : _("Apply"));
+	auto apply_label = document && document->GetKind() == LuaWorkspaceDocumentKind::LuaFile ? _("Save") : _("Apply");
+	apply->SetLabel(apply_label);
+	apply->SetName(apply_label);
+	apply->SetToolTip(apply_label);
 	wxString title = wxS("Lua Workspace");
 	if (document) {
 		title += wxS(" - ");
@@ -1356,6 +1475,7 @@ bool LuaWorkspaceFrame::FinishOpen(std::unique_ptr<LuaWorkspaceDocument> candida
 		return false;
 	}
 	document = std::move(candidate);
+	ClearInvocationPresentation();
 	no_macro_revision.reset();
 	source_diagnostic.reset();
 	action_message.clear();
@@ -1502,6 +1622,7 @@ bool LuaWorkspaceFrame::ReloadDocument() {
 		return false;
 	auto result = document->Reload();
 	if (result.Succeeded()) {
+		ClearInvocationPresentation();
 		no_macro_revision.reset();
 		source_diagnostic.reset();
 		SetEditorSource();

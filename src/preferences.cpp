@@ -1019,6 +1019,9 @@ void BuildAutomationPage(OptionPage *p) {
 	auto *enable_lua_ls = p->OptionAdd(lua_workspace, _("Enable LuaLS"), "Automation/Lua Workspace/Enable LuaLS");
 	p->CellSkip(lua_workspace);
 	p->OptionBrowse(lua_workspace, _("LuaLS directory"), "Automation/Lua Workspace/LuaLS Directory", enable_lua_ls, true);
+	p->OptionAdd(lua_workspace, _("Wrap editor lines to window width"), "Automation/Lua Workspace/Editor/Wrap");
+	p->CellSkip(lua_workspace);
+	p->OptionFont(lua_workspace, "Automation/Lua Workspace/Editor/");
 
 	p->SetSizerAndFit(p->sizer);
 }

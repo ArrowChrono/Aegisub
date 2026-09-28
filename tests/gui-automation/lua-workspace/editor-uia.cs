@@ -55,11 +55,13 @@ static int Supervise(string[] args)
     foreach (var arg in args) start.ArgumentList.Add(arg);
     using var worker = Process.Start(start) ?? throw new InvalidOperationException("Could not start UIA worker");
     var timedOut = false;
-    var unavailableEditor = args.Zip(args.Skip(1)).Any(pair => pair.First == "--scenario" && pair.Second == "editor-unavailable");
-    var totalBudgetSeconds = unavailableEditor ? 150 : 120;
+    var requestedScenario = args.Zip(args.Skip(1)).FirstOrDefault(pair => pair.First == "--scenario").Second;
+    var unavailableEditor = requestedScenario == "editor-unavailable";
+    var workspaceUx = requestedScenario == "workspace-ux";
+    var totalBudgetSeconds = workspaceUx ? 240 : unavailableEditor ? 150 : 120;
     try
     {
-        var workerBudget = TimeSpan.FromSeconds(unavailableEditor ? 140 : 110) - total.Elapsed;
+        var workerBudget = TimeSpan.FromSeconds(workspaceUx ? 230 : unavailableEditor ? 140 : 110) - total.Elapsed;
         if (workerBudget <= TimeSpan.Zero || !worker.WaitForExit(workerBudget))
         {
             timedOut = true;
@@ -139,6 +141,7 @@ static int Run(string[] args)
     if (scenario is "language" or "language-tip") return RunLanguage(exe, artifacts, scenario == "language-tip");
     if (scenario == "language-settings-discovery") return RunLanguageSettingsDiscovery(exe, artifacts);
     if (scenario == "language-settings") return RunLanguageSettings(exe, artifacts);
+    if (scenario == "workspace-ux") return RunWorkspaceUx(exe, artifacts);
     if (scenario is not "editor" and not "editor-unavailable") throw new ArgumentException($"Unknown scenario: {scenario}");
     var editorUnavailable = scenario == "editor-unavailable";
     var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "editor.ass");
@@ -728,6 +731,470 @@ static int Run(string[] args)
     }, new JsonSerializerOptions { WriteIndented = true }));
 }
 
+static int RunWorkspaceUx(string exe, string artifacts)
+{
+    var startedUtc = DateTimeOffset.UtcNow;
+    var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "editor.ass");
+    var mutationFixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "metadata-mutations.lua");
+    var driver = Path.Combine("tests", "gui-automation", "lua-workspace", "editor-uia.cs");
+    var input = Path.Combine(artifacts, "input.ass");
+    var luaFile = Path.Combine(artifacts, "stale-runtime.lua");
+    var invalidLuaFile = Path.Combine(artifacts, "invalid-utf8.lua");
+    var profile = Path.Combine(artifacts, "profile");
+    Directory.CreateDirectory(profile);
+    File.Copy(fixture, input, overwrite: true);
+    File.Copy(mutationFixture, Path.Combine(artifacts, "metadata-mutations.lua"), overwrite: true);
+    File.WriteAllText(luaFile,
+        "script_name = 'Workspace UX stale state'\nscript_description = 'E2E fixture'\nscript_author = 'Aegisub E2E'\nscript_version = '1'\n"
+        + "aegisub.register_macro(script_name, script_description, function(subs, selected, active)\n  error('stale-runtime-marker')\nend)\n",
+        new UTF8Encoding(false));
+    File.WriteAllBytes(invalidLuaFile, new byte[] { 0xFF, 0xFE, 0xFA });
+    DriverTiming.Start(artifacts);
+    var results = new List<StepResult>();
+    var evidence = new List<object>();
+    var allSteps = new[]
+    {
+        "host-one-ready", "compact-responsive-toolbar-and-icon", "splitters-drag", "editor-preferences-apply",
+        "file-to-code-clears-runtime", "failed-open-preserves-runtime", "paired-input-and-undo", "host-one-close",
+        "host-two-ready", "layout-and-editor-preferences-restored", "host-two-close"
+    };
+    var status = "running";
+    Process? host = null;
+    AutomationElement? main = null;
+    AutomationElement? workspace = null;
+    LayoutObservation? draggedLayout = null;
+    HorizontalScrollObservation? appliedEditorScroll = null;
+    HorizontalScrollObservation? appliedEditorVertical = null;
+    var expectedSourcePercent = 0;
+    var expectedOutputPercent = 0;
+    try
+    {
+        (host, main) = LaunchHost("one");
+        Step("host-one-ready", () => Ensure(File.ReadAllBytes(input).SequenceEqual(File.ReadAllBytes(fixture)), "Host startup changed the subtitle fixture"));
+        SelectCodeViaMacro(main, host, first: true);
+        InvokeMenu(main, host, "Automation", "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(6));
+        workspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(10));
+        var source = FindNamed(workspace, "Lua source") ?? throw new InvalidOperationException("Lua source editor is absent");
+
+        Step("compact-responsive-toolbar-and-icon", () =>
+        {
+            static object Geometry(IEnumerable<AutomationElement> buttons) => buttons.ToDictionary(button => button.Current.Name,
+                button =>
+                {
+                    var rect = button.Current.BoundingRectangle;
+                    return (object)new { rect.Height, CenterY = rect.Top + rect.Height / 2, rect.Left, rect.Right };
+                }, StringComparer.Ordinal);
+            static void AssertUniformHeights(AutomationElement[] buttons, string width)
+            {
+                var heights = buttons.Select(button => button.Current.BoundingRectangle.Height).ToArray();
+                Ensure(heights.Length == 16, $"{width} toolbar did not expose all 16 button heights");
+                Ensure(heights.Max() - heights.Min() <= 2,
+                    $"{width} toolbar button heights differ by more than two physical pixels: {string.Join(',', heights.Select(value => value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)))}");
+            }
+            static void AssertSameRow(AutomationElement[] buttons, string[] names, string group)
+            {
+                var centers = names.Select(name => buttons.Single(button => button.Current.Name == name).Current.BoundingRectangle)
+                    .Select(rect => rect.Top + rect.Height / 2).ToArray();
+                Ensure(centers.Max() - centers.Min() <= 2, $"{group} semantic group split across toolbar rows");
+            }
+            static AutomationElement PauseOnEntryControl(AutomationElement root)
+            {
+                var matches = root.FindAll(TreeScope.Descendants, new AndCondition(
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.CheckBox),
+                        new PropertyCondition(AutomationElement.NameProperty, "Pause on entry", PropertyConditionFlags.IgnoreCase)))
+                    .Cast<AutomationElement>().Where(item => !item.Current.IsOffscreen).ToArray();
+                Ensure(matches.Length == 1, $"Expected one visible Pause on entry control, found {matches.Length}");
+                return matches[0];
+            }
+            static void AssertExecutionAlignment(AutomationElement[] buttons, AutomationElement pauseOnEntry, string width)
+            {
+                var names = new[] { "Run", "Debug", "Continue", "Pause", "Stop", "Detach" };
+                AssertSameRow(buttons, names, width + " execution");
+                var buttonRects = names.Select(name => buttons.Single(button => button.Current.Name == name).Current.BoundingRectangle).ToArray();
+                var checkbox = pauseOnEntry.Current.BoundingRectangle;
+                var centers = buttonRects.Select(rect => rect.Top + rect.Height / 2).Append(checkbox.Top + checkbox.Height / 2).ToArray();
+                Ensure(centers.Max() - centers.Min() <= 2, $"{width} Pause on entry is not vertically aligned with the execution group");
+                Ensure(Math.Abs(checkbox.Height - buttonRects[0].Height) <= 2, $"{width} Pause on entry height differs from its execution row");
+                var debug = buttons.Single(button => button.Current.Name == "Debug").Current.BoundingRectangle;
+                var continuation = buttons.Single(button => button.Current.Name == "Continue").Current.BoundingRectangle;
+                Ensure(debug.Right <= checkbox.Left + 2 && checkbox.Right <= continuation.Left + 2,
+                    $"{width} Pause on entry is not grouped immediately between Debug and Continue");
+            }
+            var fileGroup = new[] { "Open File", "Apply", "Format", "Reload", "Copy source" };
+            var executionGroup = new[] { "Run", "Debug", "Continue", "Pause", "Stop", "Detach" };
+            var stepGroup = new[] { "Step In", "Step Over", "Step Out" };
+            var breakpointGroup = new[] { "Toggle Breakpoint", "Clear Breakpoints" };
+            Ensure(NativeMessage.HasWindowIcon((nint)workspace.Current.NativeWindowHandle), "Lua Workspace has no small or class window icon");
+            var wideWidth = Math.Min(1440, Math.Max(1050, NativeMessage.PrimaryWorkAreaWidth() - 80));
+            NativeMessage.ResizeWindow((nint)workspace.Current.NativeWindowHandle, wideWidth, 760);
+            WaitUntil(() => workspace.Current.BoundingRectangle.Width >= wideWidth - 12, TimeSpan.FromSeconds(3), "Lua Workspace did not reach the requested wide size");
+            var wideButtons = WorkspaceActionButtons(workspace);
+            AssertWorkspaceActions(wideButtons);
+            var wideRows = ButtonRowCount(wideButtons);
+            var widePauseOnEntry = PauseOnEntryControl(workspace);
+            AssertUniformHeights(wideButtons, "Wide");
+            Ensure(wideRows == 1, $"Wide toolbar should fit all semantic groups on one row, observed {wideRows}");
+            AssertSameRow(wideButtons, fileGroup, "Wide file");
+            AssertExecutionAlignment(wideButtons, widePauseOnEntry, "Wide");
+            AssertSameRow(wideButtons, stepGroup, "Wide step");
+            AssertSameRow(wideButtons, breakpointGroup, "Wide breakpoint");
+            var run = wideButtons.Single(button => button.Current.Name == "Run").Current.BoundingRectangle;
+            var debug = wideButtons.Single(button => button.Current.Name == "Debug").Current.BoundingRectangle;
+            Ensure(run.Width < debug.Width, "Run did not use a more compact icon button than Debug");
+            SaveEvidence(workspace, "toolbar-wide", new { WideRows = wideRows, WideWidth = workspace.Current.BoundingRectangle.Width,
+                Buttons = Geometry(wideButtons), PauseOnEntry = Geometry(new[] { widePauseOnEntry }) });
+
+            NativeMessage.ResizeWindow((nint)workspace.Current.NativeWindowHandle, 650, 760);
+            WaitUntil(() => workspace.Current.BoundingRectangle.Width <= 670, TimeSpan.FromSeconds(3), "Lua Workspace did not reach the requested narrow size");
+            var narrowButtons = WorkspaceActionButtons(workspace);
+            AssertWorkspaceActions(narrowButtons);
+            var narrowRows = ButtonRowCount(narrowButtons);
+            var narrowPauseOnEntry = PauseOnEntryControl(workspace);
+            AssertUniformHeights(narrowButtons, "Narrow");
+            Ensure(narrowRows > wideRows, $"Toolbar did not wrap to more rows after narrowing; wide={wideRows}, narrow={narrowRows}");
+            AssertSameRow(narrowButtons, fileGroup, "Narrow file");
+            AssertExecutionAlignment(narrowButtons, narrowPauseOnEntry, "Narrow");
+            AssertSameRow(narrowButtons, stepGroup, "Narrow step");
+            AssertSameRow(narrowButtons, breakpointGroup, "Narrow breakpoint");
+            Ensure(ButtonRowCount(narrowButtons.Concat(new[] { narrowPauseOnEntry })) == narrowRows,
+                "Pause on entry created an extra partial toolbar row");
+            SaveEvidence(workspace, "toolbar-narrow", new { WideRows = wideRows, NarrowRows = narrowRows, NarrowWidth = workspace.Current.BoundingRectangle.Width,
+                Buttons = Geometry(narrowButtons), PauseOnEntry = Geometry(new[] { narrowPauseOnEntry }) });
+            NativeMessage.ResizeWindow((nint)workspace.Current.NativeWindowHandle, 1120, 760);
+        });
+
+        Step("splitters-drag", () =>
+        {
+            WaitUntil(() => ObserveLayout(workspace).SourcePercent is > 20 and < 80, TimeSpan.FromSeconds(3), "Workspace source/runtime panes did not settle");
+            var before = ObserveLayout(workspace);
+            var runtime = WorkspaceRuntimeTabs(workspace);
+            var diagnostics = WorkspaceDiagnostics(workspace, source);
+            var sourceRect = source.Current.BoundingRectangle;
+            var runtimeRect = runtime.Current.BoundingRectangle;
+            var verticalStart = new Point((int)Math.Round((sourceRect.Right + runtimeRect.Left) / 2), (int)Math.Round((sourceRect.Top + sourceRect.Bottom) / 2));
+            GuardedKeyboard.Drag(workspace, host, verticalStart, new Point(verticalStart.X + 140, verticalStart.Y));
+            WaitUntil(() => Math.Abs(ObserveLayout(workspace).SourcePercent - before.SourcePercent) >= 7, TimeSpan.FromSeconds(4), "Vertical source/debug splitter did not move by a material amount");
+
+            var afterVertical = ObserveLayout(workspace);
+            sourceRect = source.Current.BoundingRectangle;
+            var diagnosticsRect = diagnostics.Current.BoundingRectangle;
+            Ensure(diagnosticsRect.Top - sourceRect.Bottom >= 2, "Horizontal splitter has no observable sash gap between source and output panes");
+            var horizontalStart = new Point((int)Math.Round(sourceRect.Left + Math.Min(160, sourceRect.Width / 2)), (int)Math.Round(sourceRect.Bottom + 1));
+            GuardedKeyboard.Drag(workspace, host, horizontalStart, new Point(horizontalStart.X, horizontalStart.Y - 90));
+            WaitUntil(() => Math.Abs(ObserveLayout(workspace).OutputPercent - afterVertical.OutputPercent) >= 6, TimeSpan.FromSeconds(4), "Horizontal editor/output splitter did not move by a material amount");
+            draggedLayout = ObserveLayout(workspace);
+            NativeMessage.ResizeWindow((nint)workspace.Current.NativeWindowHandle, 650, 560);
+            WaitUntil(() => workspace.Current.BoundingRectangle.Width <= 670 && workspace.Current.BoundingRectangle.Height <= 580,
+                TimeSpan.FromSeconds(3), "Lua Workspace did not reach the requested constrained splitter size");
+            NativeMessage.ResizeWindow((nint)workspace.Current.NativeWindowHandle, 1120, 760);
+            LayoutObservation? restored = null;
+            WaitUntil(() =>
+            {
+                restored = ObserveLayout(workspace);
+                return Math.Abs(restored.SourcePercent - draggedLayout.SourcePercent) <= 2.5
+                    && Math.Abs(restored.OutputPercent - draggedLayout.OutputPercent) <= 2.5;
+            }, TimeSpan.FromSeconds(4), "Restoring the Workspace size did not recover the user-dragged splitter proportions");
+            SaveEvidence(workspace, "splitters-dragged", new { Before = before, After = draggedLayout, AfterConstrainedResizeAndRestore = restored });
+        });
+
+        Step("editor-preferences-apply", () =>
+        {
+            var cleanSource = NormalizeSource(ReadEditor(source));
+            var wideSource = "local wide = \"" + string.Concat(Enumerable.Repeat("iiiiWWWW0123456789", 40)) + "\"";
+            WriteEditor(source, wideSource, host);
+            GuardedKeyboard.FocusEditor(source, host);
+            GuardedKeyboard.SendKey(source, host, 0x24);
+            HorizontalScrollObservation? wrapped = null;
+            WaitUntil(() => !(wrapped = NativeMessage.HorizontalScroll((nint)source.Current.NativeWindowHandle)).Scrollable,
+                TimeSpan.FromSeconds(3), "Default wrapped editor exposed a horizontal scrolling range for one long line");
+            var wrappedVerticalDefault = NativeMessage.VerticalScroll((nint)source.Current.NativeWindowHandle);
+            SaveEvidence(workspace, "editor-wrap-font-before", new { FontFace = "default monospace", FontSize = 11, Wrap = true,
+                HorizontalScroll = wrapped, VerticalScroll = wrappedVerticalDefault });
+            var configure = UiaDriver.FindEnabledInvokableButtonByAutomationId(main, "Item 5026", "Configure Aegisub")
+                ?? throw new InvalidOperationException("Main-window Configure Aegisub toolbar button is unavailable");
+            var (preferences, invocation) = OpenAutomationPreferences(main, configure, host);
+            var wrap = NativeMessage.DescendantsWithTitle((nint)preferences.Current.NativeWindowHandle, "Wrap editor lines to window width")
+                .Select(AutomationElement.FromHandle).Single(item => item.Current.ProcessId == host.Id && item.Current.ControlType == ControlType.CheckBox && !item.Current.IsOffscreen);
+            Ensure(((TogglePattern)wrap.GetCurrentPattern(TogglePattern.Pattern)).Current.ToggleState == ToggleState.On,
+                "Wrap editor lines preference was not enabled by default");
+            SetPreferenceToggle(wrap, false);
+            InvokeButton(preferences, "Apply");
+            HorizontalScrollObservation? noWrapDefaultFont = null;
+            WaitUntil(() => (noWrapDefaultFont = NativeMessage.HorizontalScroll((nint)source.Current.NativeWindowHandle)).Scrollable,
+                TimeSpan.FromSeconds(4), "Disabling editor wrap did not create a horizontal scrolling range for one long line");
+            var noWrapDefaultFontObserved = noWrapDefaultFont ?? throw new InvalidOperationException("No-wrap default-font scrollbar observation is absent");
+            var (face, size) = ExpandAutomationPreferencesToFont(preferences, host.Id, artifacts);
+            SetPreferenceValue(face, "Arial");
+            var sizePattern = (RangeValuePattern)size.GetCurrentPattern(RangeValuePattern.Pattern);
+            sizePattern.SetValue(17);
+            WaitUntil(() => Math.Abs(sizePattern.Current.Value - 17) < 0.1, TimeSpan.FromSeconds(2), "Font Size preference did not retain 17");
+            InvokeButton(preferences, "Apply");
+            SetPreferenceToggle(wrap, true);
+            InvokeButton(preferences, "Apply");
+            HorizontalScrollObservation? wrappedVerticalArial17 = null;
+            WaitUntil(() =>
+            {
+                wrappedVerticalArial17 = NativeMessage.VerticalScroll((nint)source.Current.NativeWindowHandle);
+                return wrappedVerticalArial17.Page + 1 < wrappedVerticalDefault.Page
+                    || wrappedVerticalArial17.Maximum > wrappedVerticalDefault.Maximum + 1;
+            }, TimeSpan.FromSeconds(4), "Applying Arial 17 did not materially change the wrapped long-line vertical rendering metrics");
+            SetPreferenceToggle(wrap, false);
+            InvokeButton(preferences, "Apply");
+            WaitUntil(() => (appliedEditorScroll = NativeMessage.HorizontalScroll((nint)source.Current.NativeWindowHandle)).Scrollable,
+                TimeSpan.FromSeconds(4), "Restoring no-wrap after the font observation did not restore horizontal scrolling");
+            appliedEditorVertical = NativeMessage.VerticalScroll((nint)source.Current.NativeWindowHandle);
+            SaveEvidence(preferences, "editor-preferences-applied", new
+            {
+                Wrapped = wrapped,
+                WrappedVerticalDefault11 = wrappedVerticalDefault,
+                NoWrapDefaultFont = noWrapDefaultFontObserved,
+                WrappedVerticalArial17 = wrappedVerticalArial17,
+                NoWrapArial17 = appliedEditorScroll,
+                NoWrapArial17Vertical = appliedEditorVertical,
+                FontFace = ((ValuePattern)face.GetCurrentPattern(ValuePattern.Pattern)).Current.Value,
+                FontSize = sizePattern.Current.Value,
+                Wrap = ((TogglePattern)wrap.GetCurrentPattern(TogglePattern.Pattern)).Current.ToggleState
+            });
+            ClosePreferencesWithCancel(preferences, invocation, host);
+            GuardedKeyboard.FocusEditor(source, host);
+            GuardedKeyboard.SendKey(source, host, 0x24);
+            SaveEvidence(workspace, "editor-wrap-font-after", new { FontFace = "Arial", FontSize = 17, Wrap = false, HorizontalScroll = appliedEditorScroll, VisualReview = "Confirm the long-line glyphs are visibly larger and proportionally spaced" });
+            var reloadTask = Task.Run(() => InvokeButton(workspace, "Reload"));
+            var reload = WaitWindow(host, "Reload Lua source", TimeSpan.FromSeconds(5));
+            InvokeTaskDialogButton(reload, "是(Y)", "Yes");
+            if (!reloadTask.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Post-preference Reload did not resume");
+            Ensure(NormalizeSource(ReadEditor(source)) == cleanSource, "Post-preference Reload did not restore the clean code source");
+        });
+
+        Step("file-to-code-clears-runtime", () =>
+        {
+            OpenLuaFile(workspace, host, luaFile, artifacts);
+            source = FindNamed(workspace, "Lua source") ?? throw new InvalidOperationException("Lua source editor disappeared after opening a file");
+            InvokeButton(workspace, "Run");
+            var runStatus = WorkspaceRunStatus(workspace, source);
+            var runLog = WorkspaceRunLog(workspace, source);
+            WaitUntil(() => ReadControlText(runLog).Contains("stale-runtime-marker", StringComparison.Ordinal), TimeSpan.FromSeconds(8), "Failing Lua file did not publish its exception marker");
+            Ensure(!ReadControlText(runStatus).Contains("No Workspace invocation", StringComparison.Ordinal), "Failing Lua run left the initial status unchanged");
+            SelectCodeViaMacro(main, host, first: true);
+            InvokeMenu(main, host, "Automation", "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(6));
+            WaitUntil(() => ReadControlText(runStatus).Contains("No Workspace invocation", StringComparison.Ordinal), TimeSpan.FromSeconds(4), "Successful file-to-code switch did not clear the prior invocation status");
+            Ensure(string.IsNullOrEmpty(ReadControlText(runLog)), "Successful file-to-code switch retained the prior run output");
+            Ensure(string.IsNullOrEmpty(ReadWorkspaceExecutionSource(workspace, source, host, artifacts)), "Successful file-to-code switch retained prior execution source");
+            Ensure(NormalizeSource(ReadEditor(source)).Contains("local total", StringComparison.Ordinal), "Code-line source did not replace the Lua file");
+            SaveEvidence(workspace, "file-to-code-cleared", new { Status = ReadControlText(runStatus), Log = ReadControlText(runLog) });
+        });
+
+        Step("failed-open-preserves-runtime", () =>
+        {
+            InvokeButton(workspace, "Run");
+            var runStatus = WorkspaceRunStatus(workspace, source);
+            var runLog = WorkspaceRunLog(workspace, source);
+            WaitUntil(() => !ReadControlText(runStatus).Contains("running", StringComparison.OrdinalIgnoreCase)
+                && !ReadControlText(runStatus).Contains("No Workspace invocation", StringComparison.Ordinal), TimeSpan.FromSeconds(8), "Code-line run did not finish");
+            var sourceBefore = NormalizeSource(ReadEditor(source));
+            var statusBefore = ReadControlText(runStatus);
+            var logBefore = ReadControlText(runLog);
+            OpenLuaFile(workspace, host, invalidLuaFile, artifacts);
+            WaitUntil(() =>
+            {
+                try
+                {
+                    var copy = workspace.FindFirst(TreeScope.Descendants, new AndCondition(
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                        new PropertyCondition(AutomationElement.NameProperty, "Copy source", PropertyConditionFlags.IgnoreCase)));
+                    return copy is not null && copy.Current.ProcessId == host.Id && !copy.Current.IsOffscreen && copy.Current.IsEnabled
+                        && copy.TryGetCurrentPattern(InvokePattern.Pattern, out _);
+                }
+                catch (ElementNotAvailableException) { return false; }
+            }, TimeSpan.FromSeconds(3), "Copy source did not become invokable after the failed file open returned");
+            var openError = ReadControlText(WorkspaceDiagnostics(workspace, source));
+            Ensure(openError.Contains("valid UTF-8", StringComparison.OrdinalIgnoreCase), $"Invalid UTF-8 open did not report its precise error; observed '{openError}'");
+            File.WriteAllText(Path.Combine(artifacts, "invalid-utf8-open-diagnostic.txt"), openError, new UTF8Encoding(false));
+            Ensure(NormalizeSource(ReadEditor(source)) == sourceBefore, "Failed invalid-UTF-8 open replaced the current source");
+            Ensure(ReadControlText(runStatus) == statusBefore, "Failed invalid-UTF-8 open cleared or changed the prior invocation status");
+            Ensure(ReadControlText(runLog) == logBefore, "Failed invalid-UTF-8 open cleared or changed the prior run output");
+            SaveEvidence(workspace, "failed-open-preserved", new { Status = statusBefore, LogLength = logBefore.Length, OpenError = openError });
+        });
+
+        Step("paired-input-and-undo", () =>
+        {
+            const string prefix = "local paired = ";
+            var cleanSource = NormalizeSource(ReadEditor(source));
+            foreach (var pair in new[] { (Open: "(", Close: ")"), (Open: "[", Close: "]"), (Open: "{", Close: "}"), (Open: "\"", Close: "\""), (Open: "'", Close: "'") })
+            {
+                WriteEditor(source, prefix, host);
+                GuardedKeyboard.FocusEditor(source, host);
+                GuardedKeyboard.SendKey(source, host, 0x23);
+                GuardedKeyboard.TypeText(source, host, pair.Open);
+                WaitUntil(() => NormalizeSource(ReadEditor(source)) == prefix + pair.Open + pair.Close, TimeSpan.FromSeconds(3), $"Typing '{pair.Open}' did not insert its matching closer");
+                GuardedKeyboard.FocusEditor(source, host);
+                GuardedKeyboard.SendChord(source, host, 'Z');
+                WaitUntil(() => NormalizeSource(ReadEditor(source)) == prefix, TimeSpan.FromSeconds(3), $"One Undo did not remove the '{pair.Open}{pair.Close}' pair as one edit");
+            }
+            foreach (var compound in new[]
+            {
+                (Prefix: "local paired = f", Typed: "(\"a\")", Complete: "local paired = f(\"a\")", AfterUndo: "local paired = f(\"\")"),
+                (Prefix: "local paired = t", Typed: "[\"k\"]", Complete: "local paired = t[\"k\"]", AfterUndo: "local paired = t[\"\"]")
+            })
+            {
+                WriteEditor(source, compound.Prefix, host);
+                GuardedKeyboard.FocusEditor(source, host);
+                GuardedKeyboard.SendKey(source, host, 0x23);
+                GuardedKeyboard.TypeText(source, host, compound.Typed);
+                WaitUntil(() => NormalizeSource(ReadEditor(source)) == compound.Complete, TimeSpan.FromSeconds(3),
+                    $"Compound paired input '{compound.Typed}' duplicated or lost a closer");
+                GuardedKeyboard.FocusEditor(source, host);
+                GuardedKeyboard.SendChord(source, host, 'Z');
+                WaitUntil(() => NormalizeSource(ReadEditor(source)) == compound.AfterUndo, TimeSpan.FromSeconds(3),
+                    $"One Undo after compound input '{compound.Typed}' did not remove only its last content edit");
+            }
+            var reloadTask = Task.Run(() => InvokeButton(workspace, "Reload"));
+            var prompt = WaitWindow(host, "Reload Lua source", TimeSpan.FromSeconds(5));
+            InvokeTaskDialogButton(prompt, "是(Y)", "Yes");
+            if (!reloadTask.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Confirmed post-pair Reload did not resume");
+            Ensure(NormalizeSource(ReadEditor(source)) == cleanSource, "Post-pair Reload did not restore the clean code line");
+            SaveEvidence(workspace, "paired-input", new { Pairs = new[] { "()", "[]", "{}", "\"\"", "''", "f(\"a\")", "t[\"k\"]" } });
+        });
+
+        Step("host-one-close", () =>
+        {
+            RequestClose(workspace);
+            WaitUntil(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromSeconds(5), "First Lua Workspace did not close normally");
+            GuardedKeyboard.StabilizeOwnedClipboard(host.Id);
+            RequestClose(main);
+            Ensure(host.WaitForExit(TimeSpan.FromSeconds(7)), "First GUI host did not exit through its own close action");
+            Ensure(host.ExitCode == 0, $"First GUI host exited with code {host.ExitCode}");
+            var config = ReadWorkspaceConfig(Path.Combine(profile, "user", "config.json"));
+            expectedSourcePercent = config.SourcePercent;
+            expectedOutputPercent = config.OutputPercent;
+            Ensure(expectedSourcePercent is >= 10 and <= 90 && expectedOutputPercent is >= 8 and <= 65, "Persisted splitter proportions are outside their supported bounds");
+            Ensure(Math.Abs(expectedSourcePercent - 52) >= 5 && Math.Abs(expectedOutputPercent - 20) >= 5, "Dragged splitter proportions were not persisted away from both defaults");
+            Ensure(draggedLayout is not null && Math.Abs(expectedSourcePercent - draggedLayout.SourcePercent) <= 2
+                && Math.Abs(expectedOutputPercent - draggedLayout.OutputPercent) <= 2,
+                "Persisted splitter proportions differ from the values established by the user drag");
+            Ensure(config.Wrap == false && config.FontFace == "Arial" && config.FontSize == 17, "Applied editor preferences were not persisted to the isolated configuration");
+        });
+
+        (host, main) = LaunchHost("two");
+        Step("host-two-ready", () => Ensure(host.Id == JsonDocument.Parse(File.ReadAllText(Path.Combine(artifacts, "ready.json"))).RootElement.GetProperty("process_id").GetInt32(), "Second ready artifact belongs to another process"));
+        SelectCodeViaMacro(main, host, first: true);
+        InvokeMenu(main, host, "Automation", "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(6));
+        workspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(10));
+        source = FindNamed(workspace, "Lua source") ?? throw new InvalidOperationException("Second-host Lua source editor is absent");
+        Step("layout-and-editor-preferences-restored", () =>
+        {
+            NativeMessage.ResizeWindow((nint)workspace.Current.NativeWindowHandle, 1120, 760);
+            WaitUntil(() => Math.Abs(ObserveLayout(workspace).SourcePercent - expectedSourcePercent) <= 5
+                    && Math.Abs(ObserveLayout(workspace).OutputPercent - expectedOutputPercent) <= 5,
+                TimeSpan.FromSeconds(5), $"Second host did not restore persisted splitter proportions {expectedSourcePercent}/{expectedOutputPercent}");
+            var cleanSource = NormalizeSource(ReadEditor(source));
+            var wideSource = "local wide = \"" + string.Concat(Enumerable.Repeat("iiiiWWWW0123456789", 40)) + "\"";
+            WriteEditor(source, wideSource, host);
+            GuardedKeyboard.FocusEditor(source, host);
+            GuardedKeyboard.SendKey(source, host, 0x24);
+            HorizontalScrollObservation? restoredScroll = null;
+            HorizontalScrollObservation? restoredVertical = null;
+            WaitUntil(() =>
+            {
+                restoredScroll = NativeMessage.HorizontalScroll((nint)source.Current.NativeWindowHandle);
+                restoredVertical = NativeMessage.VerticalScroll((nint)source.Current.NativeWindowHandle);
+                return restoredScroll.Scrollable && appliedEditorVertical is not null
+                    && Math.Abs((long)restoredVertical.Page - appliedEditorVertical.Page) <= 1;
+            }, TimeSpan.FromSeconds(4), "Second host did not restore the no-wrap Arial 17 rendering metrics");
+            SaveEvidence(workspace, "restored-independent-host", new { ExpectedSourcePercent = expectedSourcePercent, ExpectedOutputPercent = expectedOutputPercent,
+                Observed = ObserveLayout(workspace), AppliedEditorScroll = appliedEditorScroll, RestoredEditorScroll = restoredScroll,
+                AppliedEditorVertical = appliedEditorVertical, RestoredEditorVertical = restoredVertical,
+                VisualReview = "Confirm the independently restarted host renders the same Arial 17 no-wrap long line" });
+            var reloadTask = Task.Run(() => InvokeButton(workspace, "Reload"));
+            var reload = WaitWindow(host, "Reload Lua source", TimeSpan.FromSeconds(5));
+            InvokeTaskDialogButton(reload, "是(Y)", "Yes");
+            if (!reloadTask.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Second-host post-observation Reload did not resume");
+            Ensure(NormalizeSource(ReadEditor(source)) == cleanSource, "Second-host Reload did not restore the clean code source");
+        });
+        Step("host-two-close", () =>
+        {
+            RequestClose(workspace);
+            WaitUntil(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromSeconds(5), "Second Lua Workspace did not close normally");
+            RequestClose(main);
+            Ensure(host.WaitForExit(TimeSpan.FromSeconds(7)), "Second GUI host did not exit through its own close action");
+            Ensure(host.ExitCode == 0, $"Second GUI host exited with code {host.ExitCode}");
+        });
+        status = "passed";
+        WriteManifest();
+        return 0;
+    }
+    catch (Exception error)
+    {
+        if (workspace is not null) TryEvidence(workspace, artifacts, "workspace-ux-failure");
+        var failing = allSteps.FirstOrDefault(step => results.All(result => result.Name != step));
+        if (failing is not null) results.Add(new StepResult(failing, "failed", error.Message));
+        foreach (var step in allSteps.Where(step => results.All(result => result.Name != step)))
+            results.Add(new StepResult(step, "not-run", "A preceding step failed"));
+        status = "failed";
+        WriteManifest();
+        Console.Error.WriteLine(error);
+        return 1;
+    }
+    finally
+    {
+        if (host is not null && !host.HasExited)
+        {
+            try { GuardedKeyboard.StabilizeOwnedClipboard(host.Id); } catch { }
+            host.Kill(entireProcessTree: true);
+            if (!host.WaitForExit(TimeSpan.FromSeconds(5))) throw new TimeoutException("GUI host did not stop within five seconds");
+        }
+        host?.Dispose();
+    }
+
+    (Process Host, AutomationElement Main) LaunchHost(string suffix)
+    {
+        File.Delete(Path.Combine(artifacts, "ready.json"));
+        var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)! };
+        foreach (var argument in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", artifacts, "--open", input })
+            start.ArgumentList.Add(argument);
+        var process = Process.Start(start) ?? throw new InvalidOperationException($"Could not start GUI host {suffix}");
+        var ready = AutomationProtocol.WaitForReadyArtifact(Path.Combine(artifacts, "ready.json"), process, TimeSpan.FromSeconds(15));
+        Ensure(ready.ProcessId == process.Id, $"ready.json belongs to another process for host {suffix}");
+        return (process, UiaDriver.WaitForMainWindow(process, TimeSpan.FromSeconds(15)));
+    }
+
+    void Step(string name, Action action)
+    {
+        using var timing = DriverTiming.Measure("workspace-ux-step:" + name);
+        action();
+        results.Add(new StepResult(name, "passed", ""));
+        WriteManifest();
+    }
+
+    void SaveEvidence(AutomationElement window, string name, object observation)
+    {
+        SaveNativeDialogEvidence(window, artifacts, name);
+        var image = Path.Combine(artifacts, name + ".png");
+        evidence.Add(new { Artifact = Path.GetFileName(image), Sha256 = Sha256File(image), Observation = observation });
+    }
+
+    void WriteManifest() => File.WriteAllText(Path.Combine(artifacts, "manifest.json"), JsonSerializer.Serialize(new
+    {
+        Scenario = "workspace-ux",
+        Scope = "compact responsive toolbar, window icon, persisted live splitters and editor preferences, source-transition runtime clearing, failed-open preservation, and paired input Undo",
+        StartedUtc = startedUtc,
+        FinishedUtc = DateTimeOffset.UtcNow,
+        BudgetSeconds = 240,
+        ExeSha256 = Sha256File(exe),
+        FixtureSha256 = Sha256File(fixture),
+        DriverSha256 = Sha256File(driver),
+        ExpectedSourcePercent = expectedSourcePercent,
+        ExpectedOutputPercent = expectedOutputPercent,
+        DraggedLayout = draggedLayout,
+        AppliedEditorScroll = appliedEditorScroll,
+        AppliedEditorVertical = appliedEditorVertical,
+        VisualReviewRequired = new[] { "editor-wrap-font-before.png", "editor-wrap-font-after.png", "execution-source-cleared.png", "restored-independent-host.png" },
+        Evidence = evidence,
+        ExitStatus = status,
+        Steps = results
+    }, new JsonSerializerOptions { WriteIndented = true }));
+}
+
 static int RunLanguageSettingsDiscovery(string exe, string artifacts)
 {
     var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "editor.ass");
@@ -1109,12 +1576,84 @@ static LanguageSettingControls LanguageSettingsControls(AutomationElement prefer
             && item.Current.ControlType == ControlType.CheckBox && !item.Current.IsOffscreen).ToArray();
     var edits = NativeMessage.DescendantsWithClass((nint)preferences.Current.NativeWindowHandle, "Edit")
         .Select(AutomationElement.FromHandle).Where(item => item.Current.ProcessId == hostId
-            && item.Current.ControlType == ControlType.Edit && item.Current.Name == "Lua Workspace" && !item.Current.IsOffscreen).ToArray();
+            && item.Current.ControlType == ControlType.Edit && item.Current.Name == "Lua Workspace" && !item.Current.IsOffscreen
+            && item.TryGetCurrentPattern(ValuePattern.Pattern, out var candidate) && !string.IsNullOrEmpty(((ValuePattern)candidate).Current.Value)).ToArray();
     Ensure(checks.Length == 1, $"Expected one visible Enable LuaLS checkbox, found {checks.Length}");
     Ensure(edits.Length == 1, $"Expected one visible LuaLS directory editor, found {edits.Length}");
     Ensure(checks[0].TryGetCurrentPattern(TogglePattern.Pattern, out var toggle), "Enable LuaLS has no TogglePattern");
     Ensure(edits[0].TryGetCurrentPattern(ValuePattern.Pattern, out var value), "LuaLS directory has no ValuePattern");
     return new LanguageSettingControls(checks[0], (TogglePattern)toggle, edits[0], (ValuePattern)value);
+}
+
+static (AutomationElement Face, AutomationElement Size) ExpandAutomationPreferencesToFont(AutomationElement preferences, int hostId, string artifacts)
+{
+    (AutomationElement[] Face, AutomationElement[] Size) VisibleFontControls()
+    {
+        var labels = preferences.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text))
+            .Cast<AutomationElement>().Where(item => item.Current.ProcessId == hostId && !item.Current.IsOffscreen
+                && (item.Current.Name == "Font Face" || item.Current.Name == "Font Size")).ToArray();
+        var faceLabels = labels.Where(item => item.Current.Name == "Font Face").ToArray();
+        var sizeLabels = labels.Where(item => item.Current.Name == "Font Size").ToArray();
+        Ensure(faceLabels.Length <= 1, $"Expected at most one visible Font Face label, found {faceLabels.Length}");
+        Ensure(sizeLabels.Length <= 1, $"Expected at most one visible Font Size label, found {sizeLabels.Length}");
+        if (faceLabels.Length == 0 || sizeLabels.Length == 0) return (Array.Empty<AutomationElement>(), Array.Empty<AutomationElement>());
+        bool SameRowAndParent(AutomationElement control, AutomationElement label)
+        {
+            var controlRect = control.Current.BoundingRectangle;
+            var labelRect = label.Current.BoundingRectangle;
+            var controlParent = TreeWalker.RawViewWalker.GetParent(control);
+            var labelParent = TreeWalker.RawViewWalker.GetParent(label);
+            return Math.Abs((controlRect.Top + controlRect.Height / 2) - (labelRect.Top + labelRect.Height / 2)) <= 6
+                && controlRect.Left >= labelRect.Right - 2 && controlParent is not null && labelParent is not null
+                && controlParent.Current.NativeWindowHandle == labelParent.Current.NativeWindowHandle;
+        }
+        var face = NativeMessage.DescendantsWithClass((nint)preferences.Current.NativeWindowHandle, "Edit")
+            .Select(AutomationElement.FromHandle).Where(item => item.Current.ProcessId == hostId && item.Current.ControlType == ControlType.Edit
+                && !item.Current.IsOffscreen && SameRowAndParent(item, faceLabels[0])
+                && item.TryGetCurrentPattern(ValuePattern.Pattern, out var value) && string.IsNullOrEmpty(((ValuePattern)value).Current.Value)).ToArray();
+        var size = preferences.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Spinner))
+            .Cast<AutomationElement>().Where(item => item.Current.ProcessId == hostId && !item.Current.IsOffscreen && SameRowAndParent(item, sizeLabels[0])
+                && item.TryGetCurrentPattern(RangeValuePattern.Pattern, out var range) && Math.Abs(((RangeValuePattern)range).Current.Value - 11) < 0.1).ToArray();
+        Ensure(face.Length <= 1, $"Expected at most one visible empty Lua Workspace Font Face editor, found {face.Length}");
+        Ensure(size.Length <= 1, $"Expected at most one visible Font Size 11 spinner, found {size.Length}");
+        return (face, size);
+    }
+
+    var controls = VisibleFontControls();
+    if (controls.Face.Length == 1 && controls.Size.Length == 1) return (controls.Face[0], controls.Size[0]);
+    var width = Math.Min(1000, NativeMessage.PrimaryWorkAreaWidth() - 40);
+    var height = Math.Min(900, NativeMessage.PrimaryWorkAreaHeight() - 40);
+    Ensure(width >= 800 && height >= 700, $"Work area is too small for bounded Preferences expansion: {width}x{height}");
+    NativeMessage.ResizeWindow((nint)preferences.Current.NativeWindowHandle, width, height);
+    WaitUntil(() => preferences.Current.BoundingRectangle.Width >= width - 12 && preferences.Current.BoundingRectangle.Height >= height - 12,
+        TimeSpan.FromSeconds(3), "Preferences did not reach the requested bounded expanded size");
+    controls = VisibleFontControls();
+    SaveNativeDialogEvidence(preferences, artifacts, "preferences-font-expanded");
+    SaveUiEvidence(preferences, artifacts, "preferences-font-expanded-uia");
+    var candidates = preferences.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>()
+        .Where(item => item.Current.ProcessId == hostId && (item.Current.ControlType == ControlType.Edit || item.Current.ControlType == ControlType.Spinner))
+        .Select(item =>
+        {
+            var current = item.Current;
+            var parent = TreeWalker.RawViewWalker.GetParent(item);
+            var rect = current.BoundingRectangle;
+            return new
+            {
+                current.Name,
+                ControlType = current.ControlType.ProgrammaticName,
+                current.ClassName,
+                current.AutomationId,
+                current.IsOffscreen,
+                Rect = new { rect.Left, rect.Top, rect.Width, rect.Height },
+                Parent = parent is null ? null : new { parent.Current.Name, ControlType = parent.Current.ControlType.ProgrammaticName,
+                    parent.Current.ClassName, parent.Current.NativeWindowHandle }
+            };
+        }).ToArray();
+    File.WriteAllText(Path.Combine(artifacts, "preferences-font-expanded-controls.json"), JsonSerializer.Serialize(candidates, new JsonSerializerOptions { WriteIndented = true }));
+    Ensure(controls.Face.Length == 1 && controls.Size.Length == 1,
+        $"Expanded Preferences did not expose exactly one Lua Workspace Font Face and Font Size 11 control; face={controls.Face.Length}, size={controls.Size.Length}");
+    Console.WriteLine($"editor-uia.preferences-font-visible=expanded:{preferences.Current.BoundingRectangle.Width:0}x{preferences.Current.BoundingRectangle.Height:0}");
+    return (controls.Face[0], controls.Size[0]);
 }
 
 static void SetPreferenceToggle(AutomationElement element, bool enabled)
@@ -1454,6 +1993,222 @@ static void CaptureSignatureWindowInventory(AutomationElement workspace, Process
         var candidate = AutomationElement.FromHandle(candidateHandles.Single());
         ScreenCapture.SaveWindowPng(candidate, Path.Combine(artifacts, "signature-native-visible-candidate.png"));
     }
+}
+
+static AutomationElement[] WorkspaceActionButtons(AutomationElement workspace)
+{
+    var expected = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "Open File", "Apply", "Format", "Reload", "Copy source", "Run", "Debug", "Continue", "Pause", "Stop", "Detach",
+        "Step In", "Step Over", "Step Out", "Toggle Breakpoint", "Clear Breakpoints"
+    };
+    return workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button))
+        .Cast<AutomationElement>().Where(button => expected.Contains(button.Current.Name ?? "") && !button.Current.IsOffscreen).ToArray();
+}
+
+static void AssertWorkspaceActions(AutomationElement[] buttons)
+{
+    var expected = new[]
+    {
+        "Open File", "Apply", "Format", "Reload", "Copy source", "Run", "Debug", "Continue", "Pause", "Stop", "Detach",
+        "Step In", "Step Over", "Step Out", "Toggle Breakpoint", "Clear Breakpoints"
+    };
+    foreach (var name in expected)
+    {
+        var matches = buttons.Where(button => button.Current.Name == name).ToArray();
+        Ensure(matches.Length == 1, $"Expected one visible accessible Workspace action '{name}', found {matches.Length}");
+        Ensure(matches[0].TryGetCurrentPattern(InvokePattern.Pattern, out _), $"Workspace action '{name}' has no InvokePattern");
+    }
+}
+
+static int ButtonRowCount(IEnumerable<AutomationElement> buttons)
+{
+    var rows = new List<double>();
+    foreach (var center in buttons.Select(button => button.Current.BoundingRectangle.Top + button.Current.BoundingRectangle.Height / 2).Order())
+    {
+        if (rows.All(row => Math.Abs(row - center) > 6)) rows.Add(center);
+    }
+    return rows.Count;
+}
+
+static LayoutObservation ObserveLayout(AutomationElement workspace)
+{
+    var source = FindNamed(workspace, "Lua source") ?? throw new InvalidOperationException("Lua source editor is absent from layout observation");
+    var runtime = WorkspaceRuntimeTabs(workspace);
+    var diagnostics = WorkspaceDiagnostics(workspace, source);
+    var runLog = WorkspaceRunLog(workspace, source);
+    var sourceRect = source.Current.BoundingRectangle;
+    var runtimeRect = runtime.Current.BoundingRectangle;
+    var diagnosticsRect = diagnostics.Current.BoundingRectangle;
+    var logRect = runLog.Current.BoundingRectangle;
+    var bodyWidth = runtimeRect.Right - sourceRect.Left;
+    var bodyHeight = logRect.Bottom - sourceRect.Top;
+    Ensure(bodyWidth > 0 && bodyHeight > 0, "Workspace layout has non-positive pane bounds");
+    return new LayoutObservation(
+        Math.Round(100 * sourceRect.Width / bodyWidth, 1),
+        Math.Round(100 * (logRect.Bottom - diagnosticsRect.Top) / bodyHeight, 1),
+        new[] { sourceRect.Left, sourceRect.Top, sourceRect.Right, sourceRect.Bottom },
+        new[] { runtimeRect.Left, runtimeRect.Top, runtimeRect.Right, runtimeRect.Bottom },
+        new[] { diagnosticsRect.Left, diagnosticsRect.Top, logRect.Right, logRect.Bottom });
+}
+
+static AutomationElement WorkspaceRuntimeTabs(AutomationElement workspace)
+{
+    var tabs = workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Tab))
+        .Cast<AutomationElement>().Where(item => item.Current.ProcessId == workspace.Current.ProcessId && !item.Current.IsOffscreen
+            && item.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem))
+                .Cast<AutomationElement>().Any(tab => tab.Current.Name == "Context")).ToArray();
+    Ensure(tabs.Length == 1, $"Expected one visible runtime notebook containing Context, found {tabs.Length}");
+    return tabs[0];
+}
+
+static AutomationElement WorkspaceDiagnostics(AutomationElement workspace, AutomationElement source)
+{
+    var sourceRect = source.Current.BoundingRectangle;
+    var texts = workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text))
+        .Cast<AutomationElement>().Where(item => item.Current.ProcessId == workspace.Current.ProcessId && !item.Current.IsOffscreen
+            && item.Current.BoundingRectangle.Top >= sourceRect.Bottom
+            && item.Current.BoundingRectangle.Left >= sourceRect.Left - 2).ToArray();
+    Ensure(texts.Length == 1, $"Expected one visible output diagnostic below the source pane, found {texts.Length}");
+    return texts[0];
+}
+
+static AutomationElement WorkspaceRunLog(AutomationElement workspace, AutomationElement source)
+{
+    var diagnostics = WorkspaceDiagnostics(workspace, source);
+    var diagnosticRect = diagnostics.Current.BoundingRectangle;
+    var documents = workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document))
+        .Cast<AutomationElement>().Where(item => item.Current.ProcessId == workspace.Current.ProcessId && !item.Current.IsOffscreen
+            && item.Current.BoundingRectangle.Top >= diagnosticRect.Bottom - 2
+            && item.Current.BoundingRectangle.Left >= diagnosticRect.Left - 2).ToArray();
+    Ensure(documents.Length == 1, $"Expected one visible output log below the diagnostic, found {documents.Length}");
+    return documents[0];
+}
+
+static AutomationElement WorkspaceRunStatus(AutomationElement workspace, AutomationElement source)
+{
+    var sourceRect = source.Current.BoundingRectangle;
+    var texts = workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text))
+        .Cast<AutomationElement>().Where(item => item.Current.ProcessId == workspace.Current.ProcessId && !item.Current.IsOffscreen
+            && item.Current.BoundingRectangle.Bottom <= sourceRect.Top
+            && item.Current.BoundingRectangle.Width >= sourceRect.Width / 2).ToArray();
+    Ensure(texts.Length == 1, $"Expected one visible run-status label above the source pane, found {texts.Length}");
+    return texts[0];
+}
+
+static string ReadWorkspaceExecutionSource(AutomationElement workspace, AutomationElement source, Process host, string artifacts)
+{
+    var notebook = WorkspaceRuntimeTabs(workspace);
+    var pages = notebook.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem))
+        .Cast<AutomationElement>().ToArray();
+    var executionPage = pages.Single(item => item.Current.Name == "Execution Source");
+    var contextPage = pages.Single(item => item.Current.Name == "Context");
+    Ensure(executionPage.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var executionSelection), "Execution Source tab is not UIA-selectable");
+    ((SelectionItemPattern)executionSelection).Select();
+    WaitUntil(() => ((SelectionItemPattern)executionSelection).Current.IsSelected, TimeSpan.FromSeconds(2), "Execution Source tab did not become selected");
+    AutomationElement? execution = null;
+    WaitUntil(() =>
+    {
+        var editors = NativeMessage.DescendantsWithTitle((nint)workspace.Current.NativeWindowHandle, "stcwindow")
+            .Select(AutomationElement.FromHandle).Where(item => IsStyledTextPane(item) && item.Current.ProcessId == workspace.Current.ProcessId
+                && !item.Current.IsOffscreen && item.Current.NativeWindowHandle != source.Current.NativeWindowHandle).ToArray();
+        Ensure(editors.Length <= 1, $"Execution Source page exposes {editors.Length} non-source visible STC controls");
+        execution = editors.SingleOrDefault();
+        return execution is not null;
+    }, TimeSpan.FromSeconds(3), "Execution Source tab did not expose its STC");
+    try
+    {
+        var identities = workspace.FindAll(TreeScope.Descendants, new AndCondition(
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text),
+                new PropertyCondition(AutomationElement.NameProperty, "No paused source.", PropertyConditionFlags.IgnoreCase)))
+            .Cast<AutomationElement>().Where(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen).ToArray();
+        Ensure(identities.Length == 1, $"Expected one visible 'No paused source.' execution identity, found {identities.Length}");
+        Ensure(execution!.Current.IsEnabled, "Execution Source STC is disabled rather than read-only");
+        ClipboardReceipt.VerifyCurrent();
+        var previousSequence = GuardedKeyboard.ClipboardSequence();
+        GuardedKeyboard.FocusEditor(execution, host);
+        GuardedKeyboard.TypeText(execution, host, "x");
+        GuardedKeyboard.SendChord(execution, host, 'A');
+        GuardedKeyboard.SendChord(execution, host, 'C');
+        var timer = Stopwatch.StartNew();
+        while (GuardedKeyboard.ClipboardSequence() == previousSequence && timer.Elapsed < TimeSpan.FromSeconds(3)) Thread.Sleep(25);
+        var changed = GuardedKeyboard.ClipboardSequence() != previousSequence;
+        string text;
+        if (changed)
+        {
+            var copiedSequence = GuardedKeyboard.ClipboardSequence();
+            GuardedKeyboard.AssertClipboardState(copiedSequence, host.Id);
+            text = ClipboardSafety.ReadText();
+            GuardedKeyboard.AssertClipboardState(copiedSequence, host.Id);
+            ClipboardReceipt.Record("copy-execution-source", host.Id, copiedSequence);
+        }
+        else text = "";
+        SaveNativeDialogEvidence(workspace, artifacts, "execution-source-cleared");
+        SaveUiEvidence(workspace, artifacts, "execution-source-cleared-uia");
+        File.WriteAllText(Path.Combine(artifacts, "execution-source-copy-observation.json"), JsonSerializer.Serialize(new
+        {
+            TabSelected = ((SelectionItemPattern)executionSelection).Current.IsSelected,
+            Identity = identities[0].Current.Name,
+            ExecutionHwnd = execution.Current.NativeWindowHandle,
+            ExactFocus = AutomationElement.FocusedElement.Current.NativeWindowHandle == execution.Current.NativeWindowHandle,
+            ReadOnlyProbe = "typed x before Select All and Copy",
+            ClipboardSequenceBefore = previousSequence,
+            ClipboardChanged = changed,
+            CopiedTextLength = text.Length
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        Ensure(string.IsNullOrEmpty(text), "Execution Source retained text or accepted the read-only probe after the target switch");
+
+        var stackPage = pages.Single(item => item.Current.Name == "Stack and Variables");
+        Ensure(stackPage.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var stackSelection), "Stack and Variables tab is not UIA-selectable");
+        ((SelectionItemPattern)stackSelection).Select();
+        WaitUntil(() => ((SelectionItemPattern)stackSelection).Current.IsSelected, TimeSpan.FromSeconds(2), "Stack and Variables tab did not become selected");
+        var stackLists = notebook.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.List))
+            .Cast<AutomationElement>().Where(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen).ToArray();
+        var variableTrees = notebook.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Tree))
+            .Cast<AutomationElement>().Where(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen).ToArray();
+        var variableDetails = notebook.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document))
+            .Cast<AutomationElement>().Where(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen).ToArray();
+        Ensure(stackLists.Length == 1 && stackLists[0].FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)).Count == 0,
+            "Stack and Variables retained an old stack frame after the target switch");
+        Ensure(variableTrees.Length == 1 && variableTrees[0].FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TreeItem)).Count == 0,
+            "Stack and Variables retained an old variable tree after the target switch");
+        Ensure(variableDetails.Length == 1 && string.IsNullOrEmpty(ReadControlText(variableDetails[0])),
+            "Stack and Variables retained old variable details after the target switch");
+        var noPause = notebook.FindAll(TreeScope.Descendants, new AndCondition(
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text),
+                new PropertyCondition(AutomationElement.NameProperty, "No active debug pause.", PropertyConditionFlags.IgnoreCase)))
+            .Cast<AutomationElement>().Count(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen);
+        Ensure(noPause == 1, $"Expected one visible 'No active debug pause.' stack identity, found {noPause}");
+        return text;
+    }
+    finally
+    {
+        Ensure(contextPage.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var contextSelection), "Context tab is not UIA-selectable");
+        ((SelectionItemPattern)contextSelection).Select();
+    }
+}
+
+static WorkspaceConfigObservation ReadWorkspaceConfig(string path)
+{
+    Ensure(File.Exists(path), "Isolated profile did not write user/config.json");
+    using var document = JsonDocument.Parse(File.ReadAllText(path));
+    var workspace = document.RootElement.GetProperty("Automation").GetProperty("Lua Workspace");
+    var editor = workspace.GetProperty("Editor");
+    var layout = workspace.GetProperty("Layout");
+    return new WorkspaceConfigObservation(
+        layout.GetProperty("Source Width Percent").GetInt32(),
+        layout.GetProperty("Output Height Percent").GetInt32(),
+        editor.GetProperty("Wrap").GetBoolean(),
+        editor.GetProperty("Font Face").GetString() ?? "",
+        editor.GetProperty("Font Size").GetInt32());
+}
+
+static string ReadControlText(AutomationElement element)
+{
+    if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var value)) return ((ValuePattern)value).Current.Value;
+    var hwnd = new nint(element.Current.NativeWindowHandle);
+    Ensure(hwnd != 0, $"Control '{element.Current.Name}' has neither ValuePattern nor native handle");
+    return NativeMessage.GetWindowText(hwnd);
 }
 
 static void Ensure(bool condition, string message)
@@ -2187,6 +2942,9 @@ sealed record AssEvent(string Kind, int Layer, int StartMs, int EndMs, string St
 sealed record StepResult(string Name, string Status, string Detail);
 sealed record ClipboardReceiptData(uint Sequence, int OwnerProcessId, string Stage);
 sealed record LanguageSettingControls(AutomationElement EnabledElement, TogglePattern Enabled, AutomationElement DirectoryElement, ValuePattern Directory);
+sealed record LayoutObservation(double SourcePercent, double OutputPercent, double[] SourceBounds, double[] RuntimeBounds, double[] OutputBounds);
+sealed record WorkspaceConfigObservation(int SourcePercent, int OutputPercent, bool Wrap, string FontFace, int FontSize);
+sealed record HorizontalScrollObservation(int Minimum, int Maximum, uint Page, int Position, bool Scrollable);
 
 static class DriverTiming
 {
@@ -2518,6 +3276,7 @@ static class GuardedKeyboard
     [StructLayout(LayoutKind.Explicit)] private struct InputUnion { [FieldOffset(0)] public MouseInput Mouse; [FieldOffset(0)] public KeyboardInput Keyboard; }
     [StructLayout(LayoutKind.Sequential)] private struct MouseInput { public int X, Y; public uint Data, Flags, Time; public nint ExtraInfo; }
     [StructLayout(LayoutKind.Sequential)] private struct KeyboardInput { public ushort VirtualKey, ScanCode; public uint Flags, Time; public nint ExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] private struct WindowRect { public int Left, Top, Right, Bottom; }
 
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
@@ -2526,6 +3285,14 @@ static class GuardedKeyboard
     [DllImport("user32.dll")] private static extern nint GetOpenClipboardWindow();
     [DllImport("user32.dll")] private static extern int IsClipboardFormatAvailable(uint format);
     [DllImport("user32.dll", SetLastError = true)] private static extern uint GetWindowThreadProcessId(nint hwnd, out uint processId);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll", EntryPoint = "WindowFromPoint", ExactSpelling = true)] private static extern nint WindowFromPoint(Point point);
+    [DllImport("user32.dll", EntryPoint = "GetWindowRect", ExactSpelling = true)] private static extern int GetWindowRect(nint hwnd, out WindowRect rect);
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(nint hwnd, StringBuilder buffer, int capacity);
+    [DllImport("user32.dll", EntryPoint = "GetWindowTextW", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTitle(nint hwnd, StringBuilder buffer, int capacity);
+    [DllImport("user32.dll", EntryPoint = "GetParent", ExactSpelling = true)] private static extern nint GetParent(nint hwnd);
 
     public static uint ClipboardSequence() => GetClipboardSequenceNumber();
 
@@ -2641,6 +3408,72 @@ static class GuardedKeyboard
         }
     }
 
+    public static void Drag(AutomationElement window, Process host, Point start, Point end)
+    {
+        UiaDriver.FocusAndVerify(window, host, TimeSpan.FromSeconds(3));
+        GetWindowThreadProcessId(GetForegroundWindow(), out var owner);
+        if (owner != (uint)host.Id) throw new InvalidOperationException("Guarded drag stopped because the GUI host was not foreground");
+        var windowBounds = window.Current.BoundingRectangle;
+        if (!windowBounds.Contains(start.X, start.Y) || !windowBounds.Contains(end.X, end.Y))
+            throw new InvalidOperationException($"Guarded drag points leave the target window; start={start}, end={end}, bounds={windowBounds}");
+        var hit = WindowFromPoint(start);
+        GetWindowThreadProcessId(hit, out var hitOwner);
+        if (hit == 0 || hitOwner != (uint)host.Id) throw new InvalidOperationException($"Guarded drag start is not owned by the GUI host; hit={hit}, pid={hitOwner}");
+        var hitClass = new StringBuilder(256);
+        var hitTitle = new StringBuilder(256);
+        _ = GetClassName(hit, hitClass, hitClass.Capacity);
+        _ = GetWindowTitle(hit, hitTitle, hitTitle.Capacity);
+        if (GetWindowRect(hit, out var hitRect) == 0) throw new InvalidOperationException("Could not read guarded drag hit-window bounds");
+        var parent = GetParent(hit);
+        var parentClass = new StringBuilder(256);
+        var parentTitle = new StringBuilder(256);
+        _ = GetClassName(parent, parentClass, parentClass.Capacity);
+        _ = GetWindowTitle(parent, parentTitle, parentTitle.Capacity);
+        Console.WriteLine($"editor-uia.drag-hit=hwnd:{hit};class:{hitClass};title:{hitTitle};parent:{parent};parent-class:{parentClass};parent-title:{parentTitle};rect:{hitRect.Left},{hitRect.Top},{hitRect.Right},{hitRect.Bottom};start:{start.X},{start.Y};end:{end.X},{end.Y}");
+        if (!string.Equals(hitTitle.ToString(), "splitter", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Guarded drag start hit '{hitTitle}' rather than the splitter sash");
+        var left = GetSystemMetrics(76);
+        var top = GetSystemMetrics(77);
+        var width = GetSystemMetrics(78);
+        var height = GetSystemMetrics(79);
+        if (width <= 1 || height <= 1) throw new InvalidOperationException("Virtual desktop metrics are invalid");
+        MouseInput Mouse(Point point, uint action) => new()
+        {
+            X = checked((int)Math.Round((point.X - left) * 65535.0 / (width - 1))),
+            Y = checked((int)Math.Round((point.Y - top) * 65535.0 / (height - 1))),
+            Flags = 0x0001u | 0x4000u | 0x8000u | action
+        };
+        Input Move(Point point, uint action = 0) => new() { Type = 0, Union = new InputUnion { Mouse = Mouse(point, action) } };
+        void SendOne(Input input, string stage)
+        {
+            if (SendInput(1, new[] { input }, Marshal.SizeOf<Input>()) != 1)
+                throw new InvalidOperationException($"Guarded splitter drag input failed at {stage}");
+        }
+        var pressed = false;
+        var current = start;
+        try
+        {
+            SendOne(Move(start), "initial move");
+            Thread.Sleep(20);
+            SendOne(Move(start, 0x0002), "left down");
+            pressed = true;
+            Thread.Sleep(30);
+            for (var step = 1; step <= 6; ++step)
+            {
+                current = new Point(start.X + (end.X - start.X) * step / 6, start.Y + (end.Y - start.Y) * step / 6);
+                SendOne(Move(current), $"move {step}/6");
+                Thread.Sleep(20);
+            }
+            SendOne(Move(end, 0x0004), "left up");
+            pressed = false;
+            Thread.Sleep(30);
+        }
+        finally
+        {
+            if (pressed) _ = SendInput(1, new[] { Move(current, 0x0004) }, Marshal.SizeOf<Input>());
+        }
+    }
+
     public static void ReplaceWithClipboard(AutomationElement editor, Process host, string text)
     {
         PrepareFocus(editor, host);
@@ -2715,6 +3548,16 @@ static class NativeMessage
 {
     private delegate int EnumChildCallback(nint hwnd, nint data);
     [StructLayout(LayoutKind.Sequential)] private struct WindowRect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct ScrollInfo
+    {
+        public uint Size;
+        public uint Mask;
+        public int Minimum;
+        public int Maximum;
+        public uint Page;
+        public int Position;
+        public int TrackPosition;
+    }
 
     [DllImport("user32.dll", EntryPoint = "GetWindow", ExactSpelling = true)]
     private static extern nint GetWindow(nint hwnd, uint command);
@@ -2756,9 +3599,47 @@ static class NativeMessage
     [DllImport("user32.dll", EntryPoint = "GetDlgCtrlID", ExactSpelling = true)]
     private static extern int GetDlgCtrlID(nint hwnd);
 
+    [DllImport("user32.dll", EntryPoint = "MoveWindow", ExactSpelling = true, SetLastError = true)]
+    private static extern int MoveWindow(nint hwnd, int x, int y, int width, int height, int repaint);
+    [DllImport("user32.dll", EntryPoint = "GetScrollInfo", ExactSpelling = true, SetLastError = true)]
+    private static extern int GetScrollInfo(nint hwnd, int bar, ref ScrollInfo info);
+
     public static nint EnabledPopup(nint owner) => GetWindow(owner, 6);
 
     public static bool IsVisible(nint hwnd) => IsWindowVisible(hwnd) != 0;
+
+    public static int PrimaryWorkAreaWidth() => Screen.PrimaryScreen?.WorkingArea.Width ?? 1280;
+
+    public static int PrimaryWorkAreaHeight() => Screen.PrimaryScreen?.WorkingArea.Height ?? 800;
+
+    public static void ResizeWindow(nint hwnd, int width, int height)
+    {
+        if (GetWindowRect(hwnd, out var rect) == 0) throw new InvalidOperationException("Could not read window bounds before resize");
+        var work = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, width, height);
+        var left = Math.Max(work.Left, Math.Min(rect.Left, work.Right - width));
+        var top = Math.Max(work.Top, Math.Min(rect.Top, work.Bottom - height));
+        if (MoveWindow(hwnd, left, top, width, height, 1) == 0) throw new InvalidOperationException("Could not resize Lua Workspace");
+    }
+
+    public static bool HasWindowIcon(nint hwnd)
+    {
+        return Send(hwnd, 0x007F, 2, 0) != 0 || Send(hwnd, 0x007F, 0, 0) != 0 || Send(hwnd, 0x007F, 1, 0) != 0
+            || GetWindowLongPtr(hwnd, -34) != 0 || GetWindowLongPtr(hwnd, -14) != 0;
+    }
+
+    public static HorizontalScrollObservation HorizontalScroll(nint hwnd)
+        => Scrollbar(hwnd, 0, "horizontal");
+
+    public static HorizontalScrollObservation VerticalScroll(nint hwnd)
+        => Scrollbar(hwnd, 1, "vertical");
+
+    private static HorizontalScrollObservation Scrollbar(nint hwnd, int bar, string name)
+    {
+        var info = new ScrollInfo { Size = checked((uint)Marshal.SizeOf<ScrollInfo>()), Mask = 0x0001 | 0x0002 | 0x0004 };
+        if (GetScrollInfo(hwnd, bar, ref info) == 0) throw new InvalidOperationException($"Could not read wxSTC {name} scrollbar state");
+        var scrollable = info.Page > 0 && (long)info.Maximum - info.Minimum + 1 > info.Page;
+        return new HorizontalScrollObservation(info.Minimum, info.Maximum, info.Page, info.Position, scrollable);
+    }
 
     public static IReadOnlyList<nint> TopLevelWindows(int processId, string titlePrefix)
     {

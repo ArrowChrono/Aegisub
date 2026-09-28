@@ -128,7 +128,16 @@
 		},
 		"Lua Workspace" : {
 			"Enable LuaLS" : true,
-			"LuaLS Directory" : "?data/runtimes/LuaLS"
+			"LuaLS Directory" : "?data/runtimes/LuaLS",
+			"Editor" : {
+				"Font Face" : "",
+				"Font Size" : 11,
+				"Wrap" : true
+			},
+			"Layout" : {
+				"Source Width Percent" : 52,
+				"Output Height Percent" : 20
+			}
 		},
 		"Trace Level" : 3
 	},

@@ -19,6 +19,7 @@ class wxStyledTextCtrl;
 class wxTextCtrl;
 class wxListBox;
 class wxNotebook;
+class wxSplitterWindow;
 class wxTimer;
 class wxTreeCtrl;
 namespace agi {
@@ -38,6 +39,11 @@ class LuaWorkspaceFrame : public wxFrame {
 	Automation4::LuaWorkspaceDocument const *pending_discard_document = nullptr;
 	std::uint64_t pending_discard_revision = 0;
 	wxStyledTextCtrl *editor = nullptr;
+	wxSplitterWindow *source_splitter = nullptr;
+	wxSplitterWindow *output_splitter = nullptr;
+	bool restoring_splitters = false;
+	bool source_drag_pending = false;
+	bool output_drag_pending = false;
 	std::unique_ptr<LuaWorkspaceLanguage> language;
 	wxButton *open_button = nullptr;
 	wxButton *apply = nullptr;
@@ -86,8 +92,13 @@ class LuaWorkspaceFrame : public wxFrame {
 	Automation4::LuaWorkspaceDocumentResult target_state;
 	agi::signal::Connection commit_connection;
 	agi::signal::Connection file_connection;
+	agi::signal::Connection editor_font_face_connection;
+	agi::signal::Connection editor_font_size_connection;
+	agi::signal::Connection editor_wrap_connection;
 
 	void SetEditorSource();
+	void ApplyEditorPreferences();
+	void ClearInvocationPresentation();
 	void RefreshDocument(bool check_target = true);
 	void ShowResult(Automation4::LuaWorkspaceDocumentResult const& result, bool remember = true);
 	bool SaveDocument();
