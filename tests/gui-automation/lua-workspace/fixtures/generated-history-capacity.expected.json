@@ -1,0 +1,16 @@
+{
+  "generated_count": 140,
+  "retained_count": 128,
+  "omitted_count": 12,
+  "first_retained_index": 13,
+  "template_source_line": 10,
+  "input_source_line_index": 11,
+  "input_text": "{\\k100}x",
+  "input_start_ms": 1000,
+  "input_end_ms": 2000,
+  "text_prefix": "R",
+  "layer": 1,
+  "style": "Default",
+  "start_ms": 1000,
+  "end_ms": 2000
+}

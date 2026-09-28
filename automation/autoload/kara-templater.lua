@@ -45,6 +45,7 @@ local is_template_debug_enabled = aegisub.__is_debug_template_enabled or functio
 local set_template_debug_context = aegisub.__set_debug_template_context or function() end
 local template_debug_sequence = 0
 local template_debug_enabled = false
+local template_debug_nil = {}
 
 local function refresh_template_debug_enabled()
 	template_debug_enabled = is_template_debug_enabled()
@@ -116,8 +117,12 @@ local function template_debug_enter(tenv, patch)
 	if not state or not patch then return nil end
 	local previous = {}
 	for k, v in pairs(patch) do
-		previous[k] = state[k]
-		state[k] = v
+		previous[k] = state[k] == nil and template_debug_nil or state[k]
+		if v == template_debug_nil then
+			state[k] = nil
+		else
+			state[k] = v
+		end
 	end
 	return previous
 end
@@ -127,7 +132,11 @@ local function template_debug_leave(tenv, previous)
 	local state = template_debug_get_state(tenv)
 	if not state then return end
 	for k, v in pairs(previous) do
-		state[k] = v
+		if v == template_debug_nil then
+			state[k] = nil
+		else
+			state[k] = v
+		end
 	end
 end
 
@@ -248,7 +257,7 @@ local function template_debug_target_view(tenv, state)
 	if not tenv then return nil end
 	return {
 		scope_kind = state and state.scope_kind or nil,
-		orgline = template_debug_line_view(tenv.orgline),
+		orgline = state and state.original_input_line or template_debug_line_view(tenv.orgline),
 		line = template_debug_line_view(tenv.line),
 		syl = template_debug_syl_view(tenv.syl),
 		basesyl = template_debug_syl_view(tenv.basesyl),
@@ -273,7 +282,7 @@ local function template_debug_record_generated_line(tenv, newline, extra)
 		effect = newline.effect,
 		start_time = newline.start_time,
 		end_time = newline.end_time,
-		source_line_index = tenv and tenv.orgline and tenv.orgline.i or nil,
+		source_line_index = state.original_input_line and state.original_input_line.i or (tenv and tenv.orgline and tenv.orgline.i or nil),
 	}
 	if extra then
 		for k, v in pairs(extra) do
@@ -802,10 +811,10 @@ function apply_templates(meta, styles, subs, templates)
 		local run_restore = template_debug_enter(tenv, {
 			phase = "once-code",
 			scope_kind = "once",
-			highlight = nil,
-			highlight_index = nil,
-			char_index = nil,
-			char_text = nil,
+			highlight = template_debug_nil,
+			highlight_index = template_debug_nil,
+			char_index = template_debug_nil,
+			char_text = template_debug_nil,
 		})
 		run_code_template(t, tenv)
 		template_debug_leave(tenv, run_restore)
@@ -917,16 +926,20 @@ function apply_line(meta, styles, subs, line, templates, tenv)
 	}
 
 	tenv.orgline = line
+	local input_debug_state = template_debug_get_state(tenv)
+	if input_debug_state then
+		input_debug_state.original_input_line = template_debug_line_view(line)
+	end
 	tenv.line = nil
 	tenv.syl = nil
 	tenv.basesyl = nil
 	local debug_restore = template_debug_enter(tenv, {
 		phase = "apply-line",
 		scope_kind = "line",
-		highlight = nil,
-		highlight_index = nil,
-		char_index = nil,
-		char_text = nil,
+		highlight = template_debug_nil,
+		highlight_index = template_debug_nil,
+		char_index = template_debug_nil,
+		char_text = template_debug_nil,
 	})
 
 	-- Apply all line templates
@@ -1059,6 +1072,7 @@ function run_code_template(template, tenv)
 			local res, err = pcall(f)
 			clear_template_debug_context()
 			if not res then
+				if aegisub.progress.is_cancelled() then aegisub.cancel() end
 				update_template_debug_context("code-error", template, tenv, { runtime_error = err })
 				aegisub.debug.out(2, "Runtime error in template code: %s\nCode producing error: %s\n\n", err, template.code)
 				clear_template_debug_context()
@@ -1123,6 +1137,7 @@ function run_text_template(template, tenv, varctx, debug_template)
 			if res then
 				return val
 			else
+				if aegisub.progress.is_cancelled() then aegisub.cancel() end
 				update_template_debug_context("expression-error", debug_view, tenv, { expression = expression, runtime_error = val })
 				aegisub.debug.out(2, "Runtime error in template expression: %s\nExpression producing error: %s\nTemplate with expression: %s\n\n", val, expression, template)
 				clear_template_debug_context()
@@ -1143,10 +1158,10 @@ function apply_syllable_templates(syl, line, templates, tenv, varctx, subs)
 	local debug_restore = template_debug_enter(tenv, {
 		phase = syl.isfuri and "apply-furi" or "apply-syllable",
 		scope_kind = syl.isfuri and "furi" or "syl",
-		highlight = nil,
-		highlight_index = nil,
-		char_index = nil,
-		char_text = nil,
+		highlight = template_debug_nil,
+		highlight_index = template_debug_nil,
+		char_index = template_debug_nil,
+		char_text = template_debug_nil,
 	})
 
 	-- Loop over all templates matching the line style
@@ -1248,8 +1263,6 @@ function apply_one_syllable_template(syl, line, template, tenv, varctx, subs, sk
 				scope_kind = "highlight",
 				highlight = hldata,
 				highlight_index = hl,
-				char_index = nil,
-				char_text = nil,
 			})
 			applied = applied + apply_one_syllable_template(hlsyl, line, t, tenv, varctx, subs, true, true)
 			template_debug_leave(tenv, debug_restore)

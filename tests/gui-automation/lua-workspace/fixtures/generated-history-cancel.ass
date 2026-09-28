@@ -1,0 +1,20 @@
+[Script Info]
+Title: Lua Workspace generated history cancellation
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+PlayResX: 1280
+PlayResY: 720
+
+[Aegisub Project Garbage]
+Automation Scripts: ~generated-history-actions.lua|~kara-templater.lua
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Comment: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,code once,delay_calls = 0; delay = function() delay_calls = delay_calls + 1; if delay_calls == 1 then return "" end; local deadline = _G.os.time() + 60; while not _G.aegisub.progress.is_cancelled() do if _G.os.time() >= deadline then _G.error("generated-history-cancel-not-requested") end end; _G.aegisub.cancel() end
+Comment: 1,0:00:00.00,0:00:00.00,Default,,0,0,0,template line notext loop 140,!delay()!R!j!
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\k100}x

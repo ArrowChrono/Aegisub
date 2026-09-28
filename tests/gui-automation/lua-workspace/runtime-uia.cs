@@ -31,6 +31,8 @@ catch (Exception error)
 static int Supervise(string[] args)
 {
     var started = Stopwatch.StartNew();
+    var generatedHistory = args.Zip(args.Skip(1)).Any(pair => pair.First == "--scenario" && pair.Second == "generated-history");
+    var budgetSeconds = generatedHistory ? 660 : 1440;
     var artifactsIndex = Array.IndexOf(args, "--artifacts");
     if (artifactsIndex < 0 || artifactsIndex + 1 >= args.Length) throw new ArgumentException("--artifacts is required");
     var artifacts = Path.GetFullPath(args[artifactsIndex + 1]);
@@ -49,7 +51,7 @@ static int Supervise(string[] args)
     start.ArgumentList.Add(workerFlag);
     foreach (var arg in args) start.ArgumentList.Add(arg);
     using var worker = Process.Start(start) ?? throw new InvalidOperationException("Could not start runtime UIA worker");
-    var workerBudget = TimeSpan.FromSeconds(1430) - started.Elapsed;
+    var workerBudget = TimeSpan.FromSeconds(budgetSeconds - 10) - started.Elapsed;
     var timedOut = workerBudget <= TimeSpan.Zero || !worker.WaitForExit(workerBudget);
     if (timedOut)
     {
@@ -57,11 +59,15 @@ static int Supervise(string[] args)
         if (!worker.WaitForExit(TimeSpan.FromSeconds(5))) throw new TimeoutException("Runtime UIA worker did not stop after timeout");
     }
     var hostLeftRunning = false;
-    if (File.Exists(readyPath))
+    var readyPaths = generatedHistory
+        ? new[] { "branches", "capacity", "mutated-input", "cancel" }.Select(name => Path.Combine(artifacts, name, "ready.json"))
+        : new[] { readyPath };
+    foreach (var candidateReadyPath in readyPaths.Where(File.Exists))
     {
-        var hostId = JsonDocument.Parse(File.ReadAllText(readyPath)).RootElement.GetProperty("process_id").GetInt32();
-        var identity = File.Exists(identityPath)
-            ? JsonSerializer.Deserialize<HostIdentity>(File.ReadAllText(identityPath))
+        var hostId = JsonDocument.Parse(File.ReadAllText(candidateReadyPath)).RootElement.GetProperty("process_id").GetInt32();
+        var candidateIdentityPath = generatedHistory ? Path.Combine(Path.GetDirectoryName(candidateReadyPath)!, "host-identity.json") : identityPath;
+        var identity = File.Exists(candidateIdentityPath)
+            ? JsonSerializer.Deserialize<HostIdentity>(File.ReadAllText(candidateIdentityPath))
             : null;
         if (identity is null || identity.ProcessId != hostId)
             throw new InvalidOperationException("GUI host PID has no matching worker identity; no process was terminated");
@@ -82,13 +88,13 @@ static int Supervise(string[] args)
     }
     File.WriteAllText(Path.Combine(artifacts, "supervisor.json"), JsonSerializer.Serialize(new
     {
-        BudgetSeconds = 1440,
+        BudgetSeconds = budgetSeconds,
         TimedOut = timedOut,
         HostLeftRunning = hostLeftRunning,
         WorkerExitCode = worker.ExitCode,
         Status = timedOut ? "timeout" : hostLeftRunning ? "host-cleanup-required" : worker.ExitCode == 0 ? "passed" : "failed"
     }, new JsonSerializerOptions { WriteIndented = true }));
-    if (timedOut) throw new TimeoutException("Lua Workspace runtime GUI E2E exceeded its 1440-second total limit");
+    if (timedOut) throw new TimeoutException($"Lua Workspace runtime GUI E2E exceeded its {budgetSeconds}-second total limit");
     return hostLeftRunning ? 1 : worker.ExitCode;
 }
 
@@ -96,17 +102,21 @@ static int Run(string[] args)
 {
     string? exe = null;
     string? artifacts = null;
+    string? scenario = null;
     for (var index = 0; index < args.Length; ++index)
     {
         switch (args[index])
         {
             case "--exe": exe = Path.GetFullPath(args[++index]); break;
             case "--artifacts": artifacts = Path.GetFullPath(args[++index]); break;
+            case "--scenario": scenario = args[++index]; break;
             default: throw new ArgumentException($"Unknown argument: {args[index]}");
         }
     }
     if (exe is null || !File.Exists(exe) || artifacts is null)
         throw new ArgumentException("--exe and --artifacts are required");
+    if (scenario == "generated-history") return RunGeneratedHistory(exe, artifacts);
+    if (scenario is not null) throw new ArgumentException($"Unknown runtime scenario: {scenario}");
     Directory.CreateDirectory(artifacts);
     var startedUtc = DateTimeOffset.UtcNow;
     DateTimeOffset? finishedUtc = null;
@@ -227,9 +237,11 @@ static int Run(string[] args)
             Ensure(HasExactLine(completedContext, "Template event snapshot: latest reported event, not live values from a paused Lua frame.")
                 && HasExactLine(completedContext, "Debug pause: not attached to this Automation-menu invocation"),
                 "Template snapshot was confused with a current debugger pause");
-            Ensure(completedContext.Split('\n').Select(line => line.TrimEnd('\r'))
-                .Any(line => line.StartsWith("Observed revision ", StringComparison.Ordinal) && line.EndsWith(" (current)", StringComparison.Ordinal)),
-                "Completed template observation did not retain its current revision status");
+            Ensure(HasExactLine(completedContext, "Template source revision: not captured (saved Automation source)")
+                && completedContext.Split('\n').Select(line => line.TrimEnd('\r'))
+                    .Any(line => line.StartsWith("Workspace editor revision at observation ", StringComparison.Ordinal)
+                        && line.EndsWith(" (current)", StringComparison.Ordinal)),
+                "Completed menu invocation confused the Workspace editor revision with the saved template source");
             Ensure(HasExactLine(completedContext, "PlayRes X: 1280") && HasExactLine(completedContext, "PlayRes Y: 720"),
                 "Script PlayRes geometry does not match the ASS fixture");
             Ensure(HasExactLine(completedContext, "Orgline index: 13")
@@ -606,6 +618,423 @@ static int Run(string[] args)
 
 }
 
+static int RunGeneratedHistory(string exe, string artifacts)
+{
+    Directory.CreateDirectory(artifacts);
+    var startedUtc = DateTimeOffset.UtcNow;
+    var templater = Path.Combine("automation", "autoload", "kara-templater.lua");
+    var actions = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "generated-history-actions.lua");
+    var includeRoot = Path.Combine("automation", "include");
+    var driver = Path.Combine("tests", "gui-automation", "lua-workspace", "runtime-uia.cs");
+    var hashes = new Dictionary<string, string>
+    {
+        ["exe"] = Hash(exe), ["templater"] = Hash(templater), ["actions"] = Hash(actions),
+        ["driver_source"] = Hash(driver), ["executed_driver"] = Hash(Assembly.GetEntryAssembly()?.Location
+            ?? throw new InvalidOperationException("Executed driver assembly is unavailable"))
+    };
+    var includeFiles = Directory.GetFiles(includeRoot, "*", SearchOption.AllDirectories);
+    foreach (var file in includeFiles)
+        hashes[Path.Combine(includeRoot, Path.GetRelativePath(includeRoot, file)).Replace('\\', '/')] = Hash(file);
+    var steps = new[] { "branches", "capacity", "mutated-input", "cancel" };
+    var results = new List<StepResult>();
+    var exitStatus = "running";
+    try
+    {
+        foreach (var name in steps)
+        {
+            var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", $"generated-history-{name}.ass");
+            var expectedPath = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", $"generated-history-{name}.expected.json");
+            hashes[$"{name}_fixture"] = Hash(fixture);
+            hashes[$"{name}_expected"] = Hash(expectedPath);
+            var caseDir = Path.Combine(artifacts, name);
+            Directory.CreateDirectory(caseDir);
+            var input = Path.Combine(caseDir, "input.ass");
+            File.Copy(fixture, input);
+            File.Copy(actions, Path.Combine(caseDir, "generated-history-actions.lua"));
+            File.Copy(templater, Path.Combine(caseDir, "kara-templater.lua"));
+            foreach (var file in includeFiles)
+            {
+                var destination = Path.Combine(caseDir, "include", Path.GetRelativePath(includeRoot, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file, destination);
+            }
+            var originalEvents = EventLines(File.ReadAllText(input));
+            var originalBytes = File.ReadAllBytes(input);
+            var profile = Path.Combine(caseDir, "profile");
+            Directory.CreateDirectory(profile);
+            Process? host = null;
+            AutomationElement? workspace = null;
+            try
+            {
+                var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)! };
+                foreach (var argument in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", caseDir, "--open", input })
+                    start.ArgumentList.Add(argument);
+                host = Process.Start(start) ?? throw new InvalidOperationException($"Could not start {name} GUI host");
+                File.WriteAllText(Path.Combine(caseDir, "host-identity.json"), JsonSerializer.Serialize(new HostIdentity(host.Id, host.StartTime.ToUniversalTime().ToString("O"))));
+                var ready = AutomationProtocol.WaitForReadyArtifact(Path.Combine(caseDir, "ready.json"), host, TimeSpan.FromSeconds(15));
+                Ensure(ready.ProcessId == host.Id, $"{name} ready artifact belongs to another process");
+                var main = UiaDriver.WaitForMainWindow(host, TimeSpan.FromSeconds(15));
+                InvokeMenu(main, host, "Generated History Select Code", TimeSpan.FromSeconds(8));
+                WaitUntil(() => HasSelectedEffect(main, "code once"), TimeSpan.FromSeconds(5), $"{name} code source was not selected");
+                InvokeMenu(main, host, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+                workspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(8));
+                SelectTab(workspace, "Context");
+                var contextControl = FindPanelElement(workspace, "Context");
+                SelectTab(workspace, "Generated");
+                var generatedControl = FindPanelElement(workspace, "Generated");
+                var historyList = FindGeneratedHistoryList(workspace);
+                if (name == "cancel")
+                {
+                    var expected = ReadExpected<HistoryCancelExpected>(expectedPath);
+                    Ensure(originalEvents.Count == expected.OriginalEventCount, "Cancel fixture event count differs from its independent expectation");
+                    var task = StartMenuInvocation(main, host, "Apply karaoke template");
+                    var progress = WaitProgressPane(host, "Apply karaoke template", TimeSpan.FromSeconds(8));
+                    WaitUntil(() => HasExactLine(ReadPanelValue(generatedControl), "Generated ASS state: provisional; not committed")
+                        && ContextNumber(ReadPanelValue(generatedControl), "Retained generated lines") >= expected.MinimumProvisionalGenerated,
+                        TimeSpan.FromSeconds(20), "No provisional generated line was observed before cancellation");
+                    var provisional = ReadPanelValue(generatedControl);
+                    var provisionalCount = ContextNumber(provisional, "Retained generated lines");
+                    Ensure(provisionalCount <= expected.MaximumProvisionalGenerated, "Cancellation fixture completed before the required partial-output checkpoint");
+                    Ensure(HasExactLine(provisional, $"Input source line index: {expected.InputSourceLineIndex}")
+                        && HasExactLine(provisional, $"Template source line: {expected.TemplateSourceLine}")
+                        && provisional.Contains($"Output text: {expected.TextPrefix}", StringComparison.Ordinal),
+                        "Provisional output lacks independent source and text fields");
+                    File.WriteAllText(Path.Combine(caseDir, "provisional-generated.txt"), provisional, new UTF8Encoding(false));
+                    InvokeExactButton(progress, "Cancel");
+                    if (!task.Wait(TimeSpan.FromSeconds(15))) throw new TimeoutException("Generated-output cancellation did not finish after exact Cancel");
+                    WaitContextOutcome(contextControl, "Apply karaoke template", "cancelled", TimeSpan.FromSeconds(8));
+                    var rolledBack = ReadPanelValue(generatedControl);
+                    Ensure(HasExactLine(rolledBack, "Generated ASS state: rolled back")
+                        && ContextNumber(rolledBack, "Retained generated lines") >= expected.MinimumProvisionalGenerated,
+                        "Cancelled generated output was not retained as rolled-back evidence");
+                    File.WriteAllText(Path.Combine(caseDir, "rolled-back-generated.txt"), rolledBack, new UTF8Encoding(false));
+                    SaveRuntimeEvidence(workspace, contextControl, generatedControl, caseDir, "rolled-back");
+                    Ensure(File.ReadAllBytes(input).SequenceEqual(originalBytes), "Cancelled macro changed physical ASS before verification");
+                    InvokeMacroWithOptionalProgress(main, host, contextControl, "Generated History Verify Rollback", caseDir,
+                        "rollback-verifier", "completed");
+                    Ensure(File.ReadAllBytes(input).SequenceEqual(originalBytes), "Rollback verification changed physical ASS");
+                }
+                else
+                {
+                    InvokeMacroWithOptionalProgress(main, host, contextControl, "Apply karaoke template", caseDir, name, "completed");
+                    WaitContextOutcome(contextControl, "Apply karaoke template", "completed", TimeSpan.FromSeconds(8));
+                    var generated = ReadPanelValue(generatedControl);
+                    Ensure(HasExactLine(generated, "Generated ASS state: committed by invocation"), $"{name} generated history did not reach committed state");
+                    if (name == "branches")
+                    {
+                        var expected = ReadExpected<HistoryBranchesExpected>(expectedPath);
+                        Ensure(expected.Generated.Count == expected.GeneratedCount && originalEvents.Count == 6, "Branch expectations or fixture count are inconsistent");
+                        var latestContext = ReadPanelValue(contextControl);
+                        Ensure(HasExactLine(latestContext, "Template type: syl")
+                            && HasExactLine(latestContext, "Template authored kinds: syl, furi")
+                            && HasExactLine(latestContext, "Scope: furi"),
+                            "Shared syl/furi template lost authored kinds or actual applied scope");
+                        Ensure(HistoryItems(historyList).Length == expected.GeneratedCount, "Branch history omitted or duplicated generated outputs");
+                        for (var index = 0; index < expected.GeneratedCount; ++index)
+                        {
+                            var line = expected.Generated[index];
+                            var detail = SelectGeneratedHistory(workspace, historyList, generatedControl, index + 1);
+                            AssertGeneratedHistoryDetail(detail, index + 1, line, expected.InputSourceLineIndex, expected.InputText,
+                                expected.InputStartMs, expected.InputEndMs, originalEvents[line.TemplateSourceLine - 9].Text);
+                            if (index is 1 or 3 or 5 or 15)
+                            {
+                                File.WriteAllText(Path.Combine(caseDir, $"selected-{index + 1}.txt"), detail, new UTF8Encoding(false));
+                                SaveUiEvidence(workspace, caseDir, $"selected-{index + 1}");
+                            }
+                        }
+                    }
+                    else if (name == "mutated-input")
+                    {
+                        var expected = ReadExpected<HistoryMutatedInputExpected>(expectedPath);
+                        Ensure(originalEvents.Count == 4 && HistoryItems(historyList).Length == expected.GeneratedCount,
+                            "Mutated-input fixture or generated history count differs from independent expectation");
+                        var latestContext = ReadPanelValue(contextControl);
+                        Ensure(HasExactLine(latestContext, $"Orgline index: {expected.InputSourceLineIndex}")
+                            && HasExactLine(latestContext, $"Orgline text: {expected.InputText}")
+                            && HasExactLine(latestContext, $"Orgline start (ms): {expected.InputStartMs}")
+                            && HasExactLine(latestContext, $"Orgline end (ms): {expected.InputEndMs}"),
+                            "Context attributed generated output to the code-mutated input instead of its captured source");
+                        for (var index = 1; index <= expected.GeneratedCount; ++index)
+                        {
+                            var detail = SelectGeneratedHistory(workspace, historyList, generatedControl, index);
+                            Ensure(HasExactLine(detail, $"Output index: {index}")
+                                && HasExactLine(detail, $"Output text: {expected.OutputTextPrefix}{index}")
+                                && HasExactLine(detail, $"Output layer: {expected.OutputLayer}")
+                                && HasExactLine(detail, $"Output style: {expected.OutputStyle}")
+                                && HasExactLine(detail, $"Output start (ms): {expected.OutputStartMs}")
+                                && HasExactLine(detail, $"Output end (ms): {expected.OutputEndMs}")
+                                && HasExactLine(detail, $"Input source line index: {expected.InputSourceLineIndex}")
+                                && HasExactLine(detail, $"Input snapshot index: {expected.InputSourceLineIndex}")
+                                && HasExactLine(detail, $"Input text: {expected.InputText}")
+                                && HasExactLine(detail, $"Input start (ms): {expected.InputStartMs}")
+                                && HasExactLine(detail, $"Input end (ms): {expected.InputEndMs}")
+                                && HasExactLine(detail, $"Template source line: {expected.TemplateSourceLine}")
+                                && HasExactLine(detail, $"Template debug ID: {expected.TemplateDebugId}")
+                                && HasExactLine(detail, "Template primary authored kind: line")
+                                && HasExactLine(detail, "Template authored kinds: line")
+                                && HasExactLine(detail, $"Template source text: {expected.TemplateSourceText}")
+                                && HasExactLine(detail, "Applied scope: line"),
+                                $"Mutated-input output #{index} lost immutable input provenance");
+                            File.WriteAllText(Path.Combine(caseDir, $"selected-{index}.txt"), detail, new UTF8Encoding(false));
+                        }
+                    }
+                    else
+                    {
+                        var expected = ReadExpected<HistoryCapacityExpected>(expectedPath);
+                        Ensure(originalEvents.Count == 3 && expected.GeneratedCount > expected.RetainedCount,
+                            "Capacity expectations or fixture count are inconsistent");
+                        Ensure(HasExactLine(generated, $"Reported generated count: {expected.GeneratedCount}")
+                            && HasExactLine(generated, $"Retained generated lines: {expected.RetainedCount}")
+                            && HasExactLine(generated, $"Omitted generated lines: {expected.OmittedCount} [oldest dropped]")
+                            && HasExactLine(generated, "Unobserved generated indices: 0")
+                            && RetainedPreviewBytes(generated) is > 0 and <= 262144,
+                            "Capacity counts do not match independent 140/128/12 expectation");
+                        var items = HistoryItems(historyList);
+                        Ensure(items.Length == expected.RetainedCount && items[0].Current.Name.StartsWith($"#{expected.FirstRetainedIndex} ", StringComparison.Ordinal)
+                            && items[^1].Current.Name.StartsWith($"#{expected.GeneratedCount} ", StringComparison.Ordinal)
+                            && !items.Any(item => item.Current.Name.StartsWith($"#{expected.FirstRetainedIndex - 1} ", StringComparison.Ordinal)),
+                            "Capacity history did not retain precisely the newest 128 indices");
+                        foreach (var index in new[] { expected.FirstRetainedIndex, expected.GeneratedCount - 1, expected.GeneratedCount })
+                        {
+                            var detail = SelectGeneratedHistory(workspace, historyList, generatedControl, index);
+                            Ensure(HasExactLine(detail, $"Output index: {index}")
+                                && HasExactLine(detail, $"Output text: {expected.TextPrefix}{index}")
+                                && HasExactLine(detail, $"Output layer: {expected.Layer}")
+                                && HasExactLine(detail, $"Output style: {expected.Style}")
+                                && HasExactLine(detail, $"Output start (ms): {expected.StartMs}")
+                                && HasExactLine(detail, $"Output end (ms): {expected.EndMs}")
+                                && HasExactLine(detail, $"Input source line index: {expected.InputSourceLineIndex}")
+                                && HasExactLine(detail, $"Input text: {expected.InputText}")
+                                && HasExactLine(detail, $"Template source line: {expected.TemplateSourceLine}"),
+                                $"Capacity output #{index} lacks its independently expected provenance");
+                            File.WriteAllText(Path.Combine(caseDir, $"selected-{index}.txt"), detail, new UTF8Encoding(false));
+                        }
+                    }
+                    WaitUntil(() => UiaDriver.FindEnabledInvokableButtonByAutomationId(main, "Item 5002", "Save the current subtitles") is not null,
+                        TimeSpan.FromSeconds(8), $"{name} main Save did not become available");
+                    UiaDriver.Invoke(UiaDriver.FindEnabledInvokableButtonByAutomationId(main, "Item 5002", "Save the current subtitles")!);
+                    var wantedCount = name == "branches" ? ReadExpected<HistoryBranchesExpected>(expectedPath).GeneratedCount
+                        : name == "capacity" ? ReadExpected<HistoryCapacityExpected>(expectedPath).GeneratedCount
+                        : ReadExpected<HistoryMutatedInputExpected>(expectedPath).GeneratedCount;
+                    WaitUntil(() => EventLines(File.ReadAllText(input)).Count == originalEvents.Count + wantedCount,
+                        TimeSpan.FromSeconds(8), $"{name} saved ASS did not contain every generated output");
+                    var saved = File.ReadAllText(input);
+                    File.WriteAllText(Path.Combine(caseDir, "output.ass"), saved, new UTF8Encoding(false));
+                    var events = EventLines(saved);
+                    for (var index = 0; index < originalEvents.Count; ++index)
+                    {
+                        var original = originalEvents[index];
+                        var actual = events[index];
+                        if (name == "mutated-input" && index == originalEvents.Count - 1)
+                        {
+                            var expected = ReadExpected<HistoryMutatedInputExpected>(expectedPath);
+                            Ensure(actual.Kind == "Comment" && actual.Effect == "karaoke"
+                                && actual.Text == expected.MutatedLiveInputText
+                                && actual.StartMs == expected.MutatedLiveInputStartMs
+                                && actual.EndMs == expected.MutatedLiveInputEndMs
+                                && actual with { Kind = original.Kind, Effect = original.Effect, Text = original.Text,
+                                    StartMs = original.StartMs, EndMs = original.EndMs } == original,
+                                "Code-line mutation did not produce the independently expected live ASS input");
+                        }
+                        else
+                            Ensure(actual with { Kind = original.Kind, Effect = original.Effect } == original
+                                && (index == originalEvents.Count - 1 ? actual.Kind == "Comment" && actual.Effect == "karaoke"
+                                    : actual.Kind == original.Kind && actual.Effect == original.Effect),
+                                $"{name} original event {index + 1} changed unexpectedly");
+                    }
+                    for (var index = 0; index < wantedCount; ++index)
+                    {
+                        var actual = events[originalEvents.Count + index];
+                        if (name == "branches")
+                        {
+                            var wanted = ReadExpected<HistoryBranchesExpected>(expectedPath).Generated[index];
+                            Ensure(actual.Kind == "Dialogue" && actual.Effect == "fx" && actual.Text == wanted.Text
+                                && actual.Layer == wanted.Layer && actual.Style == wanted.Style
+                                && actual.StartMs == wanted.StartMs && actual.EndMs == wanted.EndMs,
+                                $"Branch saved output #{index + 1} differs from independent expected fields");
+                        }
+                        else if (name == "capacity")
+                        {
+                            var wanted = ReadExpected<HistoryCapacityExpected>(expectedPath);
+                            Ensure(actual.Kind == "Dialogue" && actual.Effect == "fx" && actual.Text == $"{wanted.TextPrefix}{index + 1}"
+                                && actual.Layer == wanted.Layer && actual.Style == wanted.Style
+                                && actual.StartMs == wanted.StartMs && actual.EndMs == wanted.EndMs,
+                                $"Capacity saved output #{index + 1} differs from independent expected formula");
+                        }
+                        else
+                        {
+                            var wanted = ReadExpected<HistoryMutatedInputExpected>(expectedPath);
+                            Ensure(actual.Kind == "Dialogue" && actual.Effect == "fx"
+                                && actual.Text == $"{wanted.OutputTextPrefix}{index + 1}"
+                                && actual.Layer == wanted.OutputLayer && actual.Style == wanted.OutputStyle
+                                && actual.StartMs == wanted.OutputStartMs && actual.EndMs == wanted.OutputEndMs,
+                                $"Mutated-input saved output #{index + 1} differs from independent expectation");
+                        }
+                    }
+                }
+                SaveRuntimeEvidence(workspace, contextControl, generatedControl, caseDir, "final");
+                if (name == "branches")
+                {
+                    var expected = ReadExpected<HistoryBranchesExpected>(expectedPath);
+                    var editor = FindWorkspaceSourceEditor(workspace, host);
+                    editor.SetFocus();
+                    if (PostMessageW(new nint(editor.Current.NativeWindowHandle), 0x0102, (nint)(int)'x', 0) == 0)
+                        throw new InvalidOperationException("Could not post a source edit to the verified Workspace editor HWND");
+                    WaitUntil(() => HasExactLine(ReadPanelValue(generatedControl), "Template source revision: not captured (saved Automation source)")
+                        && ReadPanelValue(generatedControl).Contains(" (unrelated edit)", StringComparison.Ordinal),
+                        TimeSpan.FromSeconds(5), "Unapplied Workspace edit did not update the unrelated-editor marker");
+                    Ensure(HistoryItems(historyList).Length == expected.GeneratedCount,
+                        "Unapplied Workspace editor edit discarded the ordinary Automation history");
+                    var preserved = SelectGeneratedHistory(workspace, historyList, generatedControl, 2);
+                    AssertGeneratedHistoryDetail(preserved, 2, expected.Generated[1], expected.InputSourceLineIndex,
+                        expected.InputText, expected.InputStartMs, expected.InputEndMs,
+                        originalEvents[expected.Generated[1].TemplateSourceLine - 9].Text);
+                    File.WriteAllText(Path.Combine(caseDir, "history-after-unrelated-edit.txt"), preserved, new UTF8Encoding(false));
+                    SaveRuntimeEvidence(workspace, contextControl, generatedControl, caseDir, "history-after-unrelated-edit");
+                    var workspaceHandle = new nint(workspace.Current.NativeWindowHandle);
+                    if (PostMessageW(workspaceHandle, 0x0010, 0, 0) == 0)
+                        throw new InvalidOperationException("Could not close the exact Workspace after the editor-history check");
+                    var discard = WaitWindow(host, "Unsaved Lua source", TimeSpan.FromSeconds(8));
+                    InvokeExactButton(discard, "Discard");
+                    WaitUntil(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromSeconds(5),
+                        "Workspace did not close after discarding the unrelated editor change");
+                }
+                if (!main.TryGetCurrentPattern(WindowPattern.Pattern, out var closePattern))
+                    throw new InvalidOperationException($"{name} main window lacks WindowPattern.Close");
+                ((WindowPattern)closePattern).Close();
+                if (!host.WaitForExit(TimeSpan.FromSeconds(10))) throw new TimeoutException($"{name} GUI host did not exit normally");
+                Ensure(host.ExitCode == 0, $"{name} GUI host exited nonzero");
+                File.WriteAllText(Path.Combine(caseDir, "normal-shutdown.json"), JsonSerializer.Serialize(new { HostExitCode = host.ExitCode, Method = "WindowPattern.Close" }));
+                results.Add(new StepResult(name, "passed", ""));
+                WriteManifest();
+            }
+            finally
+            {
+                if (host is not null && !host.HasExited)
+                {
+                    TryProcessUiEvidence(host, caseDir, "failure-pid-tree");
+                    host.Kill(entireProcessTree: true);
+                    if (!host.WaitForExit(TimeSpan.FromSeconds(5))) throw new TimeoutException($"{name} GUI host could not be cleaned up");
+                }
+                host?.Dispose();
+            }
+        }
+        exitStatus = "passed";
+        WriteManifest();
+        return 0;
+    }
+    catch (Exception error)
+    {
+        var failing = steps.FirstOrDefault(step => results.All(result => result.Name != step));
+        if (failing is not null) results.Add(new StepResult(failing, "failed", error.Message));
+        foreach (var remaining in steps.Where(step => results.All(result => result.Name != step)))
+            results.Add(new StepResult(remaining, "not-run", "A preceding case failed"));
+        exitStatus = "failed";
+        WriteManifest();
+        Console.Error.WriteLine(error);
+        return 1;
+    }
+
+    void WriteManifest() => File.WriteAllText(Path.Combine(artifacts, "manifest.json"), JsonSerializer.Serialize(new
+    {
+        StartedUtc = startedUtc, FinishedUtc = DateTimeOffset.UtcNow, BudgetSeconds = 660,
+        ExeSha256 = hashes["exe"],
+        Fixtures = steps.SelectMany(name => new[]
+        {
+            $"tests/gui-automation/lua-workspace/fixtures/generated-history-{name}.ass",
+            $"tests/gui-automation/lua-workspace/fixtures/generated-history-{name}.expected.json"
+        }).Append("tests/gui-automation/lua-workspace/fixtures/generated-history-actions.lua"),
+        Sha256 = hashes, ExitStatus = exitStatus, Steps = results
+    }, new JsonSerializerOptions { WriteIndented = true }));
+}
+
+static int RetainedPreviewBytes(string generated)
+{
+    const string prefix = "Retained preview bytes: ";
+    var line = generated.Split('\n').Select(value => value.TrimEnd('\r')).SingleOrDefault(value => value.StartsWith(prefix, StringComparison.Ordinal));
+    Ensure(line is not null && line.EndsWith(" / 262144", StringComparison.Ordinal)
+        && int.TryParse(line[prefix.Length..^9], NumberStyles.None, CultureInfo.InvariantCulture, out _),
+        "Generated history did not report a bounded retained-string byte count");
+    return int.Parse(line![prefix.Length..^9], CultureInfo.InvariantCulture);
+}
+
+static T ReadExpected<T>(string path) where T : class =>
+    JsonSerializer.Deserialize<T>(File.ReadAllText(path), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower })
+    ?? throw new FormatException($"Expected fixture {path} is empty");
+
+static AutomationElement FindGeneratedHistoryList(AutomationElement workspace)
+{
+    var notebook = FindRuntimeNotebook(workspace);
+    var tab = FindRuntimeTab(notebook, "Generated");
+    Ensure(tab.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selected)
+        && ((SelectionItemPattern)selected).Current.IsSelected, "Generated tab was not selected before locating history");
+    var lists = notebook.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.List))
+        .Cast<AutomationElement>().Where(item => item.Current.ProcessId == workspace.Current.ProcessId
+            && !item.Current.IsOffscreen && item.Current.ClassName == "ListBox" && item.Current.NativeWindowHandle != 0
+            && item.TryGetCurrentPattern(SelectionPattern.Pattern, out _)).ToArray();
+    Ensure(lists.Length == 1, $"Expected one visible native Generated ListBox in the runtime notebook, found {lists.Length}");
+    return lists[0];
+}
+
+static AutomationElement FindWorkspaceSourceEditor(AutomationElement workspace, Process host)
+{
+    var panes = workspace.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Pane))
+        .Cast<AutomationElement>().Where(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen
+            && item.Current.ClassName == "wxWindow" && item.Current.Name == "stcwindow"
+            && item.Current.NativeWindowHandle != 0).ToArray();
+    Ensure(panes.Length == 1, $"Expected one visible Workspace source editor, found {panes.Length}");
+    GetWindowThreadProcessId(new nint(panes[0].Current.NativeWindowHandle), out var owner);
+    Ensure(owner == (uint)host.Id, "Workspace source editor HWND no longer belongs to its host");
+    return panes[0];
+}
+
+static AutomationElement[] HistoryItems(AutomationElement list) => list.FindAll(TreeScope.Children,
+    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)).Cast<AutomationElement>().ToArray();
+
+static string SelectGeneratedHistory(AutomationElement workspace, AutomationElement list, AutomationElement output, int index)
+{
+    SelectTab(workspace, "Generated");
+    var items = HistoryItems(list).Where(item => item.Current.Name.StartsWith($"#{index} ", StringComparison.Ordinal)).ToArray();
+    Ensure(items.Length == 1, $"Generated history has {items.Length} entries for output #{index}");
+    if (!items[0].TryGetCurrentPattern(SelectionItemPattern.Pattern, out var pattern))
+        throw new InvalidOperationException($"Generated history #{index} lacks SelectionItemPattern");
+    ((SelectionItemPattern)pattern).Select();
+    string detail = "";
+    WaitUntil(() => HasExactLine(detail = ReadPanelValue(output), $"Output index: {index}"), TimeSpan.FromSeconds(5),
+        $"Generated history detail did not select output #{index}");
+    return detail;
+}
+
+static void AssertGeneratedHistoryDetail(string detail, int index, HistoryExpectedLine wanted, int inputSourceLine,
+    string inputText, int inputStartMs, int inputEndMs, string sourceText)
+{
+    Ensure(HasExactLine(detail, $"Output index: {index}") && HasExactLine(detail, $"Output text: {wanted.Text}")
+        && HasExactLine(detail, $"Output style: {wanted.Style}") && HasExactLine(detail, $"Output layer: {wanted.Layer}")
+        && HasExactLine(detail, "Output effect: fx") && HasExactLine(detail, $"Output start (ms): {wanted.StartMs}")
+        && HasExactLine(detail, $"Output end (ms): {wanted.EndMs}")
+        && HasExactLine(detail, $"Input source line index: {inputSourceLine}")
+        && HasExactLine(detail, $"Input snapshot index: {inputSourceLine}")
+        && HasExactLine(detail, $"Input text: {inputText}")
+        && HasExactLine(detail, $"Input start (ms): {inputStartMs}")
+        && HasExactLine(detail, $"Input end (ms): {inputEndMs}")
+        && HasExactLine(detail, $"Template debug ID: {wanted.TemplateDebugId}")
+        && HasExactLine(detail, $"Template primary authored kind: {wanted.TemplateType}")
+        && HasExactLine(detail, $"Template authored kinds: {wanted.AuthoredKinds ?? wanted.TemplateType}")
+        && HasExactLine(detail, $"Template source line: {wanted.TemplateSourceLine}")
+        && HasExactLine(detail, "Template fragment kind: text-template")
+        && HasExactLine(detail, $"Template source text: {sourceText}")
+        && HasExactLine(detail, $"Template source fragments: {wanted.FragmentKind.Split(", ").Length} total, {wanted.FragmentKind.Split(", ").Length} shown")
+        && HasExactLine(detail, $"  line: {wanted.TemplateSourceLine}")
+        && wanted.FragmentKind.Split(", ").All(kind => HasExactLine(detail, $"  kind: {kind}"))
+        && HasExactLine(detail, $"  text: {sourceText}")
+        && HasExactLine(detail, $"Applied scope: {wanted.Scope}")
+        && HasExactLine(detail, $"Syllable index: {wanted.SyllableIndex}")
+        && HasExactLine(detail, $"Highlight index: {(wanted.HighlightIndex?.ToString() ?? "[not captured]")}")
+        && HasExactLine(detail, $"Character index: {(wanted.CharIndex?.ToString() ?? "[not captured]")}"),
+        $"Generated output #{index} lacks independent business fields or source provenance");
+    Ensure(inputSourceLine != wanted.TemplateSourceLine, $"Output #{index} fixture does not distinguish input and template source positions");
+}
+
 static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
 
 static void Ensure(bool condition, string message)
@@ -796,7 +1225,9 @@ static string ReadPanelValue(AutomationElement control)
 
 static string ExpectedFeatureLine(string macro)
 {
-    var script = macro == "Apply karaoke template" ? "kara-templater" : "runtime-actions";
+    var script = macro == "Apply karaoke template" ? "kara-templater"
+        : macro.StartsWith("Generated History ", StringComparison.Ordinal) ? "generated-history-actions"
+        : "runtime-actions";
     return $"Feature: automation/lua/{script}/{macro}";
 }
 
@@ -958,25 +1389,20 @@ static AutomationElement OpenAutomationMenuCommand(AutomationElement main, Proce
     return command!;
 }
 
-static void InvokeMenu(AutomationElement main, Process host, string command, TimeSpan timeout, string menuName = "Automation", Action? commandReady = null)
+static void InvokeMenu(AutomationElement main, Process host, string command, TimeSpan timeout, string menuName = "Automation")
 {
     var item = OpenAutomationMenuCommand(main, host, command, timeout, menuName);
     Ensure(item.Current.IsEnabled && item.TryGetCurrentPattern(InvokePattern.Pattern, out _),
         $"Menu command '{command}' was exposed but is not callable");
-    commandReady?.Invoke();
     UiaDriver.Invoke(item);
 }
 
 static Task StartMenuInvocation(AutomationElement main, Process host, string command)
 {
-    var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    var task = Task.Run(() => InvokeMenu(main, host, command, TimeSpan.FromSeconds(8), commandReady: () => ready.TrySetResult(true)));
-    if (!Task.WhenAny(ready.Task, task).Wait(TimeSpan.FromSeconds(18)))
-        throw new TimeoutException($"Menu command '{command}' was not ready within 18 seconds, including menu opening and discovery");
-    if (task.IsCompleted && !ready.Task.IsCompleted)
-        task.GetAwaiter().GetResult();
-    Ensure(ready.Task.IsCompleted, $"Menu command '{command}' did not become ready before invocation ended");
-    return task;
+    var item = OpenAutomationMenuCommand(main, host, command, TimeSpan.FromSeconds(8));
+    Ensure(item.Current.IsEnabled && item.TryGetCurrentPattern(InvokePattern.Pattern, out _),
+        $"Menu command '{command}' was exposed but is not callable");
+    return Task.Run(() => UiaDriver.Invoke(item));
 }
 
 static void InvokeExactButton(AutomationElement window, string name)
@@ -1104,5 +1530,19 @@ sealed record AssEvent(string Kind, int Layer, int StartMs, int EndMs, string St
 sealed record StepResult(string Name, string Status, string Detail);
 sealed record RuntimeExpected(int GeneratedCount, List<ExpectedGenerated> Generated);
 sealed record ExpectedGenerated(string Text, int Layer, int StartMs, int EndMs);
+sealed record HistoryBranchesExpected(int GeneratedCount, int InputSourceLineIndex, string InputText,
+    int InputStartMs, int InputEndMs, List<HistoryExpectedLine> Generated);
+sealed record HistoryExpectedLine(string Text, int Layer, int StartMs, int EndMs, string Style,
+    int TemplateSourceLine, int TemplateDebugId, string TemplateType, string FragmentKind,
+    string Scope, int SyllableIndex, int? HighlightIndex = null, int? CharIndex = null, string? AuthoredKinds = null);
+sealed record HistoryCapacityExpected(int GeneratedCount, int RetainedCount, int OmittedCount,
+    int FirstRetainedIndex, int TemplateSourceLine, int InputSourceLineIndex, string InputText,
+    int InputStartMs, int InputEndMs, string TextPrefix, int Layer, string Style, int StartMs, int EndMs);
+sealed record HistoryMutatedInputExpected(int GeneratedCount, int InputSourceLineIndex, string InputText,
+    int InputStartMs, int InputEndMs, int TemplateSourceLine, int TemplateDebugId, string TemplateSourceText,
+    string MutatedLiveInputText, int MutatedLiveInputStartMs, int MutatedLiveInputEndMs,
+    string OutputTextPrefix, int OutputLayer, string OutputStyle, int OutputStartMs, int OutputEndMs);
+sealed record HistoryCancelExpected(int OriginalEventCount, int MinimumProvisionalGenerated,
+    int MaximumProvisionalGenerated, int InputSourceLineIndex, int TemplateSourceLine, string TextPrefix);
 sealed record HostIdentity(int ProcessId, string StartTimeUtc);
 sealed record TemplateFailureCase(string Name, string ArtifactName, string ExpectedKind, int SourceLine, string SourceText, string? RuntimeMarker);

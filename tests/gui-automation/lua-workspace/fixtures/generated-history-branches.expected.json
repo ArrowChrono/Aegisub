@@ -1,0 +1,26 @@
+{
+  "generated_count": 17,
+  "input_source_line_index": 14,
+  "input_text": "{\\k30}ab|A{\\k20}#x{\\k50}cd|C",
+  "input_start_ms": 1000,
+  "input_end_ms": 2000,
+  "generated": [
+    {"text":"Ca", "layer":1, "start_ms":1000, "end_ms":1500, "style":"Default", "template_source_line":10, "template_debug_id":2, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":1, "char_index":1},
+    {"text":"Cb", "layer":1, "start_ms":1000, "end_ms":1500, "style":"Default", "template_source_line":10, "template_debug_id":2, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":1, "char_index":2},
+    {"text":"H0-300", "layer":2, "start_ms":1000, "end_ms":1300, "style":"Default", "template_source_line":11, "template_debug_id":3, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":1, "highlight_index":1},
+    {"text":"H300-500", "layer":2, "start_ms":1300, "end_ms":1500, "style":"Default", "template_source_line":11, "template_debug_id":3, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":1, "highlight_index":2},
+    {"text":"Ma:0-300", "layer":3, "start_ms":1000, "end_ms":1300, "style":"Default", "template_source_line":12, "template_debug_id":4, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":1, "highlight_index":1, "char_index":1},
+    {"text":"Ma:300-500", "layer":3, "start_ms":1300, "end_ms":1500, "style":"Default", "template_source_line":12, "template_debug_id":4, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":1, "highlight_index":2, "char_index":1},
+    {"text":"Mb:0-300", "layer":3, "start_ms":1000, "end_ms":1300, "style":"Default", "template_source_line":12, "template_debug_id":4, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":1, "highlight_index":1, "char_index":2},
+    {"text":"Mb:300-500", "layer":3, "start_ms":1300, "end_ms":1500, "style":"Default", "template_source_line":12, "template_debug_id":4, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":1, "highlight_index":2, "char_index":2},
+    {"text":"Fab", "layer":4, "start_ms":1000, "end_ms":1500, "style":"Default", "template_source_line":13, "template_debug_id":5, "template_type":"syl", "authored_kinds":"syl, furi", "fragment_kind":"syl, furi", "scope":"syl", "syllable_index":1},
+    {"text":"Cc", "layer":1, "start_ms":1500, "end_ms":2000, "style":"Default", "template_source_line":10, "template_debug_id":2, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":2, "char_index":1},
+    {"text":"Cd", "layer":1, "start_ms":1500, "end_ms":2000, "style":"Default", "template_source_line":10, "template_debug_id":2, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":2, "char_index":2},
+    {"text":"H500-1000", "layer":2, "start_ms":1500, "end_ms":2000, "style":"Default", "template_source_line":11, "template_debug_id":3, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":2, "highlight_index":1},
+    {"text":"Mc:500-1000", "layer":3, "start_ms":1500, "end_ms":2000, "style":"Default", "template_source_line":12, "template_debug_id":4, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":2, "highlight_index":1, "char_index":1},
+    {"text":"Md:500-1000", "layer":3, "start_ms":1500, "end_ms":2000, "style":"Default", "template_source_line":12, "template_debug_id":4, "template_type":"syl", "fragment_kind":"syl", "scope":"syl", "syllable_index":2, "highlight_index":1, "char_index":2},
+    {"text":"Fcd", "layer":4, "start_ms":1500, "end_ms":2000, "style":"Default", "template_source_line":13, "template_debug_id":5, "template_type":"syl", "authored_kinds":"syl, furi", "fragment_kind":"syl, furi", "scope":"syl", "syllable_index":2},
+    {"text":"FA", "layer":4, "start_ms":1000, "end_ms":1300, "style":"Default-furigana", "template_source_line":13, "template_debug_id":5, "template_type":"syl", "authored_kinds":"syl, furi", "fragment_kind":"syl, furi", "scope":"furi", "syllable_index":1},
+    {"text":"FC", "layer":4, "start_ms":1500, "end_ms":2000, "style":"Default-furigana", "template_source_line":13, "template_debug_id":5, "template_type":"syl", "authored_kinds":"syl, furi", "fragment_kind":"syl, furi", "scope":"furi", "syllable_index":2}
+  ]
+}

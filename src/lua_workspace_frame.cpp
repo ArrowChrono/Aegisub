@@ -48,6 +48,7 @@
 #include <wx/wrapsizer.h>
 
 #include <algorithm>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -60,6 +61,8 @@ namespace {
 constexpr int diagnostic_indicator = 8;
 constexpr std::size_t runtime_text_limit = 2048;
 constexpr std::size_t runtime_fragment_limit = 16;
+constexpr std::size_t generated_history_limit = 128;
+constexpr std::size_t generated_history_string_budget = 256 * 1024;
 constexpr std::string_view truncated_marker = "[truncated]";
 constexpr std::string_view karaoke_templater_execution_id = "aegisub.kara-templater.apply";
 constexpr char source_width_option[] = "Automation/Lua Workspace/Layout/Source Width Percent";
@@ -93,6 +96,8 @@ struct RuntimeSourceFragmentView {
 struct RuntimeTemplateView {
 	std::optional<std::string> event_type;
 	std::optional<std::string> template_type;
+	std::vector<std::string> template_authored_kinds;
+	std::size_t template_authored_kind_count = 0;
 	std::optional<int> template_id;
 	std::optional<std::string> template_name;
 	std::optional<std::string> owner_script;
@@ -132,6 +137,23 @@ struct RuntimeGeneratedView {
 	std::optional<int> source_line;
 };
 
+struct RuntimeGeneratedHistoryItem {
+	AutomationGeneratedLineSnapshot output;
+	std::optional<int> input_index;
+	std::optional<std::string> input_text;
+	std::optional<int> input_start_time;
+	std::optional<int> input_end_time;
+	std::optional<int> template_source_line;
+	std::optional<std::string> template_type;
+	std::vector<std::string> template_authored_kinds;
+	std::size_t template_authored_kind_count = 0;
+	std::optional<std::string> template_fragment_kind;
+	std::optional<std::string> template_source_text;
+	std::vector<RuntimeSourceFragmentView> source_fragments;
+	std::size_t source_fragment_count = 0;
+	std::size_t string_bytes = 0;
+};
+
 struct RuntimeView {
 	std::string feature_name;
 	std::optional<int> active_row;
@@ -142,6 +164,10 @@ struct RuntimeView {
 	std::optional<AutomationInvocationOutcome> outcome;
 	std::optional<RuntimeTemplateView> template_view;
 	std::optional<RuntimeGeneratedView> generated_view;
+	std::deque<RuntimeGeneratedHistoryItem> generated_history;
+	std::size_t generated_history_string_bytes = 0;
+	std::size_t generated_history_omitted = 0;
+	std::size_t generated_history_unobserved = 0;
 };
 
 RuntimeTemplateView project_template(AutomationTemplateDebugState const& source) {
@@ -158,6 +184,9 @@ RuntimeTemplateView project_template(AutomationTemplateDebugState const& source)
 	result.runtime_error = bounded(source.runtime_error);
 	if (source.identity) {
 		result.template_type = bounded(source.identity->template_kind);
+		result.template_authored_kind_count = source.identity->template_kinds.size();
+		for (std::size_t index = 0; index < std::min(result.template_authored_kind_count, runtime_fragment_limit); ++index)
+			result.template_authored_kinds.push_back(bounded(source.identity->template_kinds[index]));
 		result.template_id = source.identity->template_debug_id;
 		result.template_name = bounded(source.identity->template_id);
 		result.owner_script = bounded(source.identity->owner_script);
@@ -230,6 +259,61 @@ RuntimeGeneratedView project_generated(AutomationGeneratedLinesSnapshot const& s
 	return result;
 }
 
+std::optional<RuntimeGeneratedHistoryItem> project_generated_history(AutomationTemplateDebugState const& source) {
+	if (source.kind != "generated-line" || !source.generated || !source.generated->last_line)
+		return std::nullopt;
+	RuntimeGeneratedHistoryItem item;
+	item.output = *source.generated->last_line;
+	item.output.text = bounded(item.output.text);
+	item.output.style = bounded(item.output.style);
+	item.output.effect = bounded(item.output.effect);
+	item.output.template_kind = bounded(item.output.template_kind);
+	item.output.scope_kind = bounded(item.output.scope_kind);
+	if (source.target && source.target->original_line) {
+		auto const& input = *source.target->original_line;
+		item.input_index = input.index;
+		item.input_text = bounded(input.text);
+		item.input_start_time = input.start_time;
+		item.input_end_time = input.end_time;
+	}
+	if (source.identity) {
+		item.template_source_line = source.identity->source_line_index;
+		item.template_type = bounded(source.identity->template_kind);
+		item.template_authored_kind_count = source.identity->template_kinds.size();
+		for (std::size_t index = 0; index < std::min(item.template_authored_kind_count, runtime_fragment_limit); ++index)
+			item.template_authored_kinds.push_back(bounded(source.identity->template_kinds[index]));
+		item.template_fragment_kind = bounded(source.identity->fragment_kind);
+	}
+	if (source.source) {
+		item.template_source_text = bounded(source.source->text);
+		item.source_fragment_count = source.source->fragments.size();
+		for (std::size_t index = 0; index < std::min(item.source_fragment_count, runtime_fragment_limit); ++index) {
+			auto const& fragment = source.source->fragments[index];
+			item.source_fragments.push_back({.line = fragment.source_line_index, .kind = bounded(fragment.fragment_kind), .text = bounded(fragment.text)});
+		}
+	}
+	auto add_bytes = [&item](std::optional<std::string> const& value) {
+		if (value)
+			item.string_bytes += value->size();
+	};
+	add_bytes(item.output.text);
+	add_bytes(item.output.style);
+	add_bytes(item.output.effect);
+	add_bytes(item.output.template_kind);
+	add_bytes(item.output.scope_kind);
+	add_bytes(item.input_text);
+	add_bytes(item.template_type);
+	for (auto const& kind : item.template_authored_kinds)
+		item.string_bytes += kind.size();
+	add_bytes(item.template_fragment_kind);
+	add_bytes(item.template_source_text);
+	for (auto const& fragment : item.source_fragments) {
+		add_bytes(fragment.kind);
+		add_bytes(fragment.text);
+	}
+	return item;
+}
+
 void add_field(wxString& output, wxString const& label, std::optional<std::string> const& value) {
 	if (value)
 		output += label + wxS(": ") + to_wx(*value) + wxS("\n");
@@ -255,6 +339,22 @@ void add_snapshot_field(wxString& output, wxString const& label, std::optional<i
 void add_snapshot_field(wxString& output, wxString const& label, std::optional<double> const& value) {
 	output += label + wxS(": ");
 	output += value ? wxString::Format(wxS("%.2f"), *value) : wxString(wxS("[not captured]"));
+	output += wxS("\n");
+}
+
+void add_authored_kinds(wxString& output, std::vector<std::string> const& kinds, std::size_t total) {
+	output += wxS("Template authored kinds: ");
+	if (!total) {
+		output += wxS("[not captured]\n");
+		return;
+	}
+	for (std::size_t index = 0; index < kinds.size(); ++index) {
+		if (index)
+			output += wxS(", ");
+		output += to_wx(kinds[index]);
+	}
+	if (total > kinds.size())
+		output += wxString::Format(wxS(" [%llu omitted by preview limit]"), static_cast<unsigned long long>(total - kinds.size()));
 	output += wxS("\n");
 }
 
@@ -315,6 +415,7 @@ struct LuaWorkspaceRuntimeObservation {
 	LuaWorkspaceDocument const *document = nullptr;
 	std::uint64_t generation = 0;
 	std::uint64_t revision = 0;
+	std::optional<int> max_generated_index;
 };
 
 namespace {
@@ -336,10 +437,12 @@ class WorkspaceInvocationObserver final : public AutomationInvocationObserver {
 			return;
 		std::optional<RuntimeTemplateView> template_view;
 		std::optional<RuntimeGeneratedView> generated_view;
+		std::optional<RuntimeGeneratedHistoryItem> generated_item;
 		if (snapshot.template_debug) {
 			template_view = project_template(*snapshot.template_debug);
 			if (snapshot.template_debug->generated)
 				generated_view = project_generated(*snapshot.template_debug->generated);
+			generated_item = project_generated_history(*snapshot.template_debug);
 		}
 		bool queue = false;
 		{
@@ -363,6 +466,22 @@ class WorkspaceInvocationObserver final : public AutomationInvocationObserver {
 				observation->view.template_view = std::move(template_view);
 			if (generated_view)
 				observation->view.generated_view = std::move(generated_view);
+			if (generated_item && generated_item->output.generated_index && *generated_item->output.generated_index > 0 &&
+				(!observation->max_generated_index || *generated_item->output.generated_index > *observation->max_generated_index)) {
+				if (!observation->max_generated_index && *generated_item->output.generated_index > 1)
+					observation->view.generated_history_unobserved += static_cast<std::size_t>(*generated_item->output.generated_index - 1);
+				else if (observation->max_generated_index && *generated_item->output.generated_index > *observation->max_generated_index + 1)
+					observation->view.generated_history_unobserved += static_cast<std::size_t>(*generated_item->output.generated_index - *observation->max_generated_index - 1);
+				observation->max_generated_index = generated_item->output.generated_index;
+				observation->view.generated_history_string_bytes += generated_item->string_bytes;
+				observation->view.generated_history.push_back(std::move(*generated_item));
+				while (observation->view.generated_history.size() > generated_history_limit ||
+					   observation->view.generated_history_string_bytes > generated_history_string_budget) {
+					observation->view.generated_history_string_bytes -= observation->view.generated_history.front().string_bytes;
+					observation->view.generated_history.pop_front();
+					++observation->view.generated_history_omitted;
+				}
+			}
 			if (!observation->queued) {
 				observation->queued = true;
 				queue = true;
@@ -485,11 +604,21 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	runtime_tabs = new wxNotebook(source_splitter, wxID_ANY);
 	runtime_tabs->SetMinSize(wxSize(280, -1));
 	runtime_context = new wxTextCtrl(runtime_tabs, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
-	generated_output = new wxTextCtrl(runtime_tabs, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
+	auto generated_panel = new wxPanel(runtime_tabs);
+	auto generated_layout = new wxBoxSizer(wxVERTICAL);
+	auto generated_history_label = new wxStaticText(generated_panel, wxID_ANY, _("Generated lines - select one to inspect its source"));
+	generated_history = new wxListBox(generated_panel, wxID_ANY);
+	generated_history->SetName(wxS("Lua generated history"));
+	generated_history->SetMinSize(wxSize(-1, FromDIP(130)));
+	generated_output = new wxTextCtrl(generated_panel, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
 	runtime_context->SetName(wxS("Lua runtime context"));
 	generated_output->SetName(wxS("Lua generated output"));
+	generated_layout->Add(generated_history_label, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4);
+	generated_layout->Add(generated_history, 0, wxEXPAND | wxALL, 4);
+	generated_layout->Add(generated_output, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4);
+	generated_panel->SetSizer(generated_layout);
 	runtime_tabs->AddPage(runtime_context, _("Context"));
-	runtime_tabs->AddPage(generated_output, _("Generated"));
+	runtime_tabs->AddPage(generated_panel, _("Generated"));
 	auto execution_panel = new wxPanel(runtime_tabs);
 	auto execution_layout = new wxBoxSizer(wxVERTICAL);
 	execution_identity = new wxStaticText(execution_panel, wxID_ANY, _("No paused source."), wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
@@ -637,6 +766,12 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 			ToggleBreakpoint(editor->LineFromPosition(event.GetPosition()) + 1);
 	});
 	stack_frames->Bind(wxEVT_LISTBOX, [this](wxCommandEvent&) { ShowSelectedFrame(); });
+	generated_history->Bind(wxEVT_LISTBOX, [this](wxCommandEvent&) { SyncGeneratedHistorySelection(); });
+	Bind(wxEVT_IDLE, [this](wxIdleEvent& event) {
+		event.Skip();
+		if (IsShown() && runtime_tabs && generated_history && runtime_tabs->GetCurrentPage() == generated_history->GetParent())
+			SyncGeneratedHistorySelection();
+	});
 	debug_variables->Bind(wxEVT_TREE_SEL_CHANGED, [this](wxTreeEvent&) {
 		if (!rebuilding_debug_tree)
 			RefreshVariableDetails(active_session && active_session->GetStateSnapshot().current_pause.has_value());
@@ -651,12 +786,8 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 		source_diagnostic.reset();
 		action_message.clear();
 		document->SetSource(from_wx(editor->GetText()));
-		if (active_observation) {
-			if (active_observation->workspace_run)
-				RenderRuntimeObservation(invocation_sequence, active_observation);
-			else
-				ClearRuntimeObservation();
-		}
+		if (active_observation)
+			RenderRuntimeObservation(invocation_sequence, active_observation);
 		UpdateRunControls();
 		RefreshDocument(false);
 	});
@@ -1397,10 +1528,31 @@ void LuaWorkspaceFrame::ClearRuntimeObservation() {
 	agi::ui::VerifyAccess();
 	++invocation_sequence;
 	active_observation.reset();
+	selected_generated_index.reset();
+	displayed_generated_indices.clear();
+	follow_latest_generated = true;
 	if (runtime_context)
 		runtime_context->ChangeValue(_("No observed macro run. Workspace Run/Debug can use a captured editor revision; regular Automation runs use saved source."));
 	if (generated_output)
 		generated_output->ChangeValue(_("No generated output observed."));
+	if (generated_history)
+		generated_history->Clear();
+}
+
+void LuaWorkspaceFrame::SyncGeneratedHistorySelection() {
+	agi::ui::VerifyAccess();
+	if (!active_observation)
+		return;
+	auto const selection = generated_history->GetSelection();
+	if (selection == wxNOT_FOUND || static_cast<std::size_t>(selection) >= displayed_generated_indices.size())
+		return;
+	int const index = displayed_generated_indices[selection];
+	bool const follow_latest = static_cast<std::size_t>(selection) == displayed_generated_indices.size() - 1;
+	if (selected_generated_index == index && follow_latest_generated == follow_latest)
+		return;
+	selected_generated_index = index;
+	follow_latest_generated = follow_latest;
+	RenderRuntimeObservation(invocation_sequence, active_observation);
 }
 
 void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::weak_ptr<LuaWorkspaceRuntimeObservation> const& observation) {
@@ -1409,10 +1561,6 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 	if (!state || !context || sequence != invocation_sequence || active_observation != state)
 		return;
 	if (document.get() != state->document || context->subsController->GetDocumentGeneration() != state->generation) {
-		ClearRuntimeObservation();
-		return;
-	}
-	if (document && !state->workspace_run && document->GetRevision() != state->revision) {
 		ClearRuntimeObservation();
 		return;
 	}
@@ -1425,10 +1573,17 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 	wxString status = ::run_status(view.outcome);
 	wxString context_text = wxS("Invocation: macro_run\nStatus: ") + status + wxS("\n");
 	context_text += wxS("Feature: ") + to_wx(view.feature_name) + wxS("\n");
-	if (document)
+	context_text += wxString::Format(wxS("Subtitle document generation: %llu\n"), static_cast<unsigned long long>(state->generation));
+	if (document && state->workspace_run)
 		context_text += wxString::Format(wxS("Observed revision %llu; editor revision %llu (%s)\n"),
 										 static_cast<unsigned long long>(state->revision), static_cast<unsigned long long>(document->GetRevision()),
 										 document->GetRevision() == state->revision ? wxS("current") : wxS("stale"));
+	else if (document) {
+		context_text += wxS("Template source revision: not captured (saved Automation source)\n");
+		context_text += wxString::Format(wxS("Workspace editor revision at observation %llu; editor revision %llu (%s)\n"),
+										 static_cast<unsigned long long>(state->revision), static_cast<unsigned long long>(document->GetRevision()),
+										 document->GetRevision() == state->revision ? wxS("current") : wxS("unrelated edit"));
+	}
 	if (state->workspace_run) {
 		auto debug_state = active_session ? active_session->GetStateSnapshot() : AutomationDebugStateSnapshot{};
 		context_text += debug_state.current_pause                                   ? wxS("Debug pause: current\n")
@@ -1455,6 +1610,8 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 		auto const& value = *view.template_view;
 		add_snapshot_field(context_text, wxS("Event type"), value.event_type);
 		add_snapshot_field(context_text, wxS("Template type"), value.template_type);
+		add_authored_kinds(context_text, value.template_authored_kinds, value.template_authored_kind_count);
+		context_text += wxS("Template type is the primary authored kind; Scope is the actual applied scope.\n");
 		add_snapshot_field(context_text, wxS("Phase"), value.phase);
 		add_snapshot_field(context_text, wxS("Scope"), value.scope);
 		add_snapshot_field(context_text, wxS("Template ID"), value.template_id);
@@ -1517,8 +1674,72 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 		context_text += _("No template context reported for this run.");
 	runtime_context->ChangeValue(context_text);
 	wxString generated_text = wxS("Status: ") + status + wxS("\n\n");
+	generated_text += wxS("Feature: ") + to_wx(view.feature_name) + wxS("\n");
+	generated_text += wxString::Format(wxS("Subtitle document generation: %llu\n"), static_cast<unsigned long long>(state->generation));
+	if (state->workspace_run)
+		generated_text += wxString::Format(wxS("Captured Workspace source revision: %llu\n"), static_cast<unsigned long long>(state->revision));
+	else {
+		generated_text += wxS("Template source revision: not captured (saved Automation source)\n");
+		if (document)
+			generated_text += wxString::Format(wxS("Workspace editor revision at observation %llu; editor revision %llu (%s)\n"),
+											   static_cast<unsigned long long>(state->revision), static_cast<unsigned long long>(document->GetRevision()),
+											   document->GetRevision() == state->revision ? wxS("current") : wxS("unrelated edit"));
+	}
+	wxString generated_ass_state;
+	if (!view.outcome)
+		generated_ass_state = wxS("provisional; not committed");
+	else if (*view.outcome == AutomationInvocationOutcome::Completed)
+		generated_ass_state = wxS("committed by invocation");
+	else
+		generated_ass_state = wxS("rolled back");
+	generated_text += wxS("Generated ASS state: ") + generated_ass_state + wxS("\n");
+	generated_text += wxS("This records the invocation result; later ASS edits or Undo are not tracked here.\n");
+	if (view.outcome && *view.outcome != AutomationInvocationOutcome::Completed)
+		generated_text += wxS("Rolled-back history contains reported generated events only; Stop may precede publication of a provisional append.\n");
+	generated_text += wxString::Format(wxS("Retained generated lines: %llu\nOmitted generated lines: %llu [oldest dropped]\nUnobserved generated indices: %llu\nRetained preview bytes: %llu / %llu\n"),
+									   static_cast<unsigned long long>(view.generated_history.size()),
+									   static_cast<unsigned long long>(view.generated_history_omitted),
+									   static_cast<unsigned long long>(view.generated_history_unobserved),
+									   static_cast<unsigned long long>(view.generated_history_string_bytes),
+									   static_cast<unsigned long long>(generated_history_string_budget));
 	generated_text += _("Text previews are limited to 2048 UTF-8 bytes; longer values are marked [truncated].");
 	generated_text += wxS("\n\n");
+	generated_history->Freeze();
+	generated_history->Clear();
+	displayed_generated_indices.clear();
+	for (auto const& item : view.generated_history) {
+		wxString label;
+		if (item.output.generated_index)
+			label = wxString::Format(wxS("#%d "), *item.output.generated_index);
+		else
+			label = wxS("[index not captured] ");
+		label += to_wx(item.output.scope_kind.value_or("[scope not captured]")) + wxS("  ");
+		label += to_wx(item.output.text.value_or("[text not captured]")).Left(80);
+		generated_history->Append(label);
+		displayed_generated_indices.push_back(*item.output.generated_index);
+	}
+	std::size_t selected = view.generated_history.size();
+	if (!view.generated_history.empty()) {
+		if (!follow_latest_generated && selected_generated_index) {
+			for (std::size_t index = 0; index < view.generated_history.size(); ++index) {
+				if (view.generated_history[index].output.generated_index == selected_generated_index) {
+					selected = index;
+					break;
+				}
+			}
+		}
+		if (selected == view.generated_history.size()) {
+			if (!follow_latest_generated && selected_generated_index) {
+				selected = 0;
+				generated_text += wxS("Previous selection was omitted; showing the oldest retained line.\n");
+			}
+			else
+				selected = view.generated_history.size() - 1;
+		}
+		generated_history->SetSelection(static_cast<int>(selected));
+		selected_generated_index = view.generated_history[selected].output.generated_index;
+	}
+	generated_history->Thaw();
 	if (view.generated_view) {
 		auto const& value = *view.generated_view;
 		add_field(generated_text, wxS("Reported generated count"), value.count);
@@ -1527,12 +1748,51 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 		add_field(generated_text, wxS("Last style"), value.style);
 		add_field(generated_text, wxS("Last start (ms)"), value.start_time);
 		add_field(generated_text, wxS("Last end (ms)"), value.end_time);
-		add_field(generated_text, wxS("Last source line"), value.source_line);
+		add_field(generated_text, wxS("Last input source line"), value.source_line);
 		if (!value.index && !value.text)
 			generated_text += _("No generated line in the latest reported template context.");
 	}
 	else
 		generated_text += view.outcome ? _("No generated line reported for this run.") : _("No generated line reported yet.");
+	if (selected < view.generated_history.size()) {
+		auto const& item = view.generated_history[selected];
+		generated_text += wxS("\nSelected generated line:\n");
+		add_snapshot_field(generated_text, wxS("Output index"), item.output.generated_index);
+		add_snapshot_field(generated_text, wxS("Output text"), item.output.text);
+		add_snapshot_field(generated_text, wxS("Output style"), item.output.style);
+		add_snapshot_field(generated_text, wxS("Output layer"), item.output.layer);
+		add_snapshot_field(generated_text, wxS("Output effect"), item.output.effect);
+		add_snapshot_field(generated_text, wxS("Output start (ms)"), item.output.start_time);
+		add_snapshot_field(generated_text, wxS("Output end (ms)"), item.output.end_time);
+		add_snapshot_field(generated_text, wxS("Input source line index"), item.output.source_line_index);
+		add_snapshot_field(generated_text, wxS("Input snapshot index"), item.input_index);
+		add_snapshot_field(generated_text, wxS("Input text"), item.input_text);
+		add_snapshot_field(generated_text, wxS("Input start (ms)"), item.input_start_time);
+		add_snapshot_field(generated_text, wxS("Input end (ms)"), item.input_end_time);
+		add_snapshot_field(generated_text, wxS("Template debug ID"), item.output.template_debug_id);
+		add_snapshot_field(generated_text, wxS("Template primary authored kind"), item.template_type);
+		add_authored_kinds(generated_text, item.template_authored_kinds, item.template_authored_kind_count);
+		add_snapshot_field(generated_text, wxS("Template source line"), item.template_source_line);
+		add_snapshot_field(generated_text, wxS("Template fragment kind"), item.template_fragment_kind);
+		add_snapshot_field(generated_text, wxS("Template source text"), item.template_source_text);
+		generated_text += wxString::Format(wxS("Template source fragments: %llu total, %llu shown\n"),
+										   static_cast<unsigned long long>(item.source_fragment_count),
+										   static_cast<unsigned long long>(item.source_fragments.size()));
+		for (std::size_t index = 0; index < item.source_fragments.size(); ++index) {
+			auto const& fragment = item.source_fragments[index];
+			generated_text += wxString::Format(wxS("Template source fragment %llu:\n"), static_cast<unsigned long long>(index + 1));
+			add_snapshot_field(generated_text, wxS("  line"), fragment.line);
+			add_snapshot_field(generated_text, wxS("  kind"), fragment.kind);
+			add_snapshot_field(generated_text, wxS("  text"), fragment.text);
+		}
+		if (item.source_fragment_count > item.source_fragments.size())
+			generated_text += wxString::Format(wxS("Template source fragments omitted: %llu [preview limit]\n"),
+											   static_cast<unsigned long long>(item.source_fragment_count - item.source_fragments.size()));
+		add_snapshot_field(generated_text, wxS("Applied scope"), item.output.scope_kind);
+		add_snapshot_field(generated_text, wxS("Syllable index"), item.output.syllable_index);
+		add_snapshot_field(generated_text, wxS("Highlight index"), item.output.highlight_index);
+		add_snapshot_field(generated_text, wxS("Character index"), item.output.char_index);
+	}
 	generated_output->ChangeValue(generated_text);
 }
 

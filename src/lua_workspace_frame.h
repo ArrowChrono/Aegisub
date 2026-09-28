@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 class wxButton;
 class wxCheckBox;
@@ -52,6 +53,10 @@ class LuaWorkspaceFrame : public wxFrame {
 	wxStaticText *diagnostics = nullptr;
 	wxTextCtrl *runtime_context = nullptr;
 	wxTextCtrl *generated_output = nullptr;
+	wxListBox *generated_history = nullptr;
+	std::vector<int> displayed_generated_indices;
+	std::optional<int> selected_generated_index;
+	bool follow_latest_generated = true;
 	wxNotebook *runtime_tabs = nullptr;
 	wxStyledTextCtrl *execution_source = nullptr;
 	wxStaticText *execution_identity = nullptr;
@@ -108,6 +113,7 @@ class LuaWorkspaceFrame : public wxFrame {
 	void CopySource();
 	bool FinishOpen(std::unique_ptr<Automation4::LuaWorkspaceDocument> candidate, Automation4::LuaWorkspaceDocumentResult const& result);
 	void ClearRuntimeObservation();
+	void SyncGeneratedHistorySelection();
 	void RenderRuntimeObservation(std::uint64_t sequence, std::weak_ptr<LuaWorkspaceRuntimeObservation> const& observation);
 	void StartRun(bool debug);
 	void UpdateRunControls();

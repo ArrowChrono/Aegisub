@@ -1,0 +1,18 @@
+{
+  "generated_count": 2,
+  "input_source_line_index": 12,
+  "input_text": "{\\k100}x",
+  "input_start_ms": 1000,
+  "input_end_ms": 2000,
+  "template_source_line": 11,
+  "template_debug_id": 3,
+  "template_source_text": "R!j!",
+  "mutated_live_input_text": "mutated",
+  "mutated_live_input_start_ms": 5000,
+  "mutated_live_input_end_ms": 6000,
+  "output_text_prefix": "R",
+  "output_layer": 2,
+  "output_style": "Default",
+  "output_start_ms": 5000,
+  "output_end_ms": 6000
+}
