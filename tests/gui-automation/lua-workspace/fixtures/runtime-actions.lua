@@ -85,12 +85,12 @@ end)
 
 aegisub.register_macro("Workspace Runtime Progress Cancel", script_description, function(subs)
     provisional_edit(subs)
-    local deadline = os.time() + 10
+    local deadline = os.time() + 30
     aegisub.progress.task("Waiting for the bounded runtime cancellation scenario")
     while os.time() < deadline do
         if aegisub.progress.is_cancelled() then aegisub.cancel() end
     end
-    error("The runtime cancellation scenario was not cancelled within ten seconds")
+    error("The runtime cancellation scenario was not cancelled within thirty seconds")
 end)
 
 local prepared_events

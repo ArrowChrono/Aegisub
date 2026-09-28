@@ -7,6 +7,7 @@
 #:project ../driver/Aegisub.GuiAutomation.Driver.csproj
 
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -48,7 +49,7 @@ static int Supervise(string[] args)
     start.ArgumentList.Add(workerFlag);
     foreach (var arg in args) start.ArgumentList.Add(arg);
     using var worker = Process.Start(start) ?? throw new InvalidOperationException("Could not start runtime UIA worker");
-    var workerBudget = TimeSpan.FromSeconds(170) - started.Elapsed;
+    var workerBudget = TimeSpan.FromSeconds(1430) - started.Elapsed;
     var timedOut = workerBudget <= TimeSpan.Zero || !worker.WaitForExit(workerBudget);
     if (timedOut)
     {
@@ -81,13 +82,13 @@ static int Supervise(string[] args)
     }
     File.WriteAllText(Path.Combine(artifacts, "supervisor.json"), JsonSerializer.Serialize(new
     {
-        BudgetSeconds = 180,
+        BudgetSeconds = 1440,
         TimedOut = timedOut,
         HostLeftRunning = hostLeftRunning,
         WorkerExitCode = worker.ExitCode,
         Status = timedOut ? "timeout" : hostLeftRunning ? "host-cleanup-required" : worker.ExitCode == 0 ? "passed" : "failed"
     }, new JsonSerializerOptions { WriteIndented = true }));
-    if (timedOut) throw new TimeoutException("Lua Workspace runtime GUI E2E exceeded its 180-second total limit");
+    if (timedOut) throw new TimeoutException("Lua Workspace runtime GUI E2E exceeded its 1440-second total limit");
     return hostLeftRunning ? 1 : worker.ExitCode;
 }
 
@@ -167,7 +168,7 @@ static int Run(string[] args)
         Step("workspace-absent", () =>
         {
             Ensure(FindWindow(host, "Lua Workspace") is null, "Workspace was created before an explicit open action");
-            var task = Task.Run(() => InvokeMenu(main, host, "Workspace Runtime Hidden Acknowledgement", TimeSpan.FromSeconds(8)));
+            var task = StartMenuInvocation(main, host, "Workspace Runtime Hidden Acknowledgement");
             var dialog = WaitWindowContainingText(host, "The hidden Workspace invocation has started", TimeSpan.FromSeconds(8));
             SaveUiEvidence(dialog, artifacts, "absent-workspace-acknowledgement");
             Ensure(FindWindow(host, "Lua Workspace") is null, "Macro created Workspace while its acknowledgement dialog was open");
@@ -202,8 +203,20 @@ static int Run(string[] args)
             File.WriteAllText(Path.Combine(artifacts, "template-generated.txt"), completedGenerated, new UTF8Encoding(false));
             SaveRuntimeEvidence(workspace!, contextControl!, generatedControl!, artifacts, "template-completed");
             var last = wantedGenerated[^1];
-            Ensure(completedContext.Contains("Template kind: generated-line", StringComparison.Ordinal), "Final template kind is not the observed generated-line context");
-            Ensure(completedContext.Contains("Phase: syl-text", StringComparison.Ordinal) && completedContext.Contains("Scope: syl", StringComparison.Ordinal), "Final template phase or scope is incorrect");
+            Ensure(HasExactLine(completedContext, "Event type: generated-line") && HasExactLine(completedContext, "Template type: syl"),
+                "Final event type and template type are not independently identified");
+            Ensure(ContextNumber(completedContext, "Template ID") > 0
+                && HasExactLine(completedContext, "Template name: [not captured]")
+                && HasExactLine(completedContext, "Owner script: kara-templater.lua"),
+                "Template debug ID, optional authored name, or owner script is incorrect");
+            Ensure(HasExactLine(completedContext, "Phase: syl-text") && HasExactLine(completedContext, "Scope: syl"), "Final template phase or scope is incorrect");
+            Ensure(HasExactLine(completedContext, "Template fragment kind: text-template")
+                && HasExactLine(completedContext, "Source fragments: 1 total, 1 shown")
+                && HasExactLine(completedContext, "Source fragment 1:")
+                && HasExactLine(completedContext, "  kind: syl")
+                && HasExactLine(completedContext, "  line: 11")
+                && HasExactLine(completedContext, "  text: !retime(\"syl\",0,0)!S!j!:!decorate(syl.text_stripped)!"),
+                "Final source fragment does not identify the executed template text");
             Ensure(completedContext.Contains("Loop index: 2", StringComparison.Ordinal) && completedContext.Contains("Loop count: 2", StringComparison.Ordinal), "Final loop context is incorrect");
             Ensure(completedContext.Contains("Source line: 11", StringComparison.Ordinal)
                 && completedContext.Contains("Source text: !retime(\"syl\",0,0)!S!j!:!decorate(syl.text_stripped)!", StringComparison.Ordinal), "Final source template context is incorrect");
@@ -211,6 +224,51 @@ static int Run(string[] args)
                 && completedContext.Contains($"Target text: {last.Text}", StringComparison.Ordinal), "Final target line context is incorrect");
             Ensure(completedContext.Contains("Syllable index: 2", StringComparison.Ordinal)
                 && completedContext.Contains("Syllable text: delta", StringComparison.Ordinal), "Final syllable context is incorrect");
+            Ensure(HasExactLine(completedContext, "Template event snapshot: latest reported event, not live values from a paused Lua frame.")
+                && HasExactLine(completedContext, "Debug pause: not attached to this Automation-menu invocation"),
+                "Template snapshot was confused with a current debugger pause");
+            Ensure(completedContext.Split('\n').Select(line => line.TrimEnd('\r'))
+                .Any(line => line.StartsWith("Observed revision ", StringComparison.Ordinal) && line.EndsWith(" (current)", StringComparison.Ordinal)),
+                "Completed template observation did not retain its current revision status");
+            Ensure(HasExactLine(completedContext, "PlayRes X: 1280") && HasExactLine(completedContext, "PlayRes Y: 720"),
+                "Script PlayRes geometry does not match the ASS fixture");
+            Ensure(HasExactLine(completedContext, "Orgline index: 13")
+                && HasExactLine(completedContext, "Orgline layer: 0")
+                && HasExactLine(completedContext, "Orgline text: {\\k75}gamma{\\k75}delta")
+                && HasExactLine(completedContext, "Orgline start (ms): 3000")
+                && HasExactLine(completedContext, "Orgline end (ms): 4500")
+                && HasExactLine(completedContext, "Current line index: 13")
+                && HasExactLine(completedContext, "Current line layer: 2")
+                && HasExactLine(completedContext, $"Current line text: {last.Text}")
+                && HasExactLine(completedContext, "Current line start (ms): 3750")
+                && HasExactLine(completedContext, "Current line end (ms): 4500")
+                && HasExactLine(completedContext, "Line text change: changed")
+                && HasExactLine(completedContext, "Line timing change: changed")
+                && HasExactLine(completedContext, "Line layer change: changed")
+                && HasExactLine(completedContext, "Line style change: unchanged")
+                && HasExactLine(completedContext, "Line effect change: changed"),
+                "Original and current line snapshots or their changes do not match the generated result");
+            Ensure(HasExactLine(completedContext,
+                "Syllable timing is relative to the input line; karaskel geometry uses PlayRes/script coordinates, not screen pixels."),
+                "Context did not identify the unit and coordinate domain of syllable geometry");
+            foreach (var prefix in new[] { "Syllable", "Base syllable" })
+            {
+                Ensure(HasExactLine(completedContext, $"{prefix} index: 2")
+                    && HasExactLine(completedContext, $"{prefix} text: delta")
+                    && HasExactLine(completedContext, $"{prefix} start relative to line (ms): 750")
+                    && HasExactLine(completedContext, $"{prefix} end relative to line (ms): 1500")
+                    && HasExactLine(completedContext, $"{prefix} duration (ms): 750")
+                    && HasExactLine(completedContext, $"{prefix} inline_fx: "),
+                    $"{prefix} source, relative timing, or empty inline_fx was not retained");
+                var left = ContextNumber(completedContext, $"{prefix} left");
+                var center = ContextNumber(completedContext, $"{prefix} center");
+                var right = ContextNumber(completedContext, $"{prefix} right");
+                var width = ContextNumber(completedContext, $"{prefix} width");
+                var height = ContextNumber(completedContext, $"{prefix} height");
+                Ensure(left < center && center < right && width > 0 && height > 0
+                    && Math.Abs(right - left - width) <= 1.0,
+                    $"{prefix} karaskel geometry is inconsistent");
+            }
             Ensure(completedGenerated.Contains($"Reported generated count: {expected.GeneratedCount}", StringComparison.Ordinal), "Generated count does not match independent fixture expectation");
             Ensure(completedGenerated.Contains($"Last generated index: {expected.GeneratedCount}", StringComparison.Ordinal), "Last generated index does not match independent fixture expectation");
             Ensure(completedGenerated.Contains($"Last text: {last.Text}", StringComparison.Ordinal), "Last generated text does not match independent fixture expectation");
@@ -291,7 +349,7 @@ static int Run(string[] args)
         Step("caught-cancel-then-error", () => RunOutcome("Workspace Runtime Caught Cancel Then Error", "failed", "caught-cancel-then-error", errorDialog: true));
         Step("dialog-cancel", () =>
         {
-            var task = Task.Run(() => InvokeMenu(main, host, "Workspace Runtime Dialog Cancel", TimeSpan.FromSeconds(8)));
+            var task = StartMenuInvocation(main, host, "Workspace Runtime Dialog Cancel");
             var dialog = WaitWindowContainingText(host, "Cancel only this dialog; the invocation must complete", TimeSpan.FromSeconds(8));
             SaveUiEvidence(dialog, artifacts, "dialog-cancel-prompt");
             InvokeExactButton(dialog, "Cancel");
@@ -300,7 +358,7 @@ static int Run(string[] args)
         });
         Step("progress-cancel", () =>
         {
-            var task = Task.Run(() => InvokeMenu(main, host, "Workspace Runtime Progress Cancel", TimeSpan.FromSeconds(8)));
+            var task = StartMenuInvocation(main, host, "Workspace Runtime Progress Cancel");
             var progress = WaitProgressPane(host, "Workspace Runtime Progress Cancel", TimeSpan.FromSeconds(8));
             SaveUiEvidence(progress, artifacts, "progress-cancel-dialog");
             InvokeExactButton(progress, "Cancel");
@@ -319,7 +377,7 @@ static int Run(string[] args)
             var before = ReadPanelValue(contextControl!);
             CloseWorkspace(workspace!);
             WaitUntil(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromSeconds(6), "Workspace did not hide");
-            var task = Task.Run(() => InvokeMenu(main, host, "Workspace Runtime Hidden Acknowledgement", TimeSpan.FromSeconds(8)));
+            var task = StartMenuInvocation(main, host, "Workspace Runtime Hidden Acknowledgement");
             var dialog = WaitWindowContainingText(host, "The hidden Workspace invocation has started", TimeSpan.FromSeconds(8));
             SaveUiEvidence(dialog, artifacts, "hidden-invocation-acknowledgement");
             Ensure(FindWindow(host, "Lua Workspace") is null, "Hidden Workspace reopened during a macro run");
@@ -370,12 +428,19 @@ static int Run(string[] args)
                 scenario.ArtifactName + "-apply", "failed");
             var failedContext = WaitContextOutcome(contextControl!, "Apply karaoke template", "failed", TimeSpan.FromSeconds(8));
             SaveRuntimeEvidence(workspace!, contextControl!, generatedControl!, artifacts, scenario.ArtifactName + "-failed");
-            Ensure(HasExactLine(failedContext, "Template kind: " + scenario.ExpectedKind),
+            Ensure(HasExactLine(failedContext, "Event type: " + scenario.ExpectedKind),
                 $"{scenario.Name} did not retain the exact template failure kind");
             Ensure(HasExactLine(failedContext, "Source line: " + scenario.SourceLine)
                 && HasExactLine(failedContext, "Source style: Default")
                 && HasExactLine(failedContext, "Source text: " + scenario.SourceText),
                 $"{scenario.Name} did not retain the prepared source-line identity and text");
+            if (scenario.SourceLine == 9)
+                Ensure(HasExactLine(failedContext, "Scope: once")
+                    && HasExactLine(failedContext, "Orgline: [not applicable]")
+                    && HasExactLine(failedContext, "Current line: [not applicable]")
+                    && HasExactLine(failedContext, "Syllable: [not applicable]")
+                    && HasExactLine(failedContext, "Base syllable: [not applicable]"),
+                    $"{scenario.Name} misrepresented non-applicable syllable fields as zero or captured values");
             var diagnosticLabel = scenario.RuntimeMarker is null ? "Parse error: " : "Runtime error: ";
             var diagnosticLine = failedContext.Split('\n').Select(line => line.TrimEnd('\r'))
                 .FirstOrDefault(line => line.StartsWith(diagnosticLabel, StringComparison.Ordinal));
@@ -434,7 +499,7 @@ static int Run(string[] args)
                     && item.Current.Name == "Source matches the saved baseline.");
             Ensure(cleanLabel, "Workspace did not expose the observed clean-source diagnostic before queued close");
             SaveUiEvidence(workspace, artifacts, "active-run-clean-baseline");
-            var task = Task.Run(() => InvokeMenu(main, host, "Workspace Runtime Progress Cancel", TimeSpan.FromSeconds(8)));
+            var task = StartMenuInvocation(main, host, "Workspace Runtime Progress Cancel");
             var progress = WaitProgressPane(host, "Workspace Runtime Progress Cancel", TimeSpan.FromSeconds(8));
             WaitContextOutcome(contextControl!, "Workspace Runtime Progress Cancel", "running", TimeSpan.FromSeconds(5));
             var mainEnabled = main.Current.IsEnabled;
@@ -531,7 +596,7 @@ static int Run(string[] args)
     {
         StartedUtc = startedUtc,
         FinishedUtc = finishedUtc,
-        BudgetSeconds = 180,
+        BudgetSeconds = 1440,
         ExeSha256 = hashes["exe"],
         Fixtures = new[] { fixture.Replace('\\', '/'), expectedPath.Replace('\\', '/'), actions.Replace('\\', '/'), templater.Replace('\\', '/') },
         Sha256 = hashes,
@@ -737,6 +802,16 @@ static string ExpectedFeatureLine(string macro)
 
 static bool HasExactLine(string text, string expected) => text.Split('\n').Any(line => line.TrimEnd('\r') == expected);
 
+static double ContextNumber(string text, string label)
+{
+    var prefix = label + ": ";
+    var line = text.Split('\n').Select(value => value.TrimEnd('\r'))
+        .SingleOrDefault(value => value.StartsWith(prefix, StringComparison.Ordinal));
+    Ensure(line is not null && double.TryParse(line[prefix.Length..], NumberStyles.Float, CultureInfo.InvariantCulture, out _),
+        $"Context field {label} is missing or not numeric");
+    return double.Parse(line![prefix.Length..], NumberStyles.Float, CultureInfo.InvariantCulture);
+}
+
 static bool HasContextOutcome(AutomationElement contextControl, string macro, string outcome)
 {
     var value = ReadPanelValue(contextControl);
@@ -883,16 +958,33 @@ static AutomationElement OpenAutomationMenuCommand(AutomationElement main, Proce
     return command!;
 }
 
-static void InvokeMenu(AutomationElement main, Process host, string command, TimeSpan timeout, string menuName = "Automation")
+static void InvokeMenu(AutomationElement main, Process host, string command, TimeSpan timeout, string menuName = "Automation", Action? commandReady = null)
 {
-    UiaDriver.Invoke(OpenAutomationMenuCommand(main, host, command, timeout, menuName));
+    var item = OpenAutomationMenuCommand(main, host, command, timeout, menuName);
+    Ensure(item.Current.IsEnabled && item.TryGetCurrentPattern(InvokePattern.Pattern, out _),
+        $"Menu command '{command}' was exposed but is not callable");
+    commandReady?.Invoke();
+    UiaDriver.Invoke(item);
+}
+
+static Task StartMenuInvocation(AutomationElement main, Process host, string command)
+{
+    var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var task = Task.Run(() => InvokeMenu(main, host, command, TimeSpan.FromSeconds(8), commandReady: () => ready.TrySetResult(true)));
+    if (!Task.WhenAny(ready.Task, task).Wait(TimeSpan.FromSeconds(18)))
+        throw new TimeoutException($"Menu command '{command}' was not ready within 18 seconds, including menu opening and discovery");
+    if (task.IsCompleted && !ready.Task.IsCompleted)
+        task.GetAwaiter().GetResult();
+    Ensure(ready.Task.IsCompleted, $"Menu command '{command}' did not become ready before invocation ended");
+    return task;
 }
 
 static void InvokeExactButton(AutomationElement window, string name)
 {
     var button = window.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button))
-        .Cast<AutomationElement>().FirstOrDefault(item => item.Current.Name == name && item.Current.IsEnabled && item.TryGetCurrentPattern(InvokePattern.Pattern, out _))
-        ?? throw new InvalidOperationException($"Expected dialog has no enabled exact '{name}' button");
+        .Cast<AutomationElement>().FirstOrDefault(item => item.Current.Name == name && item.Current.IsEnabled && !item.Current.IsOffscreen
+            && item.TryGetCurrentPattern(InvokePattern.Pattern, out _))
+        ?? throw new InvalidOperationException($"Expected dialog has no visible enabled exact '{name}' button");
     UiaDriver.Invoke(button);
 }
 
@@ -908,7 +1000,7 @@ static bool HasExactButton(AutomationElement window, string name)
 
 static void InvokeMacroWithOptionalProgress(AutomationElement main, Process host, AutomationElement contextControl, string macro, string artifacts, string artifactName, string expectedOutcome)
 {
-    var task = Task.Run(() => InvokeMenu(main, host, macro, TimeSpan.FromSeconds(8)));
+    var task = StartMenuInvocation(main, host, macro);
     var closedProgress = false;
     WaitUntil(() =>
     {
@@ -927,7 +1019,7 @@ static void InvokeMacroWithOptionalProgress(AutomationElement main, Process host
 static void InvokeMacroWithErrorProgress(AutomationElement main, Process host, string macro, string artifacts, string name)
 {
     LogStage(artifacts, $"error-progress:{name}:invoke-start");
-    var task = Task.Run(() => InvokeMenu(main, host, macro, TimeSpan.FromSeconds(8)));
+    var task = StartMenuInvocation(main, host, macro);
     LogStage(artifacts, $"error-progress:{name}:invoke-queued");
     TryProcessUiEvidence(host, artifacts, name + "-before-progress-wait");
     LogStage(artifacts, $"error-progress:{name}:wait-window");

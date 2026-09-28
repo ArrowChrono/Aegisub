@@ -59,6 +59,7 @@ using namespace Automation4;
 namespace {
 constexpr int diagnostic_indicator = 8;
 constexpr std::size_t runtime_text_limit = 2048;
+constexpr std::size_t runtime_fragment_limit = 16;
 constexpr std::string_view truncated_marker = "[truncated]";
 constexpr std::string_view karaoke_templater_execution_id = "aegisub.kara-templater.apply";
 constexpr char source_width_option[] = "Automation/Lua Workspace/Layout/Source Width Percent";
@@ -83,8 +84,21 @@ std::optional<std::string> bounded(std::optional<std::string> const& value) {
 	return value ? std::optional<std::string>(bounded(*value)) : std::nullopt;
 }
 
-struct RuntimeTemplateView {
+struct RuntimeSourceFragmentView {
+	std::optional<int> line;
 	std::optional<std::string> kind;
+	std::optional<std::string> text;
+};
+
+struct RuntimeTemplateView {
+	std::optional<std::string> event_type;
+	std::optional<std::string> template_type;
+	std::optional<int> template_id;
+	std::optional<std::string> template_name;
+	std::optional<std::string> owner_script;
+	std::optional<std::string> fragment_kind;
+	std::vector<RuntimeSourceFragmentView> source_fragments;
+	std::optional<std::size_t> source_fragment_count;
 	std::optional<std::string> phase;
 	std::optional<std::string> scope;
 	std::optional<int> source_line;
@@ -93,6 +107,10 @@ struct RuntimeTemplateView {
 	std::optional<int> target_line;
 	std::optional<std::string> target_style;
 	std::optional<std::string> target_text;
+	std::optional<AutomationTemplateLineSnapshot> original_line;
+	std::optional<AutomationTemplateLineSnapshot> current_line;
+	std::optional<AutomationTemplateSyllableSnapshot> syllable;
+	std::optional<AutomationTemplateSyllableSnapshot> base_syllable;
 	std::optional<int> syllable_index;
 	std::optional<std::string> syllable_text;
 	std::optional<int> loop_index;
@@ -128,7 +146,7 @@ struct RuntimeView {
 
 RuntimeTemplateView project_template(AutomationTemplateDebugState const& source) {
 	RuntimeTemplateView result;
-	result.kind = bounded(source.kind);
+	result.event_type = bounded(source.kind);
 	result.phase = bounded(source.phase);
 	result.scope = bounded(source.scope_kind);
 	result.loop_index = source.loop_index;
@@ -138,14 +156,29 @@ RuntimeTemplateView project_template(AutomationTemplateDebugState const& source)
 	result.char_text = bounded(source.char_text);
 	result.parse_error = bounded(source.parse_error);
 	result.runtime_error = bounded(source.runtime_error);
-	if (source.identity)
+	if (source.identity) {
+		result.template_type = bounded(source.identity->template_kind);
+		result.template_id = source.identity->template_debug_id;
+		result.template_name = bounded(source.identity->template_id);
+		result.owner_script = bounded(source.identity->owner_script);
+		result.fragment_kind = bounded(source.identity->fragment_kind);
 		result.source_line = source.identity->source_line_index;
+	}
 	if (source.source) {
 		result.source_style = bounded(source.source->style);
 		result.source_text = bounded(source.source->text);
+		result.source_fragment_count = source.source->fragments.size();
+		for (std::size_t index = 0; index < std::min(*result.source_fragment_count, runtime_fragment_limit); ++index) {
+			auto const& fragment = source.source->fragments[index];
+			result.source_fragments.push_back({.line = fragment.source_line_index, .kind = bounded(fragment.fragment_kind), .text = bounded(fragment.text)});
+		}
 	}
 	if (source.target) {
 		auto const& target = *source.target;
+		result.original_line = target.original_line;
+		result.current_line = target.line;
+		result.syllable = target.syllable;
+		result.base_syllable = target.base_syllable;
 		if (target.line) {
 			result.target_line = target.line->index;
 			result.target_style = bounded(target.line->style);
@@ -156,11 +189,31 @@ RuntimeTemplateView project_template(AutomationTemplateDebugState const& source)
 			result.syllable_text = bounded(target.syllable->text);
 		}
 	}
+	auto bound_line = [](std::optional<AutomationTemplateLineSnapshot>& line) {
+		if (!line)
+			return;
+		line->line_class = bounded(line->line_class);
+		line->style = bounded(line->style);
+		line->actor = bounded(line->actor);
+		line->effect = bounded(line->effect);
+		line->text = bounded(line->text);
+	};
+	auto bound_syllable = [](std::optional<AutomationTemplateSyllableSnapshot>& syllable) {
+		if (!syllable)
+			return;
+		syllable->text = bounded(syllable->text);
+		syllable->text_stripped = bounded(syllable->text_stripped);
+		syllable->inline_fx = bounded(syllable->inline_fx);
+	};
+	bound_line(result.original_line);
+	bound_line(result.current_line);
+	bound_syllable(result.syllable);
+	bound_syllable(result.base_syllable);
 	return result;
 }
 
 bool has_template_detail(RuntimeTemplateView const& value) {
-	return value.kind || value.phase || value.scope || value.source_line || value.source_style || value.source_text || value.target_line || value.target_style || value.target_text || value.syllable_index || value.syllable_text || value.loop_index || value.loop_count || value.highlight_index || value.char_index || value.char_text || value.parse_error || value.runtime_error;
+	return value.event_type || value.phase || value.scope || value.source_line || value.source_style || value.source_text || value.target_line || value.target_style || value.target_text || value.syllable_index || value.syllable_text || value.loop_index || value.loop_count || value.highlight_index || value.char_index || value.char_text || value.parse_error || value.runtime_error;
 }
 
 RuntimeGeneratedView project_generated(AutomationGeneratedLinesSnapshot const& source) {
@@ -185,6 +238,61 @@ void add_field(wxString& output, wxString const& label, std::optional<std::strin
 void add_field(wxString& output, wxString const& label, std::optional<int> const& value) {
 	if (value)
 		output += label + wxS(": ") + wxString::Format(wxS("%d"), *value) + wxS("\n");
+}
+
+void add_snapshot_field(wxString& output, wxString const& label, std::optional<std::string> const& value) {
+	output += label + wxS(": ");
+	output += value ? to_wx(*value) : wxString(wxS("[not captured]"));
+	output += wxS("\n");
+}
+
+void add_snapshot_field(wxString& output, wxString const& label, std::optional<int> const& value) {
+	output += label + wxS(": ");
+	output += value ? wxString::Format(wxS("%d"), *value) : wxString(wxS("[not captured]"));
+	output += wxS("\n");
+}
+
+void add_snapshot_field(wxString& output, wxString const& label, std::optional<double> const& value) {
+	output += label + wxS(": ");
+	output += value ? wxString::Format(wxS("%.2f"), *value) : wxString(wxS("[not captured]"));
+	output += wxS("\n");
+}
+
+void add_line_snapshot(wxString& output, wxString const& prefix, std::optional<AutomationTemplateLineSnapshot> const& line, bool applicable) {
+	if (!line) {
+		output += prefix + (applicable ? wxS(": [not captured]\n") : wxS(": [not applicable]\n"));
+		return;
+	}
+	add_snapshot_field(output, prefix + wxS(" index"), line->index);
+	add_snapshot_field(output, prefix + wxS(" layer"), line->layer);
+	add_snapshot_field(output, prefix + wxS(" style"), line->style);
+	add_snapshot_field(output, prefix + wxS(" text"), line->text);
+	add_snapshot_field(output, prefix + wxS(" effect"), line->effect);
+	add_snapshot_field(output, prefix + wxS(" start (ms)"), line->start_time);
+	add_snapshot_field(output, prefix + wxS(" end (ms)"), line->end_time);
+}
+
+void add_syllable_snapshot(wxString& output, wxString const& prefix, std::optional<AutomationTemplateSyllableSnapshot> const& syllable, bool applicable) {
+	if (!syllable) {
+		output += prefix + (applicable ? wxS(": [not captured]\n") : wxS(": [not applicable]\n"));
+		return;
+	}
+	add_snapshot_field(output, prefix + wxS(" index"), syllable->index);
+	add_snapshot_field(output, prefix + wxS(" text"), syllable->text);
+	add_snapshot_field(output, prefix + wxS(" start relative to line (ms)"), syllable->start_time);
+	add_snapshot_field(output, prefix + wxS(" end relative to line (ms)"), syllable->end_time);
+	add_snapshot_field(output, prefix + wxS(" duration (ms)"), syllable->duration);
+	add_snapshot_field(output, prefix + wxS(" inline_fx"), syllable->inline_fx);
+	add_snapshot_field(output, prefix + wxS(" left"), syllable->left);
+	add_snapshot_field(output, prefix + wxS(" center"), syllable->center);
+	add_snapshot_field(output, prefix + wxS(" right"), syllable->right);
+	add_snapshot_field(output, prefix + wxS(" width"), syllable->width);
+	add_snapshot_field(output, prefix + wxS(" height"), syllable->height);
+}
+
+template <typename T>
+void add_change_field(wxString& output, wxString const& label, std::optional<T> const& original, std::optional<T> const& current) {
+	output += label + wxS(": ") + (original && current ? (*original == *current ? wxS("unchanged") : wxS("changed")) : wxS("[not captured]")) + wxS("\n");
 }
 
 wxString run_status(std::optional<AutomationInvocationOutcome> outcome) {
@@ -749,6 +857,8 @@ void LuaWorkspaceFrame::PollDebugState() {
 	if (state.version == last_debug_version)
 		return;
 	last_debug_version = state.version;
+	if (active_observation && active_observation->workspace_run)
+		RenderRuntimeObservation(invocation_sequence, active_observation);
 	if (state.current_pause) {
 		bool first_pause = !last_debug_snapshot;
 		last_debug_snapshot = state;
@@ -1044,6 +1154,8 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 			context->lua_workspace_invocation_active = false;
 			active_run_request.reset();
 			active_session.reset();
+			if (active_observation && active_observation->workspace_run)
+				RenderRuntimeObservation(invocation_sequence, active_observation);
 			UpdatePausedEditorMarker({});
 			if (last_debug_snapshot && !stack_frames->IsEmpty()) {
 				execution_source->MarkerDeleteAll(2);
@@ -1312,10 +1424,20 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 	}
 	wxString status = ::run_status(view.outcome);
 	wxString context_text = wxS("Invocation: macro_run\nStatus: ") + status + wxS("\n");
-	context_text += wxS("Feature: ") + to_wx(view.feature_name) + wxS("\n\n");
-	if (document && document->GetRevision() != state->revision)
-		context_text += wxString::Format(wxS("Observed revision %llu; editor revision %llu (stale)\n\n"),
-										 static_cast<unsigned long long>(state->revision), static_cast<unsigned long long>(document->GetRevision()));
+	context_text += wxS("Feature: ") + to_wx(view.feature_name) + wxS("\n");
+	if (document)
+		context_text += wxString::Format(wxS("Observed revision %llu; editor revision %llu (%s)\n"),
+										 static_cast<unsigned long long>(state->revision), static_cast<unsigned long long>(document->GetRevision()),
+										 document->GetRevision() == state->revision ? wxS("current") : wxS("stale"));
+	if (state->workspace_run) {
+		auto debug_state = active_session ? active_session->GetStateSnapshot() : AutomationDebugStateSnapshot{};
+		context_text += debug_state.current_pause                                   ? wxS("Debug pause: current\n")
+						: last_debug_snapshot && last_debug_snapshot->current_pause ? wxS("Debug pause: last pause, not current\n")
+																					: wxS("Debug pause: none\n");
+	}
+	else
+		context_text += wxS("Debug pause: not attached to this Automation-menu invocation\n");
+	context_text += wxS("Template event snapshot: latest reported event, not live values from a paused Lua frame.\n\n");
 	if (state->workspace_run)
 		context_text += _("Workspace Run/Debug used the captured source revision; later editor edits affect only the next invocation.");
 	else
@@ -1331,17 +1453,58 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 	context_text += wxS("\n");
 	if (view.template_view) {
 		auto const& value = *view.template_view;
-		add_field(context_text, wxS("Template kind"), value.kind);
-		add_field(context_text, wxS("Phase"), value.phase);
-		add_field(context_text, wxS("Scope"), value.scope);
-		add_field(context_text, wxS("Source line"), value.source_line);
-		add_field(context_text, wxS("Source style"), value.source_style);
-		add_field(context_text, wxS("Source text"), value.source_text);
+		add_snapshot_field(context_text, wxS("Event type"), value.event_type);
+		add_snapshot_field(context_text, wxS("Template type"), value.template_type);
+		add_snapshot_field(context_text, wxS("Phase"), value.phase);
+		add_snapshot_field(context_text, wxS("Scope"), value.scope);
+		add_snapshot_field(context_text, wxS("Template ID"), value.template_id);
+		add_snapshot_field(context_text, wxS("Template name"), value.template_name);
+		add_snapshot_field(context_text, wxS("Owner script"), value.owner_script);
+		add_snapshot_field(context_text, wxS("Template fragment kind"), value.fragment_kind);
+		add_snapshot_field(context_text, wxS("Source line"), value.source_line);
+		add_snapshot_field(context_text, wxS("Source style"), value.source_style);
+		add_snapshot_field(context_text, wxS("Source text"), value.source_text);
+		if (value.source_fragment_count)
+			context_text += wxString::Format(wxS("Source fragments: %llu total, %llu shown\n"),
+											 static_cast<unsigned long long>(*value.source_fragment_count), static_cast<unsigned long long>(value.source_fragments.size()));
+		else
+			context_text += wxS("Source fragments: [not captured]\n");
+		for (std::size_t index = 0; index < value.source_fragments.size(); ++index) {
+			auto const& fragment = value.source_fragments[index];
+			context_text += wxString::Format(wxS("Source fragment %llu:\n"), static_cast<unsigned long long>(index + 1));
+			add_snapshot_field(context_text, wxS("  line"), fragment.line);
+			add_snapshot_field(context_text, wxS("  kind"), fragment.kind);
+			add_snapshot_field(context_text, wxS("  text"), fragment.text);
+		}
+		if (value.source_fragment_count && *value.source_fragment_count > value.source_fragments.size())
+			context_text += wxString::Format(wxS("Source fragments omitted: %llu [preview limit]\n"),
+											 static_cast<unsigned long long>(*value.source_fragment_count - value.source_fragments.size()));
 		add_field(context_text, wxS("Target line"), value.target_line);
 		add_field(context_text, wxS("Target style"), value.target_style);
 		add_field(context_text, wxS("Target text"), value.target_text);
 		add_field(context_text, wxS("Syllable index"), value.syllable_index);
 		add_field(context_text, wxS("Syllable text"), value.syllable_text);
+		context_text += wxS("\nInput subtitle (orgline) and current template line:\n");
+		bool line_scope = value.scope != std::optional<std::string>("once");
+		add_line_snapshot(context_text, wxS("Orgline"), value.original_line, line_scope);
+		add_line_snapshot(context_text, wxS("Current line"), value.current_line, line_scope);
+		if (value.original_line && value.current_line) {
+			auto const& original = *value.original_line;
+			auto const& current = *value.current_line;
+			add_change_field(context_text, wxS("Line text change"), original.text, current.text);
+			add_change_field(context_text, wxS("Line layer change"), original.layer, current.layer);
+			add_change_field(context_text, wxS("Line style change"), original.style, current.style);
+			add_change_field(context_text, wxS("Line effect change"), original.effect, current.effect);
+			context_text += wxS("Line timing change: ");
+			context_text += original.start_time && original.end_time && current.start_time && current.end_time
+								? (*original.start_time == *current.start_time && *original.end_time == *current.end_time ? wxS("unchanged") : wxS("changed"))
+								: wxS("[not captured]");
+			context_text += wxS("\n");
+		}
+		context_text += wxS("Syllable timing is relative to the input line; karaskel geometry uses PlayRes/script coordinates, not screen pixels.\n");
+		bool syllable_scope = value.scope && *value.scope != "line" && *value.scope != "once";
+		add_syllable_snapshot(context_text, wxS("Syllable"), value.syllable, syllable_scope);
+		add_syllable_snapshot(context_text, wxS("Base syllable"), value.base_syllable, syllable_scope);
 		add_field(context_text, wxS("Loop index"), value.loop_index);
 		add_field(context_text, wxS("Loop count"), value.loop_count);
 		add_field(context_text, wxS("Highlight index"), value.highlight_index);

@@ -330,6 +330,13 @@ static int Run(string[] args)
             SaveEvidence(workspace!, artifacts, "debug-breakpoint-paused");
             File.WriteAllText(Path.Combine(artifacts, "debug-paused-status.txt"), ReadRunStatus(workspace!));
             AssertLivePauseControls(main, workspace!);
+            string pausedContext = "";
+            WaitUntil(() => (pausedContext = ReadRuntimeContext(workspace!, host)).Contains("Debug pause: current", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5), "Context did not identify the current paused frame separately from the template event snapshot");
+            Ensure(pausedContext.Contains("Template event snapshot: latest reported event, not live values from a paused Lua frame.", StringComparison.Ordinal),
+                "Context presented the latest template event as live paused-frame values");
+            File.WriteAllText(Path.Combine(artifacts, "debug-current-context.txt"), pausedContext, new UTF8Encoding(false));
+            SaveEvidence(workspace!, artifacts, "debug-current-context");
             DebugInvocation.Set(debugTask);
         });
         Step("stale-source", () =>
@@ -388,6 +395,11 @@ static int Run(string[] args)
             Ensure(DebugInvocation.Wait(TimeSpan.FromSeconds(20)), "Stopped debug command did not return");
             WaitUntil(() => ReadRunStatus(workspace!).Contains("cancelled", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(8),
                 "Stop did not reach a cancelled terminal state");
+            string lastPauseContext = "";
+            WaitUntil(() => (lastPauseContext = ReadRuntimeContext(workspace!, host)).Contains("Debug pause: last pause, not current", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5), "Context did not distinguish the retained last pause from a current paused frame");
+            File.WriteAllText(Path.Combine(artifacts, "debug-last-pause-context.txt"), lastPauseContext, new UTF8Encoding(false));
+            SaveEvidence(workspace!, artifacts, "debug-last-pause-context");
             Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Stopped debug invocation modified the physical ASS baseline");
             Native.Undo(editor!, host);
             Ensure(Normalize(CopySource(workspace!, host)) == edited, "One Workspace-local Undo did not restore the invocation source after stale edit");
@@ -2246,6 +2258,17 @@ static AutomationElement? FindWorkspaceStaticText(AutomationElement workspace, F
     var controls = Native.ChildTextControls(workspace, host, "Static", matches, allowHidden);
     Ensure(controls.Count <= 1, $"More than one Workspace Static matched the requested text ({controls.Count})");
     return controls.Count == 1 ? controls[0].Element : null;
+}
+
+static string ReadRuntimeContext(AutomationElement workspace, Process host)
+{
+    SelectTab(workspace, "Context");
+    var edits = workspace.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>()
+        .Where(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen
+            && item.Current.ClassName == "Edit" && item.Current.ControlType == ControlType.Document
+            && item.Current.NativeWindowHandle != 0 && HasNotebookAncestor(item, workspace)).ToArray();
+    Ensure(edits.Length == 1, $"Context tab exposes {edits.Length} visible native Edit controls");
+    return Native.ReadEditText(edits[0], host);
 }
 
 static string ReadRunStatus(AutomationElement workspace, bool allowHidden = false)
