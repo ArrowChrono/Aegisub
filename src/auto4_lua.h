@@ -32,6 +32,7 @@
 
 #include <deque>
 #include <memory>
+#include <string_view>
 #include <vector>
 #include <wx/string.h>
 
@@ -41,6 +42,8 @@ class wxWindow;
 struct lua_State;
 
 namespace Automation4 {
+	std::string_view GetLuaMacroExecutionId(cmd::Command const *command);
+
 	class AutomationMutationJournal;
 
 	struct LuaDialogControlCreateTrace {

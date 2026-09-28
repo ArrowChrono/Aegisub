@@ -592,6 +592,7 @@ namespace {
 	class LuaScript;
 	class LuaCommand final : public cmd::Command, private LuaFeature {
 		std::string cmd_name;
+		std::string execution_id;
 		wxString display;
 		wxString help;
 		int cmd_type;
@@ -602,6 +603,7 @@ namespace {
 		~LuaCommand();
 
 		const char* name() const override { return cmd_name.c_str(); }
+		[[nodiscard]] std::string_view ExecutionId() const { return execution_id; }
 		wxString StrMenu(const agi::Context *) const override { return display; }
 		wxString StrDisplay(const agi::Context *) const override { return display; }
 		wxString StrHelp() const override { return help; }
@@ -1345,6 +1347,11 @@ namespace {
 
 	LuaCommand::LuaCommand(lua_State *L)
 		: LuaFeature(L), display(check_wxstring(L, 1)), help(get_wxstring(L, 2)), cmd_type(cmd::COMMAND_NORMAL), owner(LuaScript::GetScriptObject(L)) {
+		if (!lua_isnoneornil(L, 6)) {
+			if (lua_type(L, 6) != LUA_TSTRING)
+				error(L, "The macro execution identifier must be a string");
+			execution_id = check_string(L, 6);
+		}
 		lua_getfield(L, LUA_REGISTRYINDEX, "filename");
 		cmd_name = agi::format("automation/lua/%s/%s", check_string(L, -1), check_string(L, 1));
 
@@ -1835,6 +1842,12 @@ namespace {
 }
 
 namespace Automation4 {
+	std::string_view GetLuaMacroExecutionId(cmd::Command const *command)
+	{
+		auto const *lua_command = dynamic_cast<LuaCommand const *>(command);
+		return lua_command ? lua_command->ExecutionId() : std::string_view{};
+	}
+
 	std::unique_ptr<AutomationScriptInstance> CreateLuaAutomationScriptInstance(agi::fs::path const& filename)
 	{
 		if (agi::fs::HasExtension(filename, "lua") || agi::fs::HasExtension(filename, "moon"))

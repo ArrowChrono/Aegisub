@@ -84,7 +84,7 @@ constexpr auto automation_api_types = R"lua(---@alias AegisubSubtitleRecord Aegi
 ---@alias AegisubMacroIsActive fun(subs: AegisubSubtitles, selected: integer[], active: integer): boolean
 ---@class AegisubApi
 ---@field lua_automation_version integer
----@field register_macro fun(name: string, description: string, run: AegisubMacroRun, validate?: AegisubMacroValidate, isactive?: AegisubMacroIsActive)
+---@field register_macro fun(name: string, description: string, run: AegisubMacroRun, validate?: AegisubMacroValidate, isactive?: AegisubMacroIsActive, execution_id?: string)
 ---@field register_filter fun(name: string, description: string, priority: integer, run: fun(subs: AegisubSubtitles, config: table), config?: function)
 ---@field text_extents fun(style: AegisubStyle, text: string): number, number, number, number
 ---@field frame_from_ms fun(milliseconds: integer): integer?

@@ -126,17 +126,25 @@ static int Run(string[] args)
     if (exe is null || !File.Exists(exe) || artifacts is null)
         throw new ArgumentException("--exe and --artifacts are required");
     MenuObservation.Initialize(artifacts);
-    Ensure(scenario is "basic" or "launch" or "controls" or "files" or "dap" or "jit" or "language" or "language-unavailable", "Unknown debug scenario");
+    Ensure(scenario is "basic" or "launch" or "controls" or "files" or "dap" or "jit" or "language" or "language-unavailable"
+        or "entry-late" or "entry-zh" or "entry-once" or "entry-missing" or "entry-ambiguous", "Unknown debug scenario");
+    var entryScenario = scenario.StartsWith("entry-", StringComparison.Ordinal);
     var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.ass");
     var actions = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-actions.lua");
     var expectedFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.expected.json");
     var stepsFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-steps.lua");
     var loopFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-loop.lua");
+    var infiniteLoopFile = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug-infinite-loop.lua");
+    var entryFixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "workspace-entry.ass");
+    var entryActions = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "workspace-entry-actions.lua");
+    var entryDuplicate = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "workspace-entry-duplicate.lua");
     var templater = Path.Combine("automation", "autoload", "kara-templater.lua");
     var includeRoot = Path.Combine("automation", "include");
     var driver = Path.Combine("tests", "gui-automation", "lua-workspace", "debug-uia.cs");
     var hashes = new Dictionary<string, string> { ["exe"] = Hash(exe), ["fixture"] = Hash(fixture), ["actions"] = Hash(actions),
         ["expected"] = Hash(expectedFile), ["steps"] = Hash(stepsFile), ["loop"] = Hash(loopFile),
+        ["infinite_loop"] = Hash(infiniteLoopFile),
+        ["entry_fixture"] = Hash(entryFixture), ["entry_actions"] = Hash(entryActions), ["entry_duplicate"] = Hash(entryDuplicate),
         ["templater"] = Hash(templater), ["driver_source"] = Hash(driver),
         ["clipboard_sta_source"] = Hash(Path.Combine("tests", "gui-automation", "driver", "ClipboardSta.cs")),
         ["executed_driver_library"] = Hash(typeof(ClipboardSta).Assembly.Location),
@@ -149,10 +157,13 @@ static int Run(string[] args)
     Ensure(expected.Generated is not null && expected.GeneratedCount == expected.Generated.Count && expected.GeneratedCount > 0,
         "Debug expected generated list/count is inconsistent");
     var input = Path.Combine(artifacts, "input.ass");
-    File.Copy(fixture, input);
+    File.Copy(entryScenario ? entryFixture : fixture, input);
     File.Copy(actions, Path.Combine(artifacts, "debug-actions.lua"));
     File.Copy(stepsFile, Path.Combine(artifacts, "debug-steps.lua"));
     File.Copy(loopFile, Path.Combine(artifacts, "debug-loop.lua"));
+    File.Copy(infiniteLoopFile, Path.Combine(artifacts, "debug-infinite-loop.lua"));
+    File.Copy(entryActions, Path.Combine(artifacts, "workspace-entry-actions.lua"));
+    File.Copy(entryDuplicate, Path.Combine(artifacts, "workspace-entry-duplicate.lua"));
     File.Copy(templater, Path.Combine(artifacts, "kara-templater.lua"));
     foreach (var file in includeFiles)
     {
@@ -160,11 +171,25 @@ static int Run(string[] args)
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         File.Copy(file, destination);
     }
+    if (entryScenario) PrepareEntryInput(input, scenario);
     var baseline = EventLines(File.ReadAllText(input));
-    Ensure(baseline.Count == 7 && baseline[0].Text.Contains("OLD:", StringComparison.Ordinal), "Debug fixture baseline has changed");
+    Ensure(entryScenario
+        ? baseline.Count == (scenario == "entry-once" ? 53 : 54) && baseline[0].Effect == "code once"
+        : baseline.Count == 7 && baseline[0].Text.Contains("OLD:", StringComparison.Ordinal),
+        "Scenario ASS fixture baseline has changed");
     Directory.CreateDirectory(Path.Combine(artifacts, "profile"));
     if (scenario == "files") PrepareFiles();
     if (scenario == "jit") PrepareJit();
+    if (scenario == "entry-zh")
+    {
+        PrepareChineseLocale(exe, artifacts, hashes);
+        var user = Path.Combine(artifacts, "profile", "user");
+        Directory.CreateDirectory(user);
+        File.WriteAllText(Path.Combine(user, "config.json"), JsonSerializer.Serialize(new
+        {
+            App = new { Language = "zh_CN" }
+        }));
+    }
     var languageScenario = scenario is "language" or "language-unavailable";
     var runtimeExe = Path.Combine(Path.GetDirectoryName(exe)!, "runtimes", "LuaLS", "bin", "lua-language-server.exe");
     if (languageScenario)
@@ -194,11 +219,13 @@ static int Run(string[] args)
     var exitStatus = "running";
     var steps = scenario == "controls"
         ? new[] { "host-ready", "controls-open-steps", "step-in-out-over", "step-save-undo", "loop-seed", "loop-pause-stop",
-            "loop-live-rollback", "loop-undo-depth", "close-stop", "close-stop-rollback", "close-detach", "close-detach-save-undo", "normal-shutdown" }
+            "loop-live-rollback", "loop-undo-depth", "close-stop", "close-stop-rollback", "close-detach-stop",
+            "close-detach-stop-rollback", "close-detach-complete", "close-detach-save-undo", "normal-shutdown" }
         : scenario == "launch" ? LaunchSteps()
         : scenario == "files" ? FileSteps()
         : scenario == "dap" ? DapSteps()
         : scenario == "jit" ? JitSteps()
+        : entryScenario ? EntrySteps()
         : new[] { "host-ready", "open-workspace", "edit-unapplied", "breakpoint-debug-pause", "stale-source", "stop-rollback",
             "stop-live-rollback", "run-generated", "undo-restores", "debug-detach", "basic-normal-shutdown" };
     if (languageScenario)
@@ -233,6 +260,7 @@ static int Run(string[] args)
             else if (scenario == "controls") RunControls();
             else if (scenario == "files") RunFiles();
             else if (scenario == "dap") RunDap();
+            else if (entryScenario) RunEntry();
             else RunJit();
             foreach (var step in steps.Where(name => results.All(result => result.Name != name)))
                 results.Add(new StepResult(step, "not-run", "Scenario step was not executed"));
@@ -297,8 +325,9 @@ static int Run(string[] args)
         Step("stale-source", () =>
         {
             SelectTab(workspace!, "Execution Source");
-            var execution = FindStyledText(workspace!, insideNotebook: true);
-            Ensure(execution is not null, "Paused execution source has no unique readonly STC descendant");
+            AutomationElement? execution = null;
+            WaitUntil(() => (execution = FindStyledText(workspace!, insideNotebook: true)) is not null,
+                TimeSpan.FromSeconds(3), "Paused execution source has no unique readonly STC descendant");
             var captured = Native.CopyStyledText(execution!, host);
             File.WriteAllText(Path.Combine(artifacts, "paused-source.lua"), captured, new UTF8Encoding(false));
             Ensure(Normalize(captured) == edited, "Paused readonly source did not match the immutable invocation revision");
@@ -628,6 +657,96 @@ static int Run(string[] args)
             Ensure(File.ReadAllBytes(input).SequenceEqual(before) && EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
                 "Launch live-baseline verifier changed or disagreed with the physical ASS baseline");
         }
+    }
+
+    string[] EntrySteps() => new[] { "host-ready", "entry-menu-before", "entry-open-workspace", "entry-run",
+        "entry-result", "entry-menu-after", "entry-normal-shutdown" };
+
+    void RunEntry()
+    {
+        var gui = main ?? throw new InvalidOperationException("Main GUI frame is unavailable");
+        var process = host ?? throw new InvalidOperationException("GUI host is unavailable");
+        var menuName = scenario == "entry-zh" ? "自动化(U)" : "Automation";
+        var hasTemplater = scenario != "entry-missing";
+
+        void CheckMenu(string evidence)
+        {
+            var (probe, templater) = ObserveEntryMenu(gui, process, menuName);
+            Ensure(probe is { IsEnabled: false }, "Ordinary macro validation was bypassed by the Workspace entry policy");
+            Ensure(hasTemplater ? templater is { IsEnabled: false } : templater is null,
+                "The regular Automation menu did not retain its independent quick-validation behavior");
+            if (scenario == "entry-zh")
+                Ensure(templater!.Name.Contains("应用", StringComparison.Ordinal), "The Chinese locale did not translate the templater display label");
+            File.WriteAllText(Path.Combine(artifacts, evidence), JsonSerializer.Serialize(new { Probe = probe, Templater = templater },
+                new JsonSerializerOptions { WriteIndented = true }));
+        }
+
+        Step("entry-menu-before", () => CheckMenu("entry-menu-before.json"));
+        Step("entry-open-workspace", () =>
+        {
+            InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8), menuName);
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            Ensure(FindButton(workspace, "Run").Current.IsEnabled, "Workspace Run is unavailable for the selected code line");
+            SaveEvidence(workspace, artifacts, "entry-workspace-open");
+        });
+        Step("entry-run", () =>
+        {
+            if (scenario is "entry-missing" or "entry-ambiguous")
+            {
+                InvokeButton(workspace!, "Run");
+                WaitUntil(() => HasWorkspaceStaticText(workspace!, text => text.Contains(
+                    "Exactly one loaded karaoke templater macro is required", StringComparison.Ordinal)),
+                    TimeSpan.FromSeconds(5), "Missing or ambiguous templater identity was not rejected explicitly");
+                Ensure(gui.Current.IsEnabled && FindButton(workspace!, "Run").Current.IsEnabled,
+                    "Rejected Workspace entry retained a subtitle transaction or active run");
+            }
+            else
+            {
+                var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+                WaitUntil(() => invocation.IsCompleted && ReadRunStatus(workspace!).Contains("completed", StringComparison.OrdinalIgnoreCase)
+                    && gui.Current.IsEnabled, TimeSpan.FromSeconds(25), "Workspace templater entry did not complete");
+                Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "Workspace templater invocation did not return");
+                WaitUntil(() => ReadRunLog(workspace!, process).Contains("workspace-entry-code-once", StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(5), "The code-once source did not execute through the selected templater");
+            }
+            SaveEvidence(workspace!, artifacts, "entry-run-result");
+            File.WriteAllText(Path.Combine(artifacts, "entry-run-log.txt"), ReadRunLog(workspace!, process));
+        });
+        Step("entry-result", () =>
+        {
+            if (scenario is "entry-late" or "entry-zh")
+            {
+                var expected = baseline.ToList();
+                var targetIndex = expected.FindIndex(line => line.Kind == "Dialogue" && line.Effect == "");
+                Ensure(targetIndex == expected.Count - 1, "Late-template input has no unique final karaoke dialogue");
+                expected[targetIndex] = expected[targetIndex] with { Kind = "Comment", Effect = "karaoke" };
+                expected.Add(new AssEvent("Dialogue", 0, 1000, 2000, "Default", "", 0, 0, 0, "fx", "R1-LATER1-LATE"));
+                SaveEntryAss(gui, input, expected, artifacts, "entry-generated.ass");
+            }
+            else
+            {
+                Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                    "A code-only or rejected entry changed the physical subtitle document");
+                var save = UiaDriver.FindDescendantByAutomationId(gui, "Item 5002", ControlType.Button);
+                if (save is not null && save.Current.IsEnabled)
+                    SaveEntryAss(gui, input, baseline, artifacts, "entry-unchanged.ass");
+                else
+                    File.Copy(input, Path.Combine(artifacts, "entry-unchanged.ass"));
+            }
+        });
+        Step("entry-menu-after", () => CheckMenu("entry-menu-after.json"));
+        Step("entry-normal-shutdown", () =>
+        {
+            Ensure(gui.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern), "Main frame lacks WindowPattern.Close");
+            Native.StabilizeOwnedClipboard(process.Id);
+            ((WindowPattern)pattern).Close();
+            Ensure(process.WaitForExit(TimeSpan.FromSeconds(10)) && process.ExitCode == 0,
+                "GUI host did not exit normally after Workspace entry acceptance");
+            File.WriteAllText(Path.Combine(artifacts, "entry-normal-shutdown.json"), JsonSerializer.Serialize(new
+            {
+                HostExitCode = process.ExitCode, Method = "WindowPattern.Close"
+            }));
+        });
     }
 
     string[] FileSteps() => new[] { "host-ready", "files-open-noentry", "files-noentry-first-run", "files-noentry-reload",
@@ -1464,6 +1583,7 @@ static int Run(string[] args)
         completed[0] = completed[0] with { Effect = "loop-complete" };
         var stepsArtifact = Path.Combine(artifacts, "debug-steps.lua");
         var loopArtifact = Path.Combine(artifacts, "debug-loop.lua");
+        var infiniteLoopArtifact = Path.Combine(artifacts, "debug-infinite-loop.lua");
 
         Step("controls-open-steps", () =>
         {
@@ -1580,40 +1700,75 @@ static int Run(string[] args)
             InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
             SaveMainAss(gui, input, baseline, artifacts, "close-stop-undone.ass");
         });
-        Step("close-detach", () =>
+        Step("close-detach-stop", () =>
         {
             InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
             InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
             workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
-            OpenLuaFile(workspace, process, loopArtifact, artifacts, "detach-loop-file-picker");
+            OpenLuaFile(workspace, process, infiniteLoopArtifact, artifacts, "detach-stop-loop-file-picker");
             InvokeMenu(gui, process, "Workspace Debug Seed", TimeSpan.FromSeconds(8));
-            SaveMainAss(gui, input, seeded, artifacts, "close-detach-seed.ass");
+            SaveMainAss(gui, input, seeded, artifacts, "close-detach-stop-seed.ass");
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitLoopStarted(workspace!, process, TimeSpan.FromSeconds(5));
+            Ensure(FindButton(workspace!, "Detach").Current.IsEnabled,
+                "A running non-debug invocation did not expose Detach before the close decision");
+            Native.PostClose(workspace!, process);
+            var decision = WaitWindow(process, "Active Lua Workspace invocation", TimeSpan.FromSeconds(5));
+            SaveEvidence(decision, artifacts, "close-detach-stop-choice");
+            InvokeButton(decision, "Detach and keep open");
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(5));
+            WaitUntil(() => ReadRunStatus(workspace).StartsWith("Detached;", StringComparison.Ordinal)
+                && FindButton(workspace, "Stop").Current.IsEnabled, TimeSpan.FromSeconds(5),
+                "Detach did not retain a visible enabled Stop control");
+            var stopButton = FindButton(workspace, "Stop");
+            var detachedStatus = ReadRunStatus(workspace);
+            File.WriteAllText(Path.Combine(artifacts, "close-detach-stop-running.json"), JsonSerializer.Serialize(new
+            {
+                Status = detachedStatus, MainEnabled = gui.Current.IsEnabled, WorkspaceOffscreen = workspace.Current.IsOffscreen,
+                StopEnabled = stopButton.Current.IsEnabled, StopOffscreen = stopButton.Current.IsOffscreen
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            Ensure(!gui.Current.IsEnabled && !workspace.Current.IsOffscreen && stopButton.Current.IsEnabled && !stopButton.Current.IsOffscreen
+                && detachedStatus.StartsWith("Detached", StringComparison.Ordinal)
+                && !detachedStatus.Contains("completed", StringComparison.OrdinalIgnoreCase),
+                "Detach did not leave the visible Workspace as the usable control surface");
+            SaveEvidence(workspace, artifacts, "close-detach-stop-visible");
+            InvokeButton(workspace, "Stop");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(12)), "Detached nonterminating loop did not stop through the visible Stop control");
+            WaitUntil(() => ReadRunStatus(workspace).Contains("cancelled", StringComparison.OrdinalIgnoreCase)
+                && gui.Current.IsEnabled, TimeSpan.FromSeconds(5), "Detached Stop did not reach a cancelled terminal state");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(seeded), "Detached Stop altered the physical seed baseline");
+            SaveEvidence(workspace, artifacts, "close-detach-stop-cancelled");
+        });
+        Step("close-detach-stop-rollback", () =>
+        {
+            VerifySeed(gui, process, input, seeded, artifacts, "close-detach-stop-verify");
+            InvokeMenu(gui, process, "Undo", TimeSpan.FromSeconds(8), "Edit");
+            SaveMainAss(gui, input, baseline, artifacts, "close-detach-stop-undone.ass");
+        });
+        Step("close-detach-complete", () =>
+        {
+            OpenLuaFile(workspace!, process, loopArtifact, artifacts, "detach-complete-loop-file-picker");
+            InvokeMenu(gui, process, "Workspace Debug Seed", TimeSpan.FromSeconds(8));
+            SaveMainAss(gui, input, seeded, artifacts, "close-detach-complete-seed.ass");
             var invocation = Task.Run(() => InvokeButton(workspace!, "Debug"));
             WaitPauseAt(workspace!, "entry", 1, "debug-loop.lua", 2, TimeSpan.FromSeconds(15));
             InvokeButton(workspace!, "Continue");
             WaitLoopStarted(workspace!, process, TimeSpan.FromSeconds(5));
-            var statusHandle = CaptureRunStatusHandle(workspace!, process);
-            var stopButton = FindButton(workspace!, "Stop");
             Native.PostClose(workspace!, process);
             var decision = WaitWindow(process, "Active Lua Workspace invocation", TimeSpan.FromSeconds(5));
-            SaveEvidence(decision, artifacts, "close-detach-choice");
-            InvokeButton(decision, "Detach and hide");
-            WaitUntil(() => FindWindow(process, "Lua Workspace") is null, TimeSpan.FromSeconds(5), "Detach did not hide Workspace");
-            var detachedStatus = Native.ReadStaticText(statusHandle, process);
-            var mainEnabledWhileDetached = gui.Current.IsEnabled;
-            var stopEnabledWhileDetached = stopButton.Current.IsEnabled;
-            File.WriteAllText(Path.Combine(artifacts, "close-detach-running.json"), JsonSerializer.Serialize(new
-            {
-                Status = detachedStatus, MainEnabled = mainEnabledWhileDetached, StopEnabled = stopEnabledWhileDetached
-            }, new JsonSerializerOptions { WriteIndented = true }));
-            Ensure(!mainEnabledWhileDetached && stopEnabledWhileDetached
-                && detachedStatus.StartsWith("Detached", StringComparison.Ordinal)
-                && !detachedStatus.Contains("completed", StringComparison.OrdinalIgnoreCase),
-                "Detach did not leave a live hidden invocation holding the ASS commit boundary");
-            WaitUntil(() => invocation.IsCompleted && Native.ReadStaticText(statusHandle, process).Contains("completed", StringComparison.OrdinalIgnoreCase)
-                && gui.Current.IsEnabled, TimeSpan.FromSeconds(30), "Detached long loop did not reach its real completed terminal state");
-            Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "Detached GUI invocation task did not return after terminal state");
-            TryProcessEvidence(process, artifacts, "close-detach-hidden");
+            SaveEvidence(decision, artifacts, "close-detach-complete-choice");
+            InvokeButton(decision, "Detach and keep open");
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(5));
+            WaitUntil(() => ReadRunStatus(workspace).StartsWith("Detached;", StringComparison.Ordinal)
+                && FindButton(workspace, "Stop").Current.IsEnabled, TimeSpan.FromSeconds(5),
+                "Natural-completion Detach did not retain a visible enabled Stop control");
+            Ensure(!gui.Current.IsEnabled && !workspace.Current.IsOffscreen && !FindButton(workspace, "Stop").Current.IsOffscreen,
+                "Natural-completion Detach lost its visible control surface while the commit boundary was active");
+            SaveEvidence(workspace, artifacts, "close-detach-complete-running");
+            WaitUntil(() => invocation.IsCompleted && ReadRunStatus(workspace).Contains("completed", StringComparison.OrdinalIgnoreCase)
+                && gui.Current.IsEnabled, TimeSpan.FromSeconds(30), "Detached bounded loop did not reach its real completed terminal state");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "Detached bounded invocation task did not return after terminal state");
+            SaveEvidence(workspace, artifacts, "close-detach-completed");
         });
         Step("close-detach-save-undo", () =>
         {
@@ -1655,11 +1810,125 @@ static int Run(string[] args)
     {
         StartedUtc = startedUtc, FinishedUtc = finishedUtc, BudgetSeconds = 240, ExeSha256 = hashes["exe"],
         Scenario = scenario,
-        AcceptanceScope = languageScenario ? "S6 language refresh/source isolation and unavailable-service Run/Debug/Undo/Save; not full S6 on its own." : "This scenario only. Full S4 requires basic, launch, controls, files, dap, jit, native virtual-source E2E, and S2/S3 regressions.",
+        AcceptanceScope = entryScenario ? "R1 Workspace templater entry identity, full-document qualification, and unchanged Automation-menu validation; this scenario only."
+            : languageScenario ? "S6 language refresh/source isolation and unavailable-service Run/Debug/Undo/Save; not full S6 on its own."
+            : "This scenario only. Full S4 requires basic, launch, controls, files, dap, jit, native virtual-source E2E, and S2/S3 regressions.",
         Fixtures = new[] { fixture.Replace('\\', '/'), actions.Replace('\\', '/'), expectedFile.Replace('\\', '/'),
-            stepsFile.Replace('\\', '/'), loopFile.Replace('\\', '/'), templater.Replace('\\', '/') },
+            stepsFile.Replace('\\', '/'), loopFile.Replace('\\', '/'), infiniteLoopFile.Replace('\\', '/'), templater.Replace('\\', '/'),
+            entryFixture.Replace('\\', '/'), entryActions.Replace('\\', '/'), entryDuplicate.Replace('\\', '/') },
         Sha256 = hashes, ExitStatus = exitStatus, Steps = results
     }, new JsonSerializerOptions { WriteIndented = true }));
+}
+
+static void PrepareChineseLocale(string exe, string artifacts, Dictionary<string, string> hashes)
+{
+    var buildDir = Directory.GetParent(Path.GetDirectoryName(exe)!)?.FullName
+        ?? throw new InvalidOperationException("The executable has no configured CMake build directory");
+    var cache = Path.Combine(buildDir, "CMakeCache.txt");
+    Ensure(File.Exists(cache), "The Chinese-locale scenario requires the configured CMake cache");
+    var setting = File.ReadLines(cache).SingleOrDefault(line => line.StartsWith("GETTEXT_MSGFMT_EXECUTABLE:FILEPATH=", StringComparison.Ordinal))
+        ?? throw new InvalidOperationException("The CMake build has no configured gettext msgfmt executable");
+    var msgfmt = setting[(setting.IndexOf('=') + 1)..];
+    Ensure(File.Exists(msgfmt), "The configured gettext msgfmt executable is unavailable");
+    var catalog = Path.Combine(Path.GetDirectoryName(exe)!, "locale", "zh_CN", "LC_MESSAGES", "aegisub.mo");
+    Directory.CreateDirectory(Path.GetDirectoryName(catalog)!);
+    var start = new ProcessStartInfo(msgfmt) { UseShellExecute = false };
+    start.ArgumentList.Add("-o");
+    start.ArgumentList.Add(catalog);
+    start.ArgumentList.Add(Path.GetFullPath(Path.Combine("po", "zh_CN.po")));
+    using var compiler = Process.Start(start) ?? throw new InvalidOperationException("Could not start the configured gettext compiler");
+    if (!compiler.WaitForExit(TimeSpan.FromSeconds(10)))
+    {
+        compiler.Kill(entireProcessTree: true);
+        compiler.WaitForExit(TimeSpan.FromSeconds(5));
+        throw new TimeoutException("Chinese gettext catalog compilation exceeded its finite deadline");
+    }
+    Ensure(compiler.ExitCode == 0 && File.Exists(catalog), "The Chinese gettext catalog failed to compile");
+    hashes["zh_catalog"] = Hash(catalog);
+    File.Copy(catalog, Path.Combine(artifacts, "entry-zh-catalog.mo"));
+}
+
+static void PrepareEntryInput(string input, string scenario)
+{
+    var source = File.ReadAllText(input);
+    const string template = "Comment: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,template line notext,R1-LATE";
+    const string templaterScript = "|~kara-templater.lua";
+    Ensure(source.Split(template, StringSplitOptions.None).Length == 2
+        && source.Split(templaterScript, StringSplitOptions.None).Length == 2,
+        "Entry fixture has no unique template or templater script declaration");
+    var newline = source.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+    var filler = string.Concat(Enumerable.Range(1, 51).Select(index =>
+        $"Dialogue: 0,0:00:00.00,0:00:00.50,Default,,0,0,0,skip,ignored-{index:D2}{newline}"));
+    source = source.Replace(template, filler + template, StringComparison.Ordinal);
+    if (scenario == "entry-once")
+        source = source.Replace(template + newline, "", StringComparison.Ordinal);
+    if (scenario == "entry-missing")
+        source = source.Replace(templaterScript, "", StringComparison.Ordinal);
+    if (scenario == "entry-ambiguous")
+        source = source.Replace(templaterScript, templaterScript + "|~workspace-entry-duplicate.lua", StringComparison.Ordinal);
+    File.WriteAllText(input, source, new UTF8Encoding(false));
+}
+
+static (MenuObservation.Snapshot? Probe, MenuObservation.Snapshot? Templater) ObserveEntryMenu(
+    AutomationElement main, Process host, string menuName)
+{
+    AutomationElement? menu = null;
+    WaitUntil(() => main.Current.IsEnabled && (menu = main.FindAll(TreeScope.Descendants,
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem))
+        .Cast<AutomationElement>().SingleOrDefault(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen
+            && (item.Current.Name ?? "").Replace("&", "", StringComparison.Ordinal)
+                .Equals(menuName, StringComparison.OrdinalIgnoreCase))) is not null,
+        TimeSpan.FromSeconds(8), $"Main menu {menuName} was not exposed for entry validation");
+    var opened = false;
+    if (menu!.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var expand))
+    {
+        try { ((ExpandCollapsePattern)expand).Expand(); opened = true; }
+        catch (InvalidOperationException) { }
+    }
+    if (!opened && menu.TryGetCurrentPattern(InvokePattern.Pattern, out var invoke))
+    {
+        ((InvokePattern)invoke).Invoke();
+        opened = true;
+    }
+    if (!opened && menuName is "Automation" or "自动化(U)")
+    {
+        Native.PostSystemMenu(new nint(main.Current.NativeWindowHandle), 'u');
+        opened = true;
+    }
+    Ensure(opened, $"Main menu {menuName} could not be opened for entry validation");
+    WaitUntil(() => FindVisibleMenuCommand(host, "Workspace Entry Validation Probe") is not null,
+        TimeSpan.FromSeconds(5), "Entry validation probe did not appear in the opened Automation menu");
+    MenuObservation.Snapshot? Snapshot(string commandName)
+    {
+        var command = FindVisibleMenuCommand(host, commandName);
+        if (command is null) return null;
+        var snapshot = MenuObservation.Capture(menuName, commandName, command.Current,
+            command.TryGetCurrentPattern(InvokePattern.Pattern, out _));
+        MenuObservation.Record(snapshot, "entry-validation-observed", null);
+        return snapshot;
+    }
+    var probe = Snapshot("Workspace Entry Validation Probe");
+    var templater = Snapshot("Apply karaoke template");
+    var select = FindVisibleMenuCommand(host, "Workspace Entry Select Code")
+        ?? throw new InvalidOperationException("Entry code selector was not present to dismiss the observed menu");
+    Ensure(select.Current.IsEnabled && !select.Current.IsOffscreen && select.TryGetCurrentPattern(InvokePattern.Pattern, out _),
+        "Entry code selector was not available after menu validation observations");
+    UiaDriver.Invoke(select);
+    return (probe, templater);
+}
+
+static void SaveEntryAss(AutomationElement main, string input, IReadOnlyList<AssEvent> expected, string artifacts, string evidenceName)
+{
+    AutomationElement? save = null;
+    WaitUntil(() => (save = UiaDriver.FindDescendantByAutomationId(main, "Item 5002", ControlType.Button)) is not null
+        && save.Current.IsEnabled && !save.Current.IsOffscreen && save.TryGetCurrentPattern(InvokePattern.Pattern, out _),
+        TimeSpan.FromSeconds(8), "Main Save did not become visibly invokable after entry completion");
+    UiaDriver.Invoke(save!);
+    WaitUntil(() => EventLines(File.ReadAllText(input)).SequenceEqual(expected), TimeSpan.FromSeconds(8),
+        "Saved entry ASS does not match its independent generated-event expectation");
+    var physical = File.ReadAllText(input);
+    AssertPhysicalEventLines(physical, expected.Count);
+    File.WriteAllText(Path.Combine(artifacts, evidenceName), physical, new UTF8Encoding(false));
 }
 
 static AutomationElement LanguageStatusElement(AutomationElement workspace)
@@ -1803,8 +2072,12 @@ static string ReadRunLog(AutomationElement workspace, Process host)
 
 static void WaitLoopStarted(AutomationElement workspace, Process host, TimeSpan timeout)
 {
-    WaitUntil(() => ReadRunStatus(workspace).StartsWith("Debug: running", StringComparison.Ordinal)
-        && ReadRunLog(workspace, host).Contains("workspace-debug-loop-started", StringComparison.Ordinal), timeout,
+    WaitUntil(() =>
+    {
+        var status = ReadRunStatus(workspace);
+        return (status.StartsWith("Debug: running", StringComparison.Ordinal) || status.StartsWith("Run active", StringComparison.Ordinal))
+            && ReadRunLog(workspace, host).Contains("workspace-debug-loop-started", StringComparison.Ordinal);
+    }, timeout,
         "Long loop did not enter running state and report its unique progress handshake");
 }
 
@@ -1959,7 +2232,7 @@ static AutomationElement? FindStyledText(AutomationElement workspace, bool insid
             if (current.ProcessId != workspace.Current.ProcessId || current.IsOffscreen
                 || current.ControlType != ControlType.Pane || current.ClassName != "wxWindow"
                 || current.NativeWindowHandle == 0
-                || (current.Name != "stcwindow" && !item.TryGetCurrentPattern(ScrollPattern.Pattern, out _)))
+                || Native.WindowText(new nint(current.NativeWindowHandle)) != "stcwindow")
                 continue;
             if (HasNotebookAncestor(item, workspace) == insideNotebook) candidates.Add(item);
         }
@@ -2163,7 +2436,7 @@ static void InvokeMenu(AutomationElement main, Process host, string name, TimeSp
     }
     if (!opened)
     {
-        var mnemonic = menuName == "Automation" ? 'u' : menuName == "Edit" ? 'e'
+        var mnemonic = menuName is "Automation" or "自动化(U)" ? 'u' : menuName == "Edit" ? 'e'
             : throw new InvalidOperationException($"Menu {menuName} has no observed mnemonic");
         Native.PostSystemMenu(new nint(main.Current.NativeWindowHandle), mnemonic);
     }

@@ -6,7 +6,9 @@
 #include "automation/automation_invocation_observer.h"
 #include "automation/automation_breakpoint_store.h"
 #include "automation/automation_debug_service.h"
+#include "automation/karaoke_line_classifier.h"
 #include "auto4_base.h"
+#include "auto4_lua.h"
 #include "command/command.h"
 #include "compat.h"
 #include "include/aegisub/context.h"
@@ -57,6 +59,7 @@ namespace {
 constexpr int diagnostic_indicator = 8;
 constexpr std::size_t runtime_text_limit = 2048;
 constexpr std::string_view truncated_marker = "[truncated]";
+constexpr std::string_view karaoke_templater_execution_id = "aegisub.kara-templater.apply";
 constexpr char source_width_option[] = "Automation/Lua Workspace/Layout/Source Width Percent";
 constexpr char output_height_option[] = "Automation/Lua Workspace/Layout/Output Height Percent";
 
@@ -727,7 +730,7 @@ void LuaWorkspaceFrame::UpdateRunControls() {
 	step_out_button->Enable(busy && paused && attached);
 	pause_button->Enable(busy && active_run_request->debug_session && attached && !paused);
 	stop_button->Enable(busy && !active_run_request->stop_requested->load());
-	detach_button->Enable(busy && active_run_request->debug_session && attached);
+	detach_button->Enable(busy && attached);
 	if (apply)
 		apply->Enable(!busy && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
 	if (reload)
@@ -956,8 +959,8 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 		std::unique_ptr<Script> local_script;
 		Script *script = nullptr;
 		cmd::Command *command = nullptr;
-		if (document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode) {
-			constexpr char template_command[] = "automation/lua/kara-templater/Apply karaoke template";
+		bool karaoke_templater = document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode;
+		if (karaoke_templater) {
 			std::vector<std::pair<Script *, cmd::Command *>> matches;
 			for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
 				if (!manager)
@@ -966,7 +969,7 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 					if (!candidate || !candidate->GetLoadedState())
 						continue;
 					for (auto *macro : candidate->GetMacros()) {
-						if (macro && std::string_view(macro->name()) == template_command)
+						if (macro && candidate->GetEngineName() == "Lua" && GetLuaMacroExecutionId(macro) == karaoke_templater_execution_id)
 							matches.emplace_back(candidate.get(), macro);
 					}
 				}
@@ -1080,7 +1083,18 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 			reject(check.message);
 			return;
 		}
-		if (!script || !command || script->GetEngineName() != "Lua" || !command->Validate(context)) {
+		bool qualified = !karaoke_templater;
+		if (karaoke_templater) {
+			for (auto const& line : context->ass->Events) {
+				auto const classification = ClassifyKaraokeLine(line.Comment, line.Effect.get());
+				if (classification.kind == KaraokeLineKind::Template ||
+					(classification.kind == KaraokeLineKind::Code && (classification.scopes & KaraokeOnce))) {
+					qualified = true;
+					break;
+				}
+			}
+		}
+		if (!script || !command || script->GetEngineName() != "Lua" || !qualified || (!karaoke_templater && !command->Validate(context))) {
 			reject("The selected Automation macro is not available for this subtitle document");
 			return;
 		}
@@ -1545,9 +1559,9 @@ bool LuaWorkspaceFrame::OpenFile(agi::fs::path const& filename) {
 
 bool LuaWorkspaceFrame::PrepareToClose(bool defer_discard) {
 	if (IsInvocationRunning()) {
-		wxMessageDialog dialog(this, _("A Workspace invocation is still active. Stop and close after it ends, detach and hide while it continues, or cancel closing."),
+		wxMessageDialog dialog(this, _("A Workspace invocation is still active. Stop and close after it ends, detach while keeping this control window open, or cancel closing."),
 							   _("Active Lua Workspace invocation"), wxYES_NO | wxCANCEL | wxICON_WARNING);
-		dialog.SetYesNoCancelLabels(_("Stop then close"), _("Detach and hide"), _("Cancel"));
+		dialog.SetYesNoCancelLabels(_("Stop then close"), _("Detach and keep open"), _("Cancel"));
 		int choice = dialog.ShowModal();
 		if (choice == wxID_YES) {
 			close_after_run = true;
@@ -1557,10 +1571,17 @@ bool LuaWorkspaceFrame::PrepareToClose(bool defer_discard) {
 			run_status->SetLabel(_("Stopping; Workspace will close after the invocation ends."));
 		}
 		else if (choice == wxID_NO) {
+			close_after_run = false;
 			if (active_session)
 				active_session->Detach();
-			Hide();
-			run_status->SetLabel(_("Detached and hidden; the invocation may still commit subtitles."));
+			run_status->SetLabel(active_run_request->stop_requested->load()
+									 ? _("Stopping; this window will remain open after cancellation.")
+									 : _("Detached; this window remains available to stop the invocation before it commits subtitles."));
+			UpdateRunControls();
+		}
+		else if (choice == wxID_CANCEL && close_after_run) {
+			close_after_run = false;
+			run_status->SetLabel(_("Stopping; this window will remain open after cancellation."));
 		}
 		return false;
 	}
