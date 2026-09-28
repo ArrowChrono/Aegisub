@@ -144,7 +144,7 @@ static int Run(string[] args)
     sourceHashes["GUI executable"] = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(exe)));
     var started = DateTimeOffset.UtcNow;
     var results = new List<StepResult>();
-    var steps = new[] { "host-ready", "code-selection", "complex-multiline-paste", "invalid-paste-atomic", "single-line-paste", "code-shortcut-workspace", "code-editing-keys", "ordinary-ass", "classification-metadata", "undo-redo-save", "headless-independent-verification", "normal-close" };
+    var steps = new[] { "fresh-default-hotkey", "host-ready", "code-selection", "complex-multiline-paste", "invalid-paste-atomic", "single-line-paste", "code-shortcut-workspace", "code-editing-keys", "ordinary-ass", "classification-metadata", "undo-redo-save", "headless-independent-verification", "normal-close" };
     var status = "running";
     var finished = (DateTimeOffset?)null;
     Process? host = null;
@@ -156,11 +156,24 @@ static int Run(string[] args)
     var profile = Path.Combine(artifacts, "profile");
     Directory.CreateDirectory(Path.Combine(profile, "user"));
     File.WriteAllText(Path.Combine(profile, "user", "config.json"), JsonSerializer.Serialize(new { Subtitle = new Dictionary<string, bool> { ["Use STC"] = mode == "stc" } }));
+    File.WriteAllText(Path.Combine(profile, "user", "hotkey.json"), JsonSerializer.Serialize(new Dictionary<string, object>
+    {
+        ["Lua Code Edit Box"] = new Dictionary<string, string[]>
+        {
+            ["automation/lua/open-current-line"] = new[] { "F6" }
+        },
+        ["Default"] = new Dictionary<string, string[]>
+        {
+            ["edit/undo"] = new[] { "Ctrl-Z" },
+            ["edit/redo"] = new[] { "Ctrl-Y" }
+        }
+    }));
     ClipboardReceipt.Initialize(Path.Combine(artifacts, "clipboard-receipt.json"), uint.Parse(Environment.GetEnvironmentVariable("AEGISUB_E17_CLIPBOARD_SEQUENCE") ?? throw new InvalidOperationException("Clipboard baseline missing")));
     var complexSource = "local title = [=[漢字\nsecond]=]\n-- complex paste preserves a Lua comment\nlocal sum = 0\nfor i = 1, 4 do\n  sum = sum + i\nend\nreturn title .. ':' .. sum";
     File.WriteAllText(Path.Combine(artifacts, "complex-source.lua"), complexSource, new UTF8Encoding(false));
     try
     {
+        Step("fresh-default-hotkey", () => RunDefaultShortcutContract(exe, artifacts, fixture, actions, mode));
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)! };
         foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", artifacts, "--open", input }) start.ArgumentList.Add(arg);
         host = Process.Start(start) ?? throw new InvalidOperationException("Could not start GUI host");
@@ -175,7 +188,22 @@ static int Run(string[] args)
         Step("code-selection", () =>
         {
             Select(main!, host, "CodeA", "code once");
-            Ensure(WorkspaceButton(main!).Current.IsEnabled, "Lua Workspace button disabled for first code line");
+            var hotkeyPath = Path.Combine(profile, "user", "hotkey.json");
+            using var migratedHotkeys = JsonDocument.Parse(File.ReadAllText(hotkeyPath));
+            var workspaceKeys = migratedHotkeys.RootElement.GetProperty("Lua Code Edit Box")
+                .GetProperty("automation/lua/open-current-line").EnumerateArray()
+                .Select(item => item.GetString()).ToArray();
+            Ensure(workspaceKeys.SequenceEqual(new[] { "F6" }),
+                "Hotkey migration replaced or supplemented the existing Workspace binding");
+            var defaults = migratedHotkeys.RootElement.GetProperty("Default");
+            Ensure(defaults.GetProperty("edit/undo").EnumerateArray().Single().GetString() == "Ctrl-Z"
+                && defaults.GetProperty("edit/redo").EnumerateArray().Single().GetString() == "Ctrl-Y",
+                "Document Undo/Redo bindings were not preserved by Workspace hotkey migration");
+            Ensure(!migratedHotkeys.RootElement.ToString().Contains("\"Ctrl-V\"", StringComparison.Ordinal),
+                "Sparse hotkey scenario unexpectedly enabled the app paste command");
+            File.Copy(hotkeyPath, Path.Combine(artifacts, "migrated-hotkeys.json"));
+            Ensure(WorkspaceCommandAvailable(main!, host), "Lua Workspace command disabled for first code line");
+            Ensure(VisibleWorkspaceButton(main!) is null, "Obsolete Lua Workspace convenience button is still visible");
             Ensure(Editor(main!, mode).Current.IsEnabled, "Subtitle editor disabled");
         });
         Step("complex-multiline-paste", () =>
@@ -217,8 +245,15 @@ static int Run(string[] args)
         {
             var before = File.ReadAllText(input);
             var edit = Editor(main!, mode);
+            var editorBefore = ReadEditor(edit, host);
             Native.Focus(edit, host);
             Native.Press(edit, host, 0x0D, shift: true);
+            EnsureStable(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromMilliseconds(750),
+                "Legacy hardcoded Shift+Enter opened Workspace despite the custom hotkey");
+            Ensure(ReadEditor(edit, host) == editorBefore,
+                "Unbound Shift+Enter changed the single-line Lua source");
+            Native.Focus(edit, host);
+            Native.Press(edit, host, 0x75);
             var workspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(8));
             SaveEvidence(workspace, artifacts, "code-workspace");
             var source = FindWorkspaceSource(workspace);
@@ -229,25 +264,17 @@ static int Run(string[] args)
             ((WindowPattern)workspace.GetCurrentPattern(WindowPattern.Pattern)).Close();
             WaitUntil(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromSeconds(5), "Workspace did not close");
             Ensure(File.ReadAllText(input) == before, "Opening Workspace changed saved ASS");
-            var button = WorkspaceButton(main!);
-            var frameBounds = main!.Current.BoundingRectangle;
-            var buttonBounds = button.Current.BoundingRectangle;
-            Ensure(!button.Current.IsOffscreen && button.Current.IsEnabled
-                && !frameBounds.IsEmpty && !buttonBounds.IsEmpty
-                && buttonBounds.Width > 0 && buttonBounds.Height > 0
-                && frameBounds.Contains(buttonBounds),
-                "Lua Workspace convenience button is not fully visible inside the main window");
-            UiaDriver.Invoke(button);
-            var buttonWorkspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(8));
-            SaveEvidence(buttonWorkspace, artifacts, "code-workspace-button");
-            var buttonSource = FindWorkspaceSource(buttonWorkspace)
-                ?? throw new InvalidOperationException("Button-opened Workspace has no source editor");
-            Ensure(ReadEditor(buttonSource, host) == displayed,
-                "Convenience button opened a different Lua source from Shift+Enter");
-            ((WindowPattern)buttonWorkspace.GetCurrentPattern(WindowPattern.Pattern)).Close();
+            InvokeMenu(main!, host, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+            var menuWorkspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(8));
+            SaveEvidence(menuWorkspace, artifacts, "code-workspace-menu");
+            var menuSource = FindWorkspaceSource(menuWorkspace)
+                ?? throw new InvalidOperationException("Menu-opened Workspace has no source editor");
+            Ensure(ReadEditor(menuSource, host) == displayed,
+                "Automation menu opened a different Lua source from the configurable shortcut");
+            ((WindowPattern)menuWorkspace.GetCurrentPattern(WindowPattern.Pattern)).Close();
             WaitUntil(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromSeconds(5),
-                "Button-opened Workspace did not close");
-            Ensure(File.ReadAllText(input) == before, "Convenience button changed saved ASS");
+                "Menu-opened Workspace did not close");
+            Ensure(File.ReadAllText(input) == before, "Automation menu changed saved ASS");
         });
         Step("code-editing-keys", () =>
         {
@@ -296,7 +323,7 @@ static int Run(string[] args)
         Step("ordinary-ass", () =>
         {
             Select(main!, host, "Ordinary", "");
-            Ensure(!WorkspaceAvailable(main!), "Workspace button enabled for ordinary subtitle");
+            Ensure(!WorkspaceCommandAvailable(main!, host), "Workspace command enabled for ordinary subtitle");
             SaveEvidence(main!, artifacts, "ordinary-ass-highlighting");
             if (mode == "stc") {
                 InspectContextMenu(main!, Editor(main!, mode), host, true, artifacts, "ordinary-context-menu");
@@ -361,23 +388,23 @@ static int Run(string[] args)
         Step("classification-metadata", () =>
         {
             Select(main!, host, "FalseCode", "code once");
-            Ensure(!WorkspaceAvailable(main!), "False-code dialogue enabled Workspace");
+            Ensure(!WorkspaceCommandAvailable(main!, host), "False-code dialogue enabled Workspace");
             var comment = CommentBox(main!);
             UiaDriver.Toggle(comment);
-            WaitUntil(() => WorkspaceAvailable(main!), TimeSpan.FromSeconds(5), "Comment toggle did not reclassify same text");
+            WaitUntil(() => WorkspaceCommandAvailable(main!, host), TimeSpan.FromSeconds(5), "Comment toggle did not reclassify same text");
             UiaDriver.Toggle(CommentBox(main!));
-            WaitUntil(() => !WorkspaceAvailable(main!), TimeSpan.FromSeconds(5), "Uncomment did not disable Workspace");
+            WaitUntil(() => !WorkspaceCommandAvailable(main!, host), TimeSpan.FromSeconds(5), "Uncomment did not disable Workspace");
             Select(main!, host, "Template", "template line");
-            Ensure(!WorkspaceAvailable(main!), "Template line enabled Workspace");
+            Ensure(!WorkspaceCommandAvailable(main!, host), "Template line enabled Workspace");
             Select(main!, host, "CodeB", "code line");
-            Ensure(WorkspaceButton(main!).Current.IsEnabled, "Second code line disabled Workspace");
+            Ensure(WorkspaceCommandAvailable(main!, host), "Second code line disabled Workspace");
             ChangeEffect(main!, host, mode, "template line");
-            WaitUntil(() => !WorkspaceAvailable(main!), TimeSpan.FromSeconds(5), "Effect edit did not switch the unchanged source out of Lua mode");
+            WaitUntil(() => !WorkspaceCommandAvailable(main!, host), TimeSpan.FromSeconds(5), "Effect edit did not switch the unchanged source out of Lua mode");
             ChangeEffect(main!, host, mode, "code line");
-            WaitUntil(() => WorkspaceAvailable(main!), TimeSpan.FromSeconds(5), "Effect edit did not restore Lua mode");
+            WaitUntil(() => WorkspaceCommandAvailable(main!, host), TimeSpan.FromSeconds(5), "Effect edit did not restore Lua mode");
             Select(main!, host, "Ordinary", "");
             Select(main!, host, "CodeA", "code once");
-            Ensure(WorkspaceButton(main!).Current.IsEnabled, "Repeated code/ordinary switch lost classification");
+            Ensure(WorkspaceCommandAvailable(main!, host), "Repeated code/ordinary switch lost classification");
             SaveEvidence(main!, artifacts, "code-lua-highlighting");
         });
         Step("undo-redo-save", () =>
@@ -430,9 +457,12 @@ static int Run(string[] args)
     {
         if (host is not null && !host.HasExited)
         {
-            Native.StabilizeOwnedClipboard(host.Id);
-            host.Kill(entireProcessTree: true);
-            Ensure(host.WaitForExit(TimeSpan.FromSeconds(5)), "Host did not stop after failure");
+            try { Native.StabilizeOwnedClipboard(host.Id); }
+            finally
+            {
+                host.Kill(entireProcessTree: true);
+                Ensure(host.WaitForExit(TimeSpan.FromSeconds(5)), "Host did not stop after failure");
+            }
         }
         host?.Dispose();
     }
@@ -460,6 +490,16 @@ static void WaitUntil(Func<bool> condition, TimeSpan timeout, string message)
     var timer = Stopwatch.StartNew();
     while (timer.Elapsed < timeout) { if (condition()) return; Thread.Sleep(75); }
     throw new TimeoutException(message);
+}
+
+static void EnsureStable(Func<bool> condition, TimeSpan duration, string message)
+{
+    var timer = Stopwatch.StartNew();
+    while (timer.Elapsed < duration)
+    {
+        if (!condition()) throw new InvalidOperationException(message);
+        Thread.Sleep(50);
+    }
 }
 
 static AutomationElement? FindWindow(Process host, string prefix)
@@ -516,7 +556,8 @@ static AutomationElement? FindStyledText(AutomationElement workspace, bool insid
             var current = item.Current;
             if (current.ProcessId != workspace.Current.ProcessId || current.IsOffscreen
                 || current.ControlType != ControlType.Pane || current.ClassName != "wxWindow"
-                || current.NativeWindowHandle == 0 || !item.TryGetCurrentPattern(ScrollPattern.Pattern, out _))
+                || current.NativeWindowHandle == 0
+                || (current.Name != "stcwindow" && !item.TryGetCurrentPattern(ScrollPattern.Pattern, out _)))
                 continue;
             if (HasNotebookAncestor(item, workspace) == insideNotebook) candidates.Add(item);
         }
@@ -547,7 +588,8 @@ static AutomationElement? FindVisibleMenuCommand(Process host, string name)
 }
 
 
-static void InvokeMenu(AutomationElement main, Process host, string name, TimeSpan timeout, string menuName = "Automation")
+static AutomationElement OpenMenuCommand(AutomationElement main, Process host, string name, TimeSpan timeout,
+    string menuName = "Automation")
 {
     AutomationElement? menu = null;
     WaitUntil(() => main.Current.IsEnabled && (menu = main.FindAll(TreeScope.Descendants,
@@ -575,8 +617,11 @@ static void InvokeMenu(AutomationElement main, Process host, string name, TimeSp
     }
     AutomationElement? command = null;
     WaitUntil(() => (command = FindVisibleMenuCommand(host, name)) is not null, timeout, $"Menu command {name} was unavailable");
-    UiaDriver.Invoke(command!);
+    return command!;
 }
+
+static void InvokeMenu(AutomationElement main, Process host, string name, TimeSpan timeout, string menuName = "Automation")
+    => UiaDriver.Invoke(OpenMenuCommand(main, host, name, timeout, menuName));
 
 
 static void SaveEvidence(AutomationElement window, string artifacts, string name)
@@ -587,7 +632,8 @@ static void SaveEvidence(AutomationElement window, string artifacts, string name
         try
         {
             var current = item.Current;
-            lines.Add($"{current.ControlType.ProgrammaticName}\t{current.Name}\t{current.AutomationId}\t{current.ClassName}\t{current.NativeWindowHandle}\t{current.IsEnabled}\t{current.IsOffscreen}\t{string.Join(',', item.GetSupportedPatterns().Select(pattern => pattern.ProgrammaticName))}");
+            var rect = current.BoundingRectangle;
+            lines.Add($"{current.ControlType.ProgrammaticName}\t{current.Name}\t{current.AutomationId}\t{current.ClassName}\t{current.NativeWindowHandle}\tpid={current.ProcessId}\tenabled={current.IsEnabled}\toffscreen={current.IsOffscreen}\trect={rect.Left},{rect.Top},{rect.Right},{rect.Bottom}\t{string.Join(',', item.GetSupportedPatterns().Select(pattern => pattern.ProgrammaticName))}");
         }
         catch (ElementNotAvailableException) { lines.Add("<stale UIA element>"); }
     }
@@ -667,6 +713,12 @@ static string ReadEditor(AutomationElement editor, Process host)
     Ensure(editor.Current.ProcessId == host.Id, "Editor belongs to another process");
     if (editor.TryGetCurrentPattern(ValuePattern.Pattern, out var value))
         return ((ValuePattern)value).Current.Value;
+    var current = editor.Current;
+    if (current.ClassName == "Edit" && (current.ControlType == ControlType.Edit || current.ControlType == ControlType.Document))
+    {
+        Ensure(editor.TryGetCurrentPattern(TextPattern.Pattern, out var text), "Native edit has no read-only text pattern");
+        return ((TextPattern)text).DocumentRange.GetText(-1).Replace("\r\n", "\n", StringComparison.Ordinal);
+    }
     return Native.CopyStyledText(editor, host).Replace("\r\n", "\n", StringComparison.Ordinal);
 }
 
@@ -682,14 +734,15 @@ static AutomationElement? VisibleWorkspaceButton(AutomationElement main)
     return matches.SingleOrDefault();
 }
 
-static bool WorkspaceAvailable(AutomationElement main)
+static bool WorkspaceCommandAvailable(AutomationElement main, Process host)
 {
-    var button = VisibleWorkspaceButton(main);
-    return button is not null && button.Current.IsEnabled && button.TryGetCurrentPattern(InvokePattern.Pattern, out _);
+    var command = OpenMenuCommand(main, host, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(5));
+    var enabled = command.Current.IsEnabled && command.TryGetCurrentPattern(InvokePattern.Pattern, out _);
+    Native.DismissMenu(host);
+    WaitUntil(() => FindVisibleMenuCommand(host, "Open Code Line in Lua Workspace") is null,
+        TimeSpan.FromSeconds(3), "Automation menu did not dismiss after reading Workspace command state");
+    return enabled;
 }
-
-static AutomationElement WorkspaceButton(AutomationElement main)
-    => VisibleWorkspaceButton(main) ?? throw new InvalidOperationException("Code line has no visible Lua Workspace convenience button");
 
 static AutomationElement CommentBox(AutomationElement main)
 {
@@ -739,7 +792,7 @@ static void Select(AutomationElement main, Process host, string actor, string ex
     Ensure(fields.Length == 1, $"Empty Effect placeholder has {fields.Length} editable fields");
     var field = fields[0];
     Ensure(field.TryGetCurrentPattern(ValuePattern.Pattern, out _), "Effect edit field has no readable ValuePattern");
-    Native.Focus(field, host);
+    Native.Focus(field, host, effectField: true);
     WaitUntil(() => field.TryGetCurrentPattern(ValuePattern.Pattern, out var value)
             && ((ValuePattern)value).Current.Value.Length == 0,
         TimeSpan.FromSeconds(5), "Focused Effect field contains real text rather than an empty placeholder");
@@ -758,9 +811,9 @@ static void ChangeEffect(AutomationElement main, Process host, string mode, stri
     Ensure(fields.Length == 1, $"Effect combo has {fields.Length} writable edit fields");
     var field = fields[0];
     Ensure(field.TryGetCurrentPattern(ValuePattern.Pattern, out _), "Effect edit field has no ValuePattern");
-    Native.Focus(field, host);
-    Native.SendChord(field, host, 'A');
-    Native.TypeText(field, host, effect);
+    Native.Focus(field, host, effectField: true);
+    Native.SendChord(field, host, 'A', effectField: true);
+    Native.TypeText(field, host, effect, effectField: true);
     WaitUntil(() => field.TryGetCurrentPattern(ValuePattern.Pattern, out var value)
             && ((ValuePattern)value).Current.Value == effect,
         TimeSpan.FromSeconds(5), "Typed Effect value did not reach the native edit field");
@@ -895,6 +948,85 @@ static void RunHeadless(string exe, string artifacts, string subtitle, string sc
     }, new JsonSerializerOptions { WriteIndented = true }));
 }
 
+static void RunDefaultShortcutContract(string exe, string artifacts, string fixture, string actions, string mode)
+{
+    var contractArtifacts = Path.Combine(artifacts, "fresh-default-hotkey");
+    Directory.CreateDirectory(contractArtifacts);
+    var input = Path.Combine(contractArtifacts, "input.ass");
+    File.Copy(fixture, input);
+    File.Copy(actions, Path.Combine(contractArtifacts, "coding-editbox-actions.lua"));
+    var profile = Path.Combine(contractArtifacts, "profile");
+    Directory.CreateDirectory(Path.Combine(profile, "user"));
+    File.WriteAllText(Path.Combine(profile, "user", "config.json"),
+        JsonSerializer.Serialize(new { Subtitle = new Dictionary<string, bool> { ["Use STC"] = mode == "stc" } }));
+
+    Process? host = null;
+    try
+    {
+        var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)! };
+        foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", contractArtifacts, "--open", input })
+            start.ArgumentList.Add(arg);
+        host = Process.Start(start) ?? throw new InvalidOperationException("Could not start fresh-default hotkey host");
+        File.WriteAllText(Path.Combine(contractArtifacts, "host-identity.json"),
+            JsonSerializer.Serialize(new HostIdentity(host.Id, host.StartTime.ToUniversalTime().ToString("O"))));
+        var ready = AutomationProtocol.WaitForReadyArtifact(Path.Combine(contractArtifacts, "ready.json"), host, TimeSpan.FromSeconds(15));
+        Ensure(ready.ProcessId == host.Id, "Fresh-default ready PID mismatch");
+        var main = UiaDriver.WaitForMainWindow(host, TimeSpan.FromSeconds(15));
+        Select(main, host, "CodeA", "code once");
+
+        var hotkeyPath = Path.Combine(profile, "user", "hotkey.json");
+        using (var hotkeys = JsonDocument.Parse(File.ReadAllText(hotkeyPath)))
+        {
+            var workspaceKeys = hotkeys.RootElement.GetProperty("Lua Code Edit Box")
+                .GetProperty("automation/lua/open-current-line").EnumerateArray()
+                .Select(item => item.GetString()).ToArray();
+            Ensure(workspaceKeys.SequenceEqual(new[] { "Shift-Enter" }),
+                "Fresh profile did not retain the shipped Shift+Enter Workspace binding");
+        }
+        File.Copy(hotkeyPath, Path.Combine(contractArtifacts, "resolved-hotkeys.json"));
+
+        var edit = Editor(main, mode);
+        Native.Focus(edit, host);
+        Native.Press(edit, host, 0x0D, shift: true);
+        var workspace = WaitWindow(host, "Lua Workspace", TimeSpan.FromSeconds(8));
+        AutomationElement? source = null;
+        try
+        {
+            WaitUntil(() => (source = FindWorkspaceSource(workspace)) is not null, TimeSpan.FromSeconds(5),
+                "Default Shift+Enter opened Workspace without a source editor after bounded layout settlement");
+        }
+        catch
+        {
+            SaveEvidence(workspace, contractArtifacts, "default-shift-enter-workspace-failure");
+            TryProcessEvidence(host, contractArtifacts, "default-shift-enter-process-failure");
+            throw;
+        }
+        Ensure(ReadEditor(source!, host) == "return \"seed-a\"",
+            "Default Shift+Enter opened a different code line");
+        SaveEvidence(workspace, contractArtifacts, "default-shift-enter-workspace");
+        ((WindowPattern)workspace.GetCurrentPattern(WindowPattern.Pattern)).Close();
+        WaitUntil(() => FindWindow(host, "Lua Workspace") is null, TimeSpan.FromSeconds(5),
+            "Fresh-default Workspace did not close");
+        Native.StabilizeOwnedClipboard(host.Id);
+        ((WindowPattern)main.GetCurrentPattern(WindowPattern.Pattern)).Close();
+        Ensure(host.WaitForExit(TimeSpan.FromSeconds(10)) && host.ExitCode == 0,
+            "Fresh-default hotkey host did not close normally with exit code 0");
+    }
+    finally
+    {
+        if (host is not null && !host.HasExited)
+        {
+            try { Native.StabilizeOwnedClipboard(host.Id); }
+            finally
+            {
+                host.Kill(entireProcessTree: true);
+                Ensure(host.WaitForExit(TimeSpan.FromSeconds(5)), "Fresh-default hotkey host did not stop after failure");
+            }
+        }
+        host?.Dispose();
+    }
+}
+
 
 sealed record StepResult(string Name, string Status, string Detail);
 sealed record HostIdentity(int ProcessId, string StartTimeUtc);
@@ -943,13 +1075,18 @@ static class ClipboardSafety
 
     public static string ReadText() => OnSta(() => Clipboard.GetText());
 
-    public static uint SetText(string text) => OnSta(() =>
+    public static uint SetTextWithoutReceipt(string text) => OnSta(() =>
     {
         Clipboard.SetText(text);
-        var verified = Native.ClipboardSequence();
+        return Native.ClipboardSequence();
+    });
+
+    public static uint SetText(string text)
+    {
+        var verified = SetTextWithoutReceipt(text);
         ClipboardReceipt.Record("test-paste", Environment.ProcessId, verified);
         return verified;
-    });
+    }
 
     public static void Restore(DataObject? snapshot, uint expectedSequence) => OnSta(() =>
     {
@@ -1014,6 +1151,13 @@ static class Native
     [StructLayout(LayoutKind.Explicit)] private struct InputUnion { [FieldOffset(0)] public MouseInput Mouse; [FieldOffset(0)] public KeyboardInput Keyboard; }
     [StructLayout(LayoutKind.Sequential)] private struct MouseInput { public int X, Y; public uint Data, Flags, Time; public nint ExtraInfo; }
     [StructLayout(LayoutKind.Sequential)] private struct KeyboardInput { public ushort VirtualKey, ScanCode; public uint Flags, Time; public nint ExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct GuiThreadInfo
+    {
+        public uint Size, Flags;
+        public nint Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+        public Rect CaretRect;
+    }
 
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
@@ -1021,6 +1165,11 @@ static class Native
     [DllImport("user32.dll")] private static extern nint GetClipboardOwner();
     [DllImport("user32.dll")] private static extern int IsClipboardFormatAvailable(uint format);
     [DllImport("user32.dll", SetLastError = true)] private static extern uint GetWindowThreadProcessId(nint hwnd, out uint processId);
+    [DllImport("user32.dll", SetLastError = true)] private static extern nint GetAncestor(nint hwnd, uint flags);
+    [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll", EntryPoint = "WindowFromPoint", ExactSpelling = true)] private static extern nint WindowFromPoint(Point point);
     [DllImport("user32.dll", EntryPoint = "PostMessageW", ExactSpelling = true, SetLastError = true)]
     private static extern int PostMessageW(nint hwnd, uint message, nint wParam, nint lParam);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", ExactSpelling = true, SetLastError = true)]
@@ -1056,32 +1205,153 @@ static class Native
         AssertClipboardState(receipt.Sequence, hostPid);
         var text = ClipboardSafety.ReadText();
         AssertClipboardState(receipt.Sequence, hostPid);
-        _ = ClipboardSafety.SetText(text);
+        var stabilized = ClipboardSafety.SetTextWithoutReceipt(text);
+        AssertClipboardState(stabilized, Environment.ProcessId);
+        ClipboardReceipt.Record("stabilized-host-copy", Environment.ProcessId, stabilized);
     }
 
-    private static void PrepareFocus(AutomationElement editor, Process host)
+    private static void PrepareFocus(AutomationElement editor, Process host, bool effectField = false)
     {
         var frame = editor;
         while (frame.Current.ControlType != ControlType.Window)
             frame = TreeWalker.ControlViewWalker.GetParent(frame) ?? throw new InvalidOperationException("STC has no top-level frame");
         UiaDriver.FocusAndVerify(frame, host, TimeSpan.FromSeconds(3));
         editor.SetFocus();
+        var initial = Stopwatch.StartNew();
+        while (initial.Elapsed < TimeSpan.FromMilliseconds(750))
+        {
+            if (HasExactFocus(editor, host, effectField)) return;
+            Thread.Sleep(25);
+        }
+        var beforeClick = DescribeFocusedElement();
+        var target = editor.Current;
+        var allowClick = target.ControlType == ControlType.Pane && target.ClassName == "wxWindow" && target.Name == "stcwindow";
+        if (!allowClick)
+        {
+            var passive = Stopwatch.StartNew();
+            while (passive.Elapsed < TimeSpan.FromSeconds(3))
+            {
+                if (HasExactFocus(editor, host, effectField)) return;
+                Thread.Sleep(25);
+            }
+            throw new TimeoutException($"Guarded input did not gain exact focus without click fallback; target=hwnd={target.NativeWindowHandle},pid={target.ProcessId},name={target.Name},class={target.ClassName};before={beforeClick};after={DescribeFocusedElement()};native={DescribeNativeFocus(editor)}");
+        }
+        var rect = editor.Current.BoundingRectangle;
+        Ensure(rect.Width >= 8 && rect.Height >= 8, $"STC has no safe click area: {rect}");
+        var point = new Point((int)Math.Round(rect.Left + rect.Width / 2), (int)Math.Round(rect.Top + rect.Height / 2));
+        var hit = WindowFromPoint(point);
+        GetWindowThreadProcessId(hit, out var hitOwner);
+        Ensure(hit == new nint(editor.Current.NativeWindowHandle) && hitOwner == (uint)host.Id,
+            $"Guarded focus click hit hwnd={hit}, pid={hitOwner} rather than target hwnd={editor.Current.NativeWindowHandle}, pid={host.Id}");
+        Click(point);
         var timer = Stopwatch.StartNew();
         while (timer.Elapsed < TimeSpan.FromSeconds(3))
         {
-            GetWindowThreadProcessId(GetForegroundWindow(), out var owner);
-            if (owner == (uint)host.Id && AutomationElement.FocusedElement.Current.NativeWindowHandle == editor.Current.NativeWindowHandle)
+            if (HasExactFocus(editor, host, effectField))
+            {
+                Console.WriteLine($"coding-editbox.focus-click=target:{editor.Current.NativeWindowHandle};point:{point.X},{point.Y};before:{beforeClick};after:{DescribeFocusedElement()}");
                 return;
-            Thread.Sleep(50);
+            }
+            Thread.Sleep(25);
         }
-        throw new TimeoutException("Guarded input did not gain exact host STC focus");
+        throw new TimeoutException($"Guarded input did not gain exact host STC focus after one verified click; target={editor.Current.NativeWindowHandle};point={point.X},{point.Y};before={beforeClick};after={DescribeFocusedElement()}");
     }
 
-    private static void AssertFocus(AutomationElement editor, Process host)
+    private static string DescribeFocusedElement()
     {
-        GetWindowThreadProcessId(GetForegroundWindow(), out var owner);
-        Ensure(owner == (uint)host.Id && AutomationElement.FocusedElement.Current.NativeWindowHandle == editor.Current.NativeWindowHandle,
-            "Guarded input stopped after focus left the host STC");
+        try
+        {
+            var focused = AutomationElement.FocusedElement;
+            var current = focused.Current;
+            var rect = current.BoundingRectangle;
+            return $"hwnd={current.NativeWindowHandle},pid={current.ProcessId},name={current.Name},class={current.ClassName},rect={rect.Left},{rect.Top},{rect.Right},{rect.Bottom}";
+        }
+        catch (ElementNotAvailableException) { return "focused-element-unavailable"; }
+    }
+
+    private static string DescribeNativeFocus(AutomationElement editor)
+    {
+        var target = editor.Current;
+        var hwnd = new nint(target.NativeWindowHandle);
+        var thread = GetWindowThreadProcessId(hwnd, out var owner);
+        var foreground = GetForegroundWindow();
+        var foregroundThread = GetWindowThreadProcessId(foreground, out var foregroundOwner);
+        var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+        return thread != 0 && GetGUIThreadInfo(thread, ref info)
+            ? $"target={hwnd},visible={!target.IsOffscreen},thread={thread},owner={owner},root={GetAncestor(hwnd, 2)},foreground={foreground},foregroundThread={foregroundThread},foregroundOwner={foregroundOwner},active={info.Active},focus={info.Focus},capture={info.Capture},menuOwner={info.MenuOwner},moveSize={info.MoveSize},flags={info.Flags}"
+            : $"target={hwnd},thread={thread},owner={owner},foreground={foreground},foregroundThread={foregroundThread},foregroundOwner={foregroundOwner},unavailable";
+    }
+
+    private static bool HasExactFocus(AutomationElement editor, Process host, bool effectField = false)
+    {
+        var target = editor.Current;
+        if (target.ProcessId != host.Id || target.NativeWindowHandle == 0 || target.IsOffscreen)
+            return false;
+        var combo = effectField ? TreeWalker.ControlViewWalker.GetParent(editor) : null;
+        var authorizedEffect = effectField && target.ControlType == ControlType.Edit
+            && combo?.Current.ControlType == ControlType.ComboBox && combo.Current.ProcessId == host.Id
+            && !combo.Current.IsOffscreen && editor.TryGetCurrentPattern(ValuePattern.Pattern, out _);
+        var plain = (target.ControlType == ControlType.Edit || target.ControlType == ControlType.Document)
+            && target.ClassName == "Edit" && (IsWritableMultilineEdit(new nint(target.NativeWindowHandle)) || authorizedEffect);
+        var stc = target.ControlType == ControlType.Pane && target.ClassName == "wxWindow" && target.Name == "stcwindow";
+        if (!plain && !stc)
+            return false;
+        if (stc && AutomationElement.FocusedElement.Current.NativeWindowHandle != target.NativeWindowHandle)
+            return false;
+        var hwnd = new nint(target.NativeWindowHandle);
+        var foreground = GetForegroundWindow();
+        var foregroundThread = GetWindowThreadProcessId(foreground, out var foregroundOwner);
+        var targetThread = GetWindowThreadProcessId(hwnd, out var targetOwner);
+        if (foregroundOwner != (uint)host.Id || targetOwner != (uint)host.Id || targetThread == 0
+            || targetThread != foregroundThread || GetAncestor(hwnd, 2) != foreground)
+            return false;
+        var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+        return GetGUIThreadInfo(targetThread, ref info) && info.Focus == hwnd && info.Active == foreground
+            && (info.Flags & 0x1Eu) == 0;
+    }
+
+    private static void Click(Point point)
+    {
+        var left = GetSystemMetrics(76);
+        var top = GetSystemMetrics(77);
+        var width = GetSystemMetrics(78);
+        var height = GetSystemMetrics(79);
+        Ensure(width > 1 && height > 1, "Virtual desktop metrics are invalid for guarded focus click");
+        Input Mouse(uint action) => new()
+        {
+            Type = 0,
+            Union = new InputUnion { Mouse = new MouseInput
+            {
+                X = checked((int)Math.Round((point.X - left) * 65535.0 / (width - 1))),
+                Y = checked((int)Math.Round((point.Y - top) * 65535.0 / (height - 1))),
+                Flags = 0x0001u | 0x4000u | 0x8000u | action
+            } }
+        };
+        void SendMouse(Input input, string stage)
+        {
+            if (SendInput(1, new[] { input }, Marshal.SizeOf<Input>()) != 1)
+                throw new InvalidOperationException($"Guarded focus click failed at {stage}");
+        }
+        var pressed = false;
+        try
+        {
+            SendMouse(Mouse(0), "move");
+            Thread.Sleep(20);
+            SendMouse(Mouse(0x0002), "left down");
+            pressed = true;
+            Thread.Sleep(20);
+            SendMouse(Mouse(0x0004), "left up");
+            pressed = false;
+        }
+        finally
+        {
+            if (pressed) _ = SendInput(1, new[] { Mouse(0x0004) }, Marshal.SizeOf<Input>());
+        }
+    }
+
+    private static void AssertFocus(AutomationElement editor, Process host, bool effectField = false)
+    {
+        Ensure(HasExactFocus(editor, host, effectField), "Guarded input stopped after exact editor focus was lost");
     }
 
     private static Input Key(ushort virtualKey, bool up)
@@ -1097,9 +1367,9 @@ static class Native
         };
     }
 
-    private static void Send(AutomationElement editor, Process host, params Input[] inputs)
+    private static void Send(AutomationElement editor, Process host, bool effectField, params Input[] inputs)
     {
-        AssertFocus(editor, host);
+        AssertFocus(editor, host, effectField);
         if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>()) != inputs.Length)
         {
             var releases = new[] { Key(0x11, true), Key(0x10, true), Key(0x12, true) };
@@ -1109,12 +1379,12 @@ static class Native
         }
     }
 
-    public static void SendChord(AutomationElement editor, Process host, ushort key) => Send(editor, host,
+    public static void SendChord(AutomationElement editor, Process host, ushort key, bool effectField = false) => Send(editor, host, effectField,
         Key(0x11, false), Key(key, false), Key(key, true), Key(0x11, true));
 
     public static void SendCtrlHome(AutomationElement editor, Process host) => SendChord(editor, host, 0x24);
 
-    public static void Press(AutomationElement editor, Process host, ushort key, bool shift = false, bool alt = false)
+    public static void Press(AutomationElement editor, Process host, ushort key, bool shift = false, bool alt = false, bool effectField = false)
     {
         var inputs = new List<Input>();
         if (shift) inputs.Add(Key(0x10, false));
@@ -1123,26 +1393,43 @@ static class Native
         inputs.Add(Key(key, true));
         if (alt) inputs.Add(Key(0x12, true));
         if (shift) inputs.Add(Key(0x10, true));
-        Send(editor, host, inputs.ToArray());
+        Send(editor, host, effectField, inputs.ToArray());
     }
 
     public static void DismissMenu(Process host)
     {
-        GetWindowThreadProcessId(GetForegroundWindow(), out var owner);
-        Ensure(owner == (uint)host.Id, "Context menu lost the launched host's foreground ownership");
-        var inputs = new[] { Key(0x1B, false), Key(0x1B, true) };
-        Ensure(SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>()) == inputs.Length,
-            "Escape could not dismiss the host context menu");
+        bool HostInMenuMode()
+        {
+            var thread = GetWindowThreadProcessId(GetForegroundWindow(), out var owner);
+            Ensure(owner == (uint)host.Id && thread != 0, "Menu lost the launched host's foreground ownership");
+            var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
+            Ensure(GetGUIThreadInfo(thread, ref info), "Menu GUI thread state was unavailable");
+            return (info.Flags & 0x1Cu) != 0;
+        }
+        for (var level = 0; level < 3; level++)
+        {
+            Ensure(HostInMenuMode(), "Expected host menu was not active before dismissal");
+            var inputs = new[] { Key(0x1B, false), Key(0x1B, true) };
+            Ensure(SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>()) == inputs.Length,
+                "Escape could not dismiss the host menu");
+            var timer = Stopwatch.StartNew();
+            while (timer.Elapsed < TimeSpan.FromMilliseconds(750))
+            {
+                if (!HostInMenuMode()) return;
+                Thread.Sleep(25);
+            }
+        }
+        throw new TimeoutException("Host remained in menu mode after three bounded Escape actions");
     }
 
-    public static void TypeText(AutomationElement editor, Process host, string text)
+    public static void TypeText(AutomationElement editor, Process host, string text, bool effectField = false)
     {
-        PrepareFocus(editor, host);
+        PrepareFocus(editor, host, effectField);
         foreach (var ch in text)
         {
             var down = new Input { Type = 1, Union = new InputUnion { Keyboard = new KeyboardInput { ScanCode = ch, Flags = 4 } } };
             var up = new Input { Type = 1, Union = new InputUnion { Keyboard = new KeyboardInput { ScanCode = ch, Flags = 6 } } };
-            Send(editor, host, down, up);
+            Send(editor, host, effectField, down, up);
         }
     }
 
@@ -1159,7 +1446,7 @@ static class Native
         SendChord(editor, host, 'V');
     }
 
-    public static void Focus(AutomationElement editor, Process host) => PrepareFocus(editor, host);
+    public static void Focus(AutomationElement editor, Process host, bool effectField = false) => PrepareFocus(editor, host, effectField);
     public static void Undo(AutomationElement editor, Process host)
     {
         PrepareFocus(editor, host);
@@ -1174,12 +1461,39 @@ static class Native
         SendChord(editor, host, 'A');
         SendChord(editor, host, 'C');
         WaitUntil(() => ClipboardSequence() != before, TimeSpan.FromSeconds(3), "STC copy did not change the clipboard");
-        var copiedSequence = ClipboardSequence();
+        var copiedSequence = WaitForStableClipboardOwner(host.Id, before, TimeSpan.FromMilliseconds(500));
         AssertClipboardState(copiedSequence, host.Id);
         var copied = ClipboardSafety.ReadText();
+        GetWindowThreadProcessId(GetClipboardOwner(), out var ownerAfterRead);
+        Console.WriteLine($"coding-editbox.copy-post-read=expected:{copiedSequence};actual:{ClipboardSequence()};owner:{ownerAfterRead}");
         AssertClipboardState(copiedSequence, host.Id);
         ClipboardReceipt.Record("host-stc-copy", host.Id, copiedSequence);
         return copied;
+    }
+
+    private static uint WaitForStableClipboardOwner(int hostPid, uint before, TimeSpan timeout)
+    {
+        var timer = Stopwatch.StartNew();
+        var stable = Stopwatch.StartNew();
+        var observed = ClipboardSequence();
+        while (timer.Elapsed < timeout)
+        {
+            var current = ClipboardSequence();
+            GetWindowThreadProcessId(GetClipboardOwner(), out var owner);
+            if (current != before && owner != (uint)hostPid)
+                throw new InvalidOperationException($"STC copy changed clipboard to non-host owner {owner}");
+            if (current == before || current != observed)
+            {
+                if (current != observed)
+                    Console.WriteLine($"coding-editbox.copy-publication-transition={observed}->{current};owner={owner}");
+                observed = current;
+                stable.Restart();
+            }
+            else if (stable.Elapsed >= TimeSpan.FromMilliseconds(75))
+                return current;
+            Thread.Sleep(15);
+        }
+        throw new TimeoutException("STC copy did not reach a stable host-owned clipboard publication within 500 ms");
     }
 
     private static void Ensure(bool condition, string message)

@@ -115,9 +115,6 @@ class SubsEditBox final : public wxPanel {
 	wxRadioButton *by_frame;
 	wxTextCtrl *char_count;
 	wxCheckBox *split_box;
-#ifdef WITH_WXSTC
-	wxButton *lua_workspace_button;
-#endif
 	bool code_mode = false;
 	SubtitleTimeDisplayMode time_display_mode = SubtitleTimeDisplayMode::Ass;
 	SubtitleTimeDisplayMode non_frame_display_mode = SubtitleTimeDisplayMode::Ass;

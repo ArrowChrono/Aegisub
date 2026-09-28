@@ -28,6 +28,8 @@
 #include <libaegisub/path.h>
 
 #include <wx/intl.h>
+
+#include <algorithm>
 namespace {
 	const char* added_hotkeys_cj[][3] = {
 		{"time/align", "Video", "KP_TAB"},
@@ -57,6 +59,22 @@ namespace {
 		{"grid/selection/forward", "Default", "MouseForward"},
 		{nullptr}
 	};
+
+	void migrate_lua_code_edit_box_hotkey() {
+		constexpr auto context = "Lua Code Edit Box";
+		constexpr auto command = "automation/lua/open-current-line";
+		constexpr auto keys = "Shift-Enter";
+
+		auto hk_map = hotkey::inst->GetHotkeyMap();
+		for (auto const& entry : hk_map) {
+			auto const& combo = entry.second;
+			if (combo.Context() == context && (entry.first == command || combo.Str() == keys))
+				return;
+		}
+
+		hk_map.insert({command, agi::hotkey::Combo(context, command, keys)});
+		hotkey::inst->SetHotkeyMap(std::move(hk_map));
+	}
 
 	// Large step uses Alt rather than Shift so Shift-Left/Right keep Video
 	// keyframe navigation while a visual tool is active.
@@ -192,6 +210,11 @@ void init() {
 	if (std::find(begin(migrations), end(migrations), "grid/selection/history") == end(migrations)) {
 		migrate_hotkeys(added_hotkeys_selection_history);
 		migrations.emplace_back("grid/selection/history");
+	}
+
+	if (std::ranges::find(migrations, "lua/code-edit-box/open-workspace") == end(migrations)) {
+		migrate_lua_code_edit_box_hotkey();
+		migrations.emplace_back("lua/code-edit-box/open-workspace");
 	}
 
 	if (std::find(begin(migrations), end(migrations), "visual_tool_nudge") == end(migrations)) {
@@ -397,15 +420,11 @@ bool check_exact(std::string const& context, agi::Context *c, wxKeyEvent &evt) {
 		if (command.empty())
 			return false;
 
-		// Unlike check(), Validate failure must not swallow the key — fall through
-		// so outer contexts (e.g. Video frame step) can still handle it.
 		cmd::Command *cmd = cmd::get(command);
 		if (!cmd->Validate(c))
 			return false;
 
-		auto sink = c->GetStatusSink();
-		if (sink) sink->SetLastCommand(from_wx(cmd->StrDisplay(c)));
-		(*cmd)(c);
+		cmd::call(command, c);
 		return true;
 	}
 	catch (cmd::CommandNotFound const& e) {

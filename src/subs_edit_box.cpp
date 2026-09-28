@@ -320,15 +320,6 @@ SubsEditBox::SubsEditBox(wxWindow *parent, agi::Context *context)
 	split_box->SetToolTip(_("Show the contents of the subtitle line when it was first selected above the edit box. This is sometimes useful when editing subtitles or translating subtitles into another language."));
 	split_box->Bind(wxEVT_CHECKBOX, &SubsEditBox::OnSplit, this);
 	middle_right_sizer->Add(split_box, wxSizerFlags().Expand());
-#ifdef WITH_WXSTC
-	lua_workspace_button = new wxButton(this, -1, _("Lua Workspace..."));
-	lua_workspace_button->SetToolTip(_("Edit this code line as multiline Lua in the Workspace (Shift+Enter)."));
-	lua_workspace_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-		CallCommand("automation/lua/open-current-line", false);
-	});
-	middle_right_sizer->Add(lua_workspace_button, wxSizerFlags().Expand().Border(wxLEFT, 5));
-	middle_right_sizer->Hide(lua_workspace_button);
-#endif
 
 	// Main sizer
 	wxSizer *main_sizer = new wxBoxSizer(wxVERTICAL);
@@ -1080,10 +1071,6 @@ void SubsEditBox::UpdateCodeMode() {
 		static_cast<SubsTextEditCtrl *>(edit_ctrl_tc)->SetCodeMode(enabled);
 #ifdef WITH_WXSTC
 	}
-	middle_right_sizer->Show(lua_workspace_button, enabled);
-	wxSizeEvent size_event;
-	OnSize(size_event);
-	Layout();
 #endif
 }
 
@@ -1209,14 +1196,15 @@ void SubsEditBox::OnKeyDown(wxKeyEvent &event) {
 	wxWindow const *editor = edit_ctrl_tc;
 #endif
 	if (code_mode && event.GetEventObject() == editor) {
-		if (event.GetKeyCode() == WXK_RETURN && event.GetModifiers() == wxMOD_SHIFT) {
 #ifdef WITH_WXSTC
-			CallCommand("automation/lua/open-current-line", false);
+		if (hotkey::check_exact("Lua Code Edit Box", c, event))
+			return;
 #else
+		if (event.GetKeyCode() == WXK_RETURN && event.GetModifiers() == wxMOD_SHIFT) {
 			c->ShowError("Lua Workspace is unavailable in this build.", "Lua Workspace");
-#endif
 			return;
 		}
+#endif
 #ifdef WITH_WXSTC
 		if (use_stc && (event.GetKeyCode() == WXK_TAB || event.GetKeyCode() == WXK_HOME || event.GetKeyCode() == WXK_END || ((event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_RIGHT) && event.AltDown()))) {
 			event.Skip();

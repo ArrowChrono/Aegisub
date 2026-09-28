@@ -54,6 +54,9 @@ class SubsTextEditCtrl final : public wxTextCtrl {
 
 	void SetStyles();
 
+#ifdef __WXMSW__
+	WXLRESULT MSWWindowProc(WXUINT message, WXWPARAM wParam, WXLPARAM lParam) override;
+#endif
 
 public:
 	SubsTextEditCtrl(wxWindow* parent, wxSize size, long style, agi::Context *context);

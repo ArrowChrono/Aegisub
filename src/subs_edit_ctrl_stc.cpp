@@ -70,6 +70,7 @@
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
 #include <wx/settings.h>
+#include <wx/utils.h>
 
 #ifdef __WXMSW__
 #include <windows.h>
@@ -424,6 +425,18 @@ SubsStyledTextEditCtrl::SubsStyledTextEditCtrl(wxWindow* parent, wxSize wsize, l
 
 	using std::bind;
 
+	Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& event) {
+		int const key = event.GetKeyCode();
+		bool const paste_shortcut =
+			((key == 'V' || key == 'v' || key == WXK_CONTROL_V) && event.GetModifiers() == wxMOD_CMD) ||
+			((key == WXK_INSERT || key == WXK_NUMPAD_INSERT) && event.GetModifiers() == wxMOD_SHIFT);
+		if (paste_shortcut) {
+			if (code_mode || CanPaste())
+				Paste();
+		}
+		else
+			event.Skip();
+	});
 	Bind(wxEVT_CHAR_HOOK, &SubsStyledTextEditCtrl::OnKeyDown, this);
 	Bind(wxEVT_CHAR, &SubsStyledTextEditCtrl::OnChar, this);
 	Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& event) {
@@ -678,11 +691,6 @@ void SubsStyledTextEditCtrl::OnKeyDown(wxKeyEvent &event) {
 		}
 		else if ((event.GetKeyCode() == WXK_LEFT || event.GetKeyCode() == WXK_RIGHT) && event.GetModifiers() == wxMOD_ALT)
 			event.Skip(false);
-		else if (event.GetKeyCode() == WXK_RETURN && event.GetModifiers() == wxMOD_SHIFT) {
-			if (context)
-				cmd::call("automation/lua/open-current-line", context);
-			event.Skip(false);
-		}
 		return;
 	}
 
@@ -1450,21 +1458,28 @@ bool SubsStyledTextEditCtrl::InsertCodeText(std::string const& text) {
 }
 
 void SubsStyledTextEditCtrl::Paste() {
-	if (code_mode) {
-		wxTextDataObject text;
-		auto *clipboard = wxClipboard::Get();
-		wxLogNull disable_logging;
-		bool const opened = clipboard->Open();
-		bool const read = opened && clipboard->GetData(text);
-		if (opened)
+	wxTextDataObject text;
+	auto *clipboard = wxClipboard::Get();
+	wxLogNull disable_logging;
+	bool read = false;
+	for (int attempt = 0; attempt < 5 && !read; ++attempt) {
+		if (clipboard->Open()) {
+			read = clipboard->GetData(text);
 			clipboard->Close();
-		if (read)
-			InsertCodeText(from_wx(text.GetText()));
-		else
+		}
+		if (!read && attempt < 4)
+			wxMilliSleep(20);
+	}
+	if (!read) {
+		if (code_mode)
 			wxMessageBox(_("Could not read text from the clipboard. The code line was not changed."), _("Cannot paste Lua code"), wxOK | wxICON_ERROR, this);
 		return;
 	}
-	std::string data = GetClipboard();
+	std::string data = from_wx(text.GetText());
+	if (code_mode) {
+		InsertCodeText(data);
+		return;
+	}
 
 	agi::util::strings::replace_all_inplace(data, "\r\n", "\\N");
 	agi::util::strings::replace_all_inplace(data, "\n", "\\N");

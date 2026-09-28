@@ -257,6 +257,11 @@
 			"Home"
 		]
 	},
+	"Lua Code Edit Box" : {
+		"automation/lua/open-current-line" : [
+			"Shift-Enter"
+		]
+	},
 	"Subtitle Edit Box" : {
 		"edit/color/outline" : [
 			"Alt-3"

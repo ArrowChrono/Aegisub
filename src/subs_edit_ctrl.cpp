@@ -42,6 +42,11 @@
 #include <wx/log.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
+#include <wx/utils.h>
+
+#ifdef __WXMSW__
+#include <windows.h>
+#endif
 
 // Maximum number of languages (locales)
 // It should be above 100 (at least 242) and probably not more than 1000
@@ -77,6 +82,20 @@ SubsTextEditCtrl::SubsTextEditCtrl(wxWindow* parent, wxSize wsize, long style, a
 
 	using std::bind;
 
+#ifndef __WXMSW__
+	Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& event) {
+		int const key = event.GetKeyCode();
+		bool const paste_shortcut =
+			((key == 'V' || key == 'v' || key == WXK_CONTROL_V) && event.GetModifiers() == wxMOD_CMD) ||
+			((key == WXK_INSERT || key == WXK_NUMPAD_INSERT) && event.GetModifiers() == wxMOD_SHIFT);
+		if (paste_shortcut) {
+			if (code_mode || CanPaste())
+				Paste();
+		}
+		else
+			event.Skip();
+	});
+#endif
 	Bind(wxEVT_CHAR_HOOK, &SubsTextEditCtrl::OnKeyDown, this);
 	Bind(wxEVT_CHAR, [this](wxKeyEvent& event) {
 		int const key = event.GetKeyCode();
@@ -107,6 +126,16 @@ SubsTextEditCtrl::SubsTextEditCtrl(wxWindow* parent, wxSize wsize, long style, a
 
 SubsTextEditCtrl::~SubsTextEditCtrl() {
 }
+
+#ifdef __WXMSW__
+WXLRESULT SubsTextEditCtrl::MSWWindowProc(WXUINT message, WXWPARAM wParam, WXLPARAM lParam) {
+	if (message == WM_PASTE && IsEditable()) {
+		Paste();
+		return 0;
+	}
+	return wxTextCtrl::MSWWindowProc(message, wParam, lParam);
+}
+#endif
 
 void SubsTextEditCtrl::OnKeyDown(wxKeyEvent& event) {
 	if (event.GetKeyCode() == WXK_RETURN && event.GetModifiers() == wxMOD_SHIFT) {
@@ -139,32 +168,41 @@ void SubsTextEditCtrl::SetStyles() {
 }
 
 void SubsTextEditCtrl::Paste() {
-	std::string data;
-	if (code_mode) {
-		wxTextDataObject clipboard_text;
-		wxClipboard *clipboard = wxClipboard::Get();
-		wxLogNull disable_logging;
-		bool const opened = clipboard->Open();
-		bool const read = opened && clipboard->GetData(clipboard_text);
-		if (opened) {
+	wxTextDataObject clipboard_text;
+	wxClipboard *clipboard = wxClipboard::Get();
+	wxLogNull disable_logging;
+	bool read = false;
+	for (int attempt = 0; attempt < 5 && !read; ++attempt) {
+		if (clipboard->Open()) {
+			read = clipboard->GetData(clipboard_text);
 			clipboard->Close();
 		}
-		if (!read) {
+		if (!read && attempt < 4)
+			wxMilliSleep(20);
+	}
+	if (!read) {
+		if (code_mode)
 			wxMessageBox(_("Could not read text from the clipboard. The code line was not changed."), _("Cannot paste Lua code"), wxOK | wxICON_ERROR, this);
-			return;
-		}
-		data = from_wx(clipboard_text.GetText());
+		return;
 	}
-	else {
-		data = GetClipboard();
-	}
+	std::string data = from_wx(clipboard_text.GetText());
 	long sel_start;
 	long sel_end;
 	GetSelection(&sel_start, &sel_end);
 	if (code_mode) {
+		auto replace_code = [this](long from, long to, wxString const& replacement) {
+			SetSelection(from, to);
+			{
+				EventsSuppressor suppress(this);
+				WriteText(replacement);
+			}
+			wxCommandEvent changed(wxEVT_TEXT, GetId());
+			changed.SetEventObject(this);
+			ProcessWindowEvent(changed);
+		};
 		wxString pasted = to_wx(data);
 		if (pasted.Find('\r') == wxNOT_FOUND && pasted.Find('\n') == wxNOT_FOUND) {
-			Replace(sel_start, sel_end, pasted);
+			replace_code(sel_start, sel_end, pasted);
 			return;
 		}
 
@@ -174,7 +212,7 @@ void SubsTextEditCtrl::Paste() {
 			wxMessageBox(to_wx(serialized.diagnostic->message) + _("\n\nOpen the Lua Workspace (Shift+Enter) to edit multiline code."), _("Cannot paste Lua code"), wxOK | wxICON_ERROR, this);
 			return;
 		}
-		Replace(0, GetLastPosition(), to_wx(serialized.source));
+		replace_code(0, GetLastPosition(), to_wx(serialized.source));
 		return;
 	}
 
