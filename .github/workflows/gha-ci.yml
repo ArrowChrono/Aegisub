@@ -3,7 +3,11 @@ name: Aegisub CI
 on:
   push:
     branches: [exp]
+    paths-ignore:
+      - '.github/workflows/gha-package-cleanup.yml'
   pull_request:
+    paths-ignore:
+      - '.github/workflows/gha-package-cleanup.yml'
   workflow_dispatch:
 
 permissions:
