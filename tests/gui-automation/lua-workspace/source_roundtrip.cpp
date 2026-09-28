@@ -119,6 +119,45 @@ void CheckSemicolonFormat(std::string_view source, std::string_view stage) {
 	Require(source.find("ipairs(values)") != std::string_view::npos, std::string(stage) + " inserted padding inside a function call");
 	Require(source.find("log[# log + 1]") != std::string_view::npos, std::string(stage) + " inserted padding around an index expression");
 	Require(source.find("table.concat(log, \",\")") != std::string_view::npos, std::string(stage) + " inserted padding before a call argument comma");
+	Require(source.find("local values = { 2; 3; label = \"雪 ; 🌟\"; }") != std::string_view::npos, std::string(stage) + " split table-field separators as statements");
+}
+
+bool HasStandaloneSeparator(std::string_view source) {
+	while (!source.empty()) {
+		auto end = source.find('\n');
+		auto line = source.substr(0, end);
+		auto first = line.find_first_not_of("\t \r");
+		if (first != std::string_view::npos && line.substr(first) == ";")
+			return true;
+		if (end == std::string_view::npos)
+			break;
+		source.remove_prefix(end + 1);
+	}
+	return false;
+}
+
+void CheckStatementFormat(std::string_view source, std::string_view stage) {
+	auto require_line = [&](std::string_view line) {
+		auto pos = source.find(line);
+		Require(pos != std::string_view::npos && (pos == 0 || source[pos - 1] == '\n'), std::string(stage) + " did not put a statement on its own line: " + std::string(line));
+	};
+	for (auto const line : {"local output = { }", "local function append(value)", "\t\tappend(config.prefix .. adjusted)", "return table.concat(output, \"|\")"})
+		require_line(line);
+	auto adjusted = source.find("\tlocal adjusted = ");
+	auto adjusted_end = adjusted == std::string_view::npos ? adjusted : source.find('\n', adjusted);
+	auto adjusted_line = adjusted == std::string_view::npos ? std::string_view{} : source.substr(adjusted, adjusted_end - adjusted);
+	Require(adjusted != std::string_view::npos && adjusted_line.find("config.values[index]") != std::string_view::npos && adjusted_line.find("index + 1)") != std::string_view::npos,
+			std::string(stage) + " split a multiline expression as statements");
+	Require(source.find("local config = { prefix = \"雪\", values = { 2, 3, 5 } }") != std::string_view::npos, std::string(stage) + " split a table constructor as statements");
+	Require(!HasStandaloneSeparator(source), std::string(stage) + " emitted a standalone separator line");
+}
+
+void CheckHistoricSingleLineFormat(std::string_view source, std::string_view stage) {
+	for (auto const statement : {"local output = { }", "local total = 0", "for index, value in ipairs(values) do", "\ttotal = total + value", "\toutput[# output + 1] = tostring(total)", "return table.concat(output, \",\")"}) {
+		auto pos = source.find(statement);
+		Require(pos != std::string_view::npos && (pos == 0 || source[pos - 1] == '\n'), std::string(stage) + " did not recover a historic statement boundary: " + statement);
+	}
+	Require(!HasStandaloneSeparator(source), std::string(stage) + " emitted a standalone separator line");
 }
 
 void RunPunctuationCase(fs::path const& artifacts) {
@@ -185,6 +224,10 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 		for (auto const text : {"\"雪 ; 🌟\"", "[=[文 ; 本]=]", "-- punctuation ; stays inside this comment", "--[=[long comment ; punctuation]=]"})
 			Require(formatted.source.find(text) != std::string::npos, "Formatting changed literal or comment semicolon spacing");
 	}
+	if (name == "statement-boundaries")
+		CheckStatementFormat(formatted.source, "Formatting");
+	if (name == "historic-single-line")
+		CheckHistoricSingleLineFormat(formatted.source, "Formatting");
 	ExpectResult(formatted.source, expected, artifacts / "formatted.actual");
 
 	auto const serialized = Automation4::SerializeLuaSource(formatted.source);
@@ -200,6 +243,8 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 		CheckSemicolonFormat(serialized.source, "Serialization");
 		WriteFile(artifacts / "format-contract.txt", "Calls, indexes, statement separators, and table separators have no unwanted inner or preceding padding; literals and comments retain their content.\n");
 	}
+	if (name == "statement-boundaries" || name == "historic-single-line")
+		Require(serialized.source.find(';') != std::string_view::npos, "Serialization did not retain recoverable statement separators");
 	ExpectResult(serialized.source, expected, artifacts / "serialized.actual");
 
 	AssFile file;
@@ -220,6 +265,16 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 	Require(restored.Text.get() == serialized.source, "Reopened ASS source bytes differ from serialized source");
 	WriteAssFileForCore(&reopened, artifacts / "output.ass", agi::vfr::Framerate{}, "UTF-8", AssWriteOptions{});
 	ExpectResult(restored.Text.get(), expected, artifacts / "reopened.actual");
+
+	auto const reopened_formatted = Automation4::FormatLuaSource(restored.Text.get());
+	Require(reopened_formatted.Succeeded(), "Reopened ASS source failed formatting: " + (reopened_formatted.diagnostic ? reopened_formatted.diagnostic->message : std::string()));
+	WriteFile(artifacts / "reopened-formatted.lua", reopened_formatted.source);
+	Require(!Automation4::ValidateLuaSource(reopened_formatted.source), "Reopened formatted source failed validation");
+	if (name == "statement-boundaries")
+		CheckStatementFormat(reopened_formatted.source, "Reopened formatting");
+	if (name == "historic-single-line")
+		CheckHistoricSingleLineFormat(reopened_formatted.source, "Reopened formatting");
+	ExpectResult(reopened_formatted.source, expected, artifacts / "reopened-formatted.actual");
 }
 
 void RunValidateOnlyCase(fs::path const& fixtures, fs::path const& artifacts) {
@@ -234,6 +289,31 @@ void RunValidateOnlyCase(fs::path const& fixtures, fs::path const& artifacts) {
 	Require(serialized.Succeeded(), "Validation-only source failed serialization");
 	WriteFile(artifacts / "serialized.lua", serialized.source);
 	Require(!Automation4::ValidateLuaSource(serialized.source), "Validation-only serialized source failed validation");
+}
+
+void RunScalabilityCase(fs::path const& artifacts) {
+	fs::create_directories(artifacts);
+	std::string original = "local total=0\nlocal function add(value) total=total+value end\n";
+	for (int i = 0; i < 512; ++i)
+		original += "add(1)\n";
+	for (int i = 0; i < 512; ++i)
+		original += "total=total+1;";
+	original += "\nlocal held=1 (function() total=total+1 end)()\nreturn tostring(total)..':'..tostring(held)\n";
+	constexpr std::string_view expected = "1025:1";
+	WriteFile(artifacts / "original.lua", original);
+	ExpectResult(original, expected, artifacts / "original.actual");
+
+	auto const formatted = Automation4::FormatLuaSource(original);
+	Require(formatted.Succeeded(), "Scalability source failed formatting: " + (formatted.diagnostic ? formatted.diagnostic->message : std::string()));
+	WriteFile(artifacts / "formatted.lua", formatted.source);
+	Require(formatted.source.find("local held = 1\n(function()") != std::string_view::npos, "Formatting lost an implicit boundary after a non-call expression");
+	ExpectResult(formatted.source, expected, artifacts / "formatted.actual");
+
+	auto const serialized = Automation4::SerializeLuaSource(formatted.source);
+	Require(serialized.Succeeded(), "Scalability source failed serialization: " + (serialized.diagnostic ? serialized.diagnostic->message : std::string()));
+	WriteFile(artifacts / "serialized.lua", serialized.source);
+	Require(serialized.source.find("local held = 1; (function()") != std::string_view::npos, "Serialization lost an implicit boundary after a non-call expression");
+	ExpectResult(serialized.source, expected, artifacts / "serialized.actual");
 }
 
 void RunInvalidCase(fs::path const& fixtures, fs::path const& artifacts, std::string const& name) {
@@ -448,9 +528,10 @@ int main(int argc, char **argv) {
 		};
 		run("classifier", [&] { fs::create_directories(artifacts / "classifier"); CheckClassifier(artifacts / "classifier"); });
 		run("punctuation", [&] { RunPunctuationCase(artifacts / "punctuation"); });
-		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access", "semicolons"})
+		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access", "semicolons", "statement-boundaries", "historic-single-line"})
 			run(name, [&] { RunExecutableCase(fixtures, artifacts / name, name); });
 		run("validate_only", [&] { RunValidateOnlyCase(fixtures, artifacts / "validate_only"); });
+		run("scalability", [&]() -> void { RunScalabilityCase(artifacts / "scalability"); });
 		for (auto const& name : {"invalid_escape", "binary"})
 			run(name, [&] { RunInvalidCase(fixtures, artifacts / name, name); });
 		std::cout << manifest;

@@ -8,6 +8,7 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -29,7 +30,7 @@ struct Token {
 	TokenKind kind;
 	std::string_view text;
 	std::string_view comment_body;
-	bool newline_before = false;
+	size_t offset = 0;
 	bool line_comment = false;
 };
 
@@ -100,18 +101,15 @@ std::optional<LuaSourceDiagnostic> Tokenize(std::string_view source, std::vector
 		while (pos < source.size() && !IsNewline(source[pos]))
 			++pos;
 		auto text = source.substr(start, pos - start);
-		tokens.push_back({.kind = TokenKind::Header, .text = text, .comment_body = text, .newline_before = false, .line_comment = true});
+		tokens.push_back({.kind = TokenKind::Header, .text = text, .comment_body = text, .offset = start, .line_comment = true});
 	}
 	while (pos < source.size()) {
-		bool newline = false;
-		while (pos < source.size() && IsSpace(source[pos])) {
-			newline |= IsNewline(source[pos]);
+		while (pos < source.size() && IsSpace(source[pos]))
 			++pos;
-		}
 		if (pos == source.size())
 			break;
 		size_t start = pos;
-		Token token{.kind = TokenKind::Symbol, .text = {}, .comment_body = {}, .newline_before = newline};
+		Token token{.kind = TokenKind::Symbol, .text = {}, .comment_body = {}, .offset = start};
 		bool comment = source.substr(pos).starts_with("--");
 		if (comment)
 			pos += 2;
@@ -265,6 +263,155 @@ std::string SerializeComment(std::string_view body) {
 LuaSourceResult Failure(std::string_view source, LuaSourceDiagnostic diagnostic) {
 	return {.source = std::string(source), .diagnostic = std::move(diagnostic)};
 }
+
+int AppendDump(lua_State *, void const *data, size_t size, void *output) {
+	static_cast<std::string *>(output)->append(static_cast<char const *>(data), size);
+	return 0;
+}
+
+std::optional<std::string> DumpBytecode(lua_State *state, std::string_view source) {
+	lua_settop(state, 0);
+	if (luaL_loadbufferx(state, source.empty() ? "" : source.data(), source.size(), "=lua-workspace", "t") != 0)
+		return std::nullopt;
+	std::string output;
+	if (lua_dump(state, AppendDump, &output) != 0)
+		return std::nullopt;
+	return output;
+}
+
+bool CanEndStatement(Token const& token) {
+	if (token.kind == TokenKind::Identifier || token.kind == TokenKind::Number || token.kind == TokenKind::String || token.kind == TokenKind::Comment || token.kind == TokenKind::Header)
+		return true;
+	if (token.kind == TokenKind::Symbol)
+		return token.text == ")" || token.text == "]" || token.text == "}" || token.text == "::";
+	return token.text == "break" || token.text == "end" || token.text == "false" || token.text == "nil" || token.text == "true";
+}
+
+bool CanStartStatement(Token const& token) {
+	if (token.kind == TokenKind::Identifier)
+		return true;
+	if (token.kind == TokenKind::Symbol)
+		return token.text == "(" || token.text == "::";
+	if (token.kind != TokenKind::Keyword)
+		return false;
+	constexpr std::array words = {"break", "do", "for", "function", "goto", "if", "local", "repeat", "return", "while"};
+	return std::ranges::find(words, token.text) != words.end();
+}
+
+std::string InsertSeparators(std::string_view source, std::vector<size_t> const& offsets) {
+	std::string output;
+	output.reserve(source.size() + offsets.size());
+	size_t copied = 0;
+	for (auto offset : offsets) {
+		output.append(source.substr(copied, offset - copied));
+		output += ';';
+		copied = offset;
+	}
+	output.append(source.substr(copied));
+	return output;
+}
+
+std::string ReplaceSeparators(std::string_view source, std::vector<size_t> const& offsets) {
+	std::string output(source);
+	for (auto offset : offsets)
+		output[offset] = ',';
+	return output;
+}
+
+std::optional<LuaSourceDiagnostic> FindStatementBoundaries(std::string_view source, std::vector<Token> const& tokens, std::vector<size_t>& boundaries, std::vector<size_t>& statement_semicolons) {
+	LuaState state(luaL_newstate(), lua_close);
+	if (!state)
+		return LuaSourceDiagnostic{.message = "Unable to allocate a Lua compiler state"};
+	auto const original = DumpBytecode(state.get(), source);
+	if (!original)
+		return LuaError(state.get());
+
+	std::vector<size_t> candidates;
+	std::vector<size_t> structural_boundaries;
+	bool function_parameters = false;
+	for (size_t i = 0; i < tokens.size(); ++i) {
+		if (tokens[i].kind == TokenKind::Keyword && tokens[i].text == "function")
+			function_parameters = true;
+		else if (function_parameters && tokens[i].text == ")") {
+			function_parameters = false;
+			if (i + 1 < tokens.size())
+				structural_boundaries.push_back(tokens[i + 1].offset);
+		}
+	}
+	for (size_t i = 1; i < tokens.size(); ++i) {
+		if (tokens[i - 1].text == ";" || tokens[i - 1].text == "end" || std::ranges::binary_search(structural_boundaries, tokens[i].offset) || !CanEndStatement(tokens[i - 1]) || !CanStartStatement(tokens[i]))
+			continue;
+		if (tokens[i].text == "(") {
+			size_t previous = i;
+			while (previous && (tokens[previous - 1].kind == TokenKind::Comment || tokens[previous - 1].kind == TokenKind::Header))
+				--previous;
+			if (previous && (tokens[previous - 1].kind == TokenKind::Identifier || tokens[previous - 1].text == ")" || tokens[previous - 1].text == "]"))
+				continue;
+		}
+		candidates.push_back(tokens[i].offset);
+	}
+
+	auto find = [&](auto&& self, size_t first, size_t last) -> void {
+		if (first == last)
+			return;
+		std::vector<size_t> probe_offsets(candidates.begin() + static_cast<std::ptrdiff_t>(first), candidates.begin() + static_cast<std::ptrdiff_t>(last));
+		auto const probe = DumpBytecode(state.get(), InsertSeparators(source, probe_offsets));
+		if (probe && *probe == *original) {
+			boundaries.insert(boundaries.end(), probe_offsets.begin(), probe_offsets.end());
+			return;
+		}
+		if (last - first == 1)
+			return;
+		auto const middle = first + (last - first) / 2;
+		self(self, first, middle);
+		self(self, middle, last);
+	};
+	find(find, 0, candidates.size());
+	std::ranges::sort(boundaries);
+	if (auto const separated = DumpBytecode(state.get(), InsertSeparators(source, boundaries)); !separated || *separated != *original)
+		return LuaSourceDiagnostic{.message = "Unable to preserve Lua statement structure while formatting"};
+
+	std::vector<size_t> semicolons;
+	size_t table_depth = 0;
+	for (auto const& token : tokens) {
+		if (token.text == "{")
+			++table_depth;
+		else if (token.text == "}")
+			--table_depth;
+		else if (token.text == ";") {
+			if (table_depth)
+				semicolons.push_back(token.offset);
+			else
+				statement_semicolons.push_back(token.offset);
+		}
+	}
+	std::vector<size_t> table_semicolons;
+	auto find_table_semicolons = [&](auto&& self, size_t first, size_t last) -> void {
+		if (first == last)
+			return;
+		std::vector<size_t> probe_offsets(semicolons.begin() + static_cast<std::ptrdiff_t>(first), semicolons.begin() + static_cast<std::ptrdiff_t>(last));
+		auto const probe = DumpBytecode(state.get(), ReplaceSeparators(source, probe_offsets));
+		if (probe && *probe == *original) {
+			table_semicolons.insert(table_semicolons.end(), probe_offsets.begin(), probe_offsets.end());
+			return;
+		}
+		if (last - first == 1)
+			return;
+		auto const middle = first + (last - first) / 2;
+		self(self, first, middle);
+		self(self, middle, last);
+	};
+	find_table_semicolons(find_table_semicolons, 0, semicolons.size());
+	std::ranges::sort(table_semicolons);
+	if (auto const replaced = DumpBytecode(state.get(), ReplaceSeparators(source, table_semicolons)); !replaced || *replaced != *original)
+		return LuaSourceDiagnostic{.message = "Unable to preserve Lua separator structure while formatting"};
+	for (auto offset : semicolons) {
+		if (!std::ranges::binary_search(table_semicolons, offset))
+			statement_semicolons.push_back(offset);
+	}
+	std::ranges::sort(statement_semicolons);
+	return std::nullopt;
+}
 }
 
 std::optional<LuaSourceDiagnostic> ValidateLuaSource(std::string_view source) {
@@ -280,12 +427,20 @@ LuaSourceResult SerializeLuaSource(std::string_view source) {
 	std::vector<Token> tokens;
 	if (auto diagnostic = Tokenize(source, tokens))
 		return Failure(source, *diagnostic);
+	std::vector<size_t> boundaries;
+	std::vector<size_t> statement_semicolons;
+	if (auto diagnostic = FindStatementBoundaries(source, tokens, boundaries, statement_semicolons))
+		return Failure(source, *diagnostic);
 	std::string output;
 	Token const *previous = nullptr;
 	for (auto const& token : tokens) {
 		Token emitted = token;
 		if (emitted.kind == TokenKind::String)
 			emitted.text = "\"";
+		if (std::ranges::binary_search(boundaries, token.offset)) {
+			output += "; ";
+			previous = nullptr;
+		}
 		if (NeedsSpace(previous, emitted))
 			output += ' ';
 		if (token.kind == TokenKind::String) {
@@ -311,6 +466,10 @@ LuaSourceResult FormatLuaSource(std::string_view source) {
 	std::vector<Token> tokens;
 	if (auto diagnostic = Tokenize(source, tokens))
 		return Failure(source, *diagnostic);
+	std::vector<size_t> boundaries;
+	std::vector<size_t> statement_semicolons;
+	if (auto diagnostic = FindStatementBoundaries(source, tokens, boundaries, statement_semicolons))
+		return Failure(source, *diagnostic);
 	std::string output;
 	int indent = 0;
 	bool function_parameters = false;
@@ -327,7 +486,7 @@ LuaSourceResult FormatLuaSource(std::string_view source) {
 			indent = std::max(0, indent - 1);
 			newline();
 		}
-		if (token.newline_before)
+		if (std::ranges::binary_search(boundaries, token.offset))
 			newline();
 		if (output.empty() || output.back() == '\n')
 			output.append(static_cast<size_t>(indent), '\t');
@@ -347,7 +506,7 @@ LuaSourceResult FormatLuaSource(std::string_view source) {
 			++indent;
 			newline();
 		}
-		else if ((keyword && text == "end") || (token.kind == TokenKind::Symbol && text == ";") || token.line_comment)
+		else if ((keyword && text == "end") || std::ranges::binary_search(statement_semicolons, token.offset) || token.line_comment)
 			newline();
 	}
 	if (auto diagnostic = ValidateLuaSource(output))
