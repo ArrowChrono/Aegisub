@@ -52,22 +52,37 @@ jobs:
           } while ($batch.Count -eq 100)
 
           foreach ($package in $packages) {
+            # GitHub's versions endpoint rejects names containing whitespace
+            # with 422 "The package parameter is required." Such names can
+            # never be vcpkg cache packages, so skip them outright.
+            if ($package.name -match '\s') {
+              Write-Host "skipping package with invalid name: '$($package.name)'"
+              continue
+            }
+
             $encodedName = [uri]::EscapeDataString($package.name)
-            $versions = @()
-            $page = 1
 
-            do {
-              $uri = "$api/nuget/$encodedName/versions?per_page=100&page=$page"
-              $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri)
-              $versions += $batch
-              $page++
-            } while ($batch.Count -eq 100)
+            try {
+              $versions = @()
+              $page = 1
 
-            $vcpkgVersions = @(
-              $versions |
-                Where-Object { $_.name -match '-vcpkg[0-9a-f]+$' } |
-                Sort-Object created_at -Descending
-            )
+              do {
+                $uri = "$api/nuget/$encodedName/versions?per_page=100&page=$page"
+                $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri)
+                $versions += $batch
+                $page++
+              } while ($batch.Count -eq 100)
+
+              $vcpkgVersions = @(
+                $versions |
+                  Where-Object { $_.name -match '-vcpkg[0-9a-f]+$' } |
+                  Sort-Object created_at -Descending
+              )
+            } catch {
+              # One unreadable package must not abort the whole cleanup.
+              Write-Host "skipping $($package.name): $($_.Exception.Message)"
+              continue
+            }
 
             if ($vcpkgVersions.Count -eq 0) {
               continue
@@ -84,6 +99,11 @@ jobs:
 
               Write-Host "  deleting $($version.name) ($($version.created_at))"
               $deleteUri = "$api/nuget/$encodedName/versions/$($version.id)"
-              Invoke-RestMethod -Method Delete -Headers $headers -Uri $deleteUri
+              try {
+                Invoke-RestMethod -Method Delete -Headers $headers -Uri $deleteUri
+              } catch {
+                # Keep going; the next scheduled run will retry.
+                Write-Host "  failed to delete $($version.name): $($_.Exception.Message)"
+              }
             }
           }
