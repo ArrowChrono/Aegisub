@@ -99,8 +99,12 @@ using namespace agi::lua;
 using namespace Automation4;
 
 namespace {
+	thread_local std::shared_ptr<LuaWorkspaceRunRequest const> workspace_load_request;
+
 	constexpr char kTemplateDebugEnabledRegistryKey[] = "automation_template_debug_enabled";
 	constexpr char kEditBoxRequestRegistryKey[] = "automation_edit_box_request";
+	constexpr char kWorkspaceJitPreparingRegistryKey[] = "automation_workspace_jit_preparing";
+	constexpr char kWorkspaceJitDesiredModeRegistryKey[] = "automation_workspace_jit_desired_mode";
 
 	struct PendingEditBoxRequest {
 		bool requested = false;
@@ -112,6 +116,23 @@ namespace {
 		int selection_start = 0;
 		int selection_stop = 0;
 	};
+
+	int lua_workspace_jit_mode(lua_State *L) {
+		int nargs = lua_gettop(L);
+		lua_getfield(L, LUA_REGISTRYINDEX, kWorkspaceJitPreparingRegistryKey);
+		bool preparing = lua_toboolean(L, -1) != 0;
+		lua_pop(L, 1);
+		if (preparing && (nargs == 0 || lua_isnil(L, 1))) {
+			lua_pushvalue(L, lua_upvalueindex(2));
+			lua_setfield(L, LUA_REGISTRYINDEX, kWorkspaceJitDesiredModeRegistryKey);
+			return 0;
+		}
+
+		lua_pushvalue(L, lua_upvalueindex(1));
+		lua_insert(L, 1);
+		lua_call(L, nargs, LUA_MULTRET);
+		return lua_gettop(L);
+	}
 
 	wxString get_wxstring(lua_State *L, int idx)
 	{
@@ -612,6 +633,10 @@ namespace {
 
 		void operator()(agi::Context *c) override;
 		bool Validate(const agi::Context *c) override;
+		bool ValidateForWorkspace(
+			const agi::Context *c,
+			std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
+			BackgroundScriptRunner& runner);
 		virtual bool IsActive(const agi::Context *c) override;
 
 		static int LuaRegister(lua_State *L);
@@ -791,6 +816,7 @@ namespace {
 
 		// register standard libs
 		preload_modules(L);
+		debug_backend->InstallSetHookGuard();
 		lua_getglobal(L, "jit");
 		lua_getfield(L, -1, "status");
 		jit_status_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -869,6 +895,90 @@ namespace {
 		stackcheck.check_stack(0);
 #endif
 		debug_backend->CaptureRuntimeBaseline();
+
+		auto workspace_request = workspace_load_request;
+		std::optional<bool> original_jit_enabled;
+		int jit_table_ref = LUA_NOREF;
+		int jit_on_ref = LUA_NOREF;
+		int jit_off_ref = LUA_NOREF;
+		int jit_on_wrapper_ref = LUA_NOREF;
+		int jit_off_wrapper_ref = LUA_NOREF;
+		auto restore_workspace_load = agi::make_scope_exit([&] {
+			if (!workspace_request)
+				return;
+			debug_backend->SetWorkspaceRunRequest({});
+			LuaSetWorkspaceRunRequest(L, {});
+			if (!original_jit_enabled)
+				return;
+
+			std::optional<bool> desired_jit_enabled;
+			if (loaded) {
+				lua_getfield(L, LUA_REGISTRYINDEX, kWorkspaceJitDesiredModeRegistryKey);
+				if (lua_isboolean(L, -1))
+					desired_jit_enabled = lua_toboolean(L, -1) != 0;
+				lua_pop(L, 1);
+			}
+			lua_pushnil(L);
+			lua_setfield(L, LUA_REGISTRYINDEX, kWorkspaceJitPreparingRegistryKey);
+			lua_pushnil(L);
+			lua_setfield(L, LUA_REGISTRYINDEX, kWorkspaceJitDesiredModeRegistryKey);
+
+			lua_rawgeti(L, LUA_REGISTRYINDEX, jit_table_ref);
+			auto restore_jit_function = [&](char const *name, int original_ref, int wrapper_ref) {
+				lua_getfield(L, -1, name);
+				lua_rawgeti(L, LUA_REGISTRYINDEX, wrapper_ref);
+				bool unchanged = lua_rawequal(L, -1, -2) != 0;
+				lua_pop(L, 2);
+				if (unchanged) {
+					lua_rawgeti(L, LUA_REGISTRYINDEX, original_ref);
+					lua_setfield(L, -2, name);
+				}
+			};
+			restore_jit_function("on", jit_on_ref, jit_on_wrapper_ref);
+			restore_jit_function("off", jit_off_ref, jit_off_wrapper_ref);
+			lua_pop(L, 1);
+			luaL_unref(L, LUA_REGISTRYINDEX, jit_table_ref);
+			luaL_unref(L, LUA_REGISTRYINDEX, jit_on_ref);
+			luaL_unref(L, LUA_REGISTRYINDEX, jit_off_ref);
+			luaL_unref(L, LUA_REGISTRYINDEX, jit_on_wrapper_ref);
+			luaL_unref(L, LUA_REGISTRYINDEX, jit_off_wrapper_ref);
+
+			auto restore_mode = desired_jit_enabled.value_or(*original_jit_enabled);
+			if (luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | (restore_mode ? LUAJIT_MODE_ON : LUAJIT_MODE_OFF)) != 1)
+				LOG_E("automation/workspace") << "Could not restore the requested LuaJIT engine state after loading a Workspace script";
+		});
+		if (workspace_request) {
+			if (!workspace_request->sources || !workspace_request->stop_requested)
+				throw AutomationError("Invalid Lua Workspace script load request");
+			LuaSetWorkspaceRunRequest(L, workspace_request);
+			debug_backend->SetWorkspaceRunRequest(workspace_request);
+			original_jit_enabled = IsJitEnabled();
+
+			lua_getglobal(L, "jit");
+			lua_pushvalue(L, -1);
+			jit_table_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+			auto replace_jit_function = [&](char const *name, bool enabled, int& original_ref, int& wrapper_ref) {
+				lua_getfield(L, -1, name);
+				original_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+				lua_rawgeti(L, LUA_REGISTRYINDEX, original_ref);
+				push_value(L, enabled);
+				lua_pushcclosure(L, lua_workspace_jit_mode, 2);
+				lua_pushvalue(L, -1);
+				wrapper_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+				lua_setfield(L, -2, name);
+			};
+			replace_jit_function("on", true, jit_on_ref, jit_on_wrapper_ref);
+			replace_jit_function("off", false, jit_off_ref, jit_off_wrapper_ref);
+			lua_pop(L, 1);
+			push_value(L, true);
+			lua_setfield(L, LUA_REGISTRYINDEX, kWorkspaceJitPreparingRegistryKey);
+			lua_pushnil(L);
+			lua_setfield(L, LUA_REGISTRYINDEX, kWorkspaceJitDesiredModeRegistryKey);
+
+			if (luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_FLUSH) != 1 ||
+				luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF) != 1)
+				throw AutomationError("Could not disable LuaJIT while loading a Workspace script");
+		}
 
 		// load user script
 		if (!LoadFile(L, GetFilename())) {
@@ -966,8 +1076,17 @@ namespace {
 				throw AutomationError("Workspace cannot identify different compiled revisions of the same Lua file; reload the script before running");
 			if (!text.empty() && static_cast<unsigned char>(text.front()) == 0x1b)
 				throw AutomationError("Workspace cannot display source for a binary Lua chunk");
-			if (!request->sources->Find(uri))
-				request->sources->Register(found->second);
+			if (!request->sources->Find(uri)) {
+				auto source = found->second;
+				if (request->file_source) {
+					auto selected_uri = NormalizeAutomationDebugSource(agi::fs::PathToString(agi::fs::Canonicalize(agi::fs::PathFromString(request->file_source->uri))));
+					if (selected_uri == uri && request->file_source->text == text) {
+						source = *request->file_source;
+						source.uri = uri;
+					}
+				}
+				request->sources->Register(std::move(source));
+			}
 		}
 	}
 
@@ -1275,7 +1394,9 @@ namespace {
 						if (sink && snapshot)
 							sink->OnRuntimeStateSnapshot(*snapshot);
 					}
-					lua_gc(L, LUA_GCCOLLECT, 0);
+					if (!workspace_request) {
+						lua_gc(L, LUA_GCCOLLECT, 0);
+					}
 				}
 				catch (agi::UserCancelException const&) {
 					if (!outcome)
@@ -1458,6 +1579,83 @@ namespace {
 
 		lua_pop(L, 3); // two return values and error handler
 
+		return result;
+	}
+
+	bool LuaCommand::ValidateForWorkspace(
+		const agi::Context *c,
+		std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
+		BackgroundScriptRunner& runner) {
+		if (!request || !request->sources || !request->stop_requested)
+			throw AutomationError("Invalid Lua Workspace validation request");
+		if (owner->IsMacroRunning())
+			return false;
+		if (request->stop_requested->load())
+			throw agi::UserCancelException("Cancelled by Lua Workspace");
+		if (!(cmd_type & cmd::COMMAND_VALIDATE))
+			return true;
+
+		owner->SetMacroRunning(true);
+		auto clear_running = agi::make_scope_exit([&] { owner->SetMacroRunning(false); });
+		owner->PrepareWorkspaceSources(*request);
+		auto *previous_debug_session = owner->GetDebugSession();
+		LuaSetWorkspaceRunRequest(L, request);
+		owner->SetDebugSession(nullptr);
+		auto clear_workspace_request = agi::make_scope_exit([&] {
+			owner->GetDebugBackend()->SetWorkspaceRunRequest({});
+			LuaSetWorkspaceRunRequest(L, {});
+			owner->SetDebugSession(previous_debug_session);
+		});
+
+		LuaStackcheck stackcheck(L);
+		auto core = c->GetCore();
+		auto invocation = MakeMacroValidateInvocation(cmd_name);
+		auto rows = selected_rows(c);
+		int active_row = 0;
+		if (auto active_line = core.selectionController->GetActiveLine())
+			active_row = active_line->Row + core.ass->Info.size() + core.ass->Styles.size() + 1;
+		auto host = EnsureLuaScriptHost(L, c);
+		LuaSetAutomationRuntimeState(L, host, invocation, rows, active_row);
+
+		GetFeatureFunction("validate");
+		auto subsobj = LuaAssFile::Create(
+			L, core.ass.get(),
+			invocation.capabilities.allow_modify,
+			invocation.capabilities.allow_undo);
+		push_value(L, rows);
+		if (active_row)
+			push_value(L, active_row);
+		else
+			lua_pushnil(L);
+
+		AutomationInvocationOutcome outcome = AutomationInvocationOutcome::Failed;
+		try {
+			LuaThreadedCall(L, 3, 2, runner, invocation, &outcome);
+			if (request->stop_requested->load()) {
+				lua_pop(L, 2);
+				throw agi::UserCancelException("Cancelled by Lua Workspace");
+			}
+			subsobj->ProcessingComplete();
+		}
+		catch (agi::UserCancelException const&) {
+			subsobj->Cancel();
+			if (outcome == AutomationInvocationOutcome::Failed && !request->stop_requested->load())
+				throw AutomationError("Lua macro validation failed");
+			throw;
+		}
+		catch (...) {
+			subsobj->Cancel();
+			throw;
+		}
+
+		bool result = lua_toboolean(L, -2) != 0;
+		wxString new_help_string(get_wxstring(L, -1));
+		if (!new_help_string.empty()) {
+			help = new_help_string;
+			cmd_type |= cmd::COMMAND_DYNAMIC_HELP;
+		}
+		lua_pop(L, 2);
+		stackcheck.check_stack(0);
 		return result;
 	}
 
@@ -1846,6 +2044,44 @@ namespace Automation4 {
 	{
 		auto const *lua_command = dynamic_cast<LuaCommand const *>(command);
 		return lua_command ? lua_command->ExecutionId() : std::string_view{};
+	}
+
+	bool ValidateLuaMacroForWorkspace(
+		cmd::Command *command,
+		agi::Context const *context,
+		std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
+		BackgroundScriptRunner& runner) {
+		auto *lua_command = dynamic_cast<LuaCommand *>(command);
+		if (!lua_command)
+			throw AutomationError("The selected Workspace macro is not backed by Lua");
+		return lua_command->ValidateForWorkspace(context, request, runner);
+	}
+
+	std::unique_ptr<Script> ScriptFactory::CreateFromFileForWorkspace(
+		agi::fs::path const& filename,
+		std::shared_ptr<LuaWorkspaceRunRequest const> request,
+		BackgroundScriptRunner& runner,
+		bool *recognised_out) {
+		if (!request || !request->sources || !request->stop_requested)
+			throw AutomationError("Invalid Lua Workspace script load request");
+		if (request->stop_requested->load())
+			throw agi::UserCancelException("Cancelled by Lua Workspace");
+
+		std::unique_ptr<Script> candidate;
+		bool recognised = false;
+		runner.Run([&](ProgressSink *) {
+			auto previous_request = std::move(workspace_load_request);
+			workspace_load_request = request;
+			auto restore_request = agi::make_scope_exit([&] {
+				workspace_load_request = std::move(previous_request);
+			});
+			candidate = CreateFromFile(filename, false, &recognised);
+			if (request->stop_requested->load())
+				throw agi::UserCancelException("Cancelled by Lua Workspace");
+		});
+		if (recognised_out)
+			*recognised_out = recognised;
+		return candidate;
 	}
 
 	std::unique_ptr<AutomationScriptInstance> CreateLuaAutomationScriptInstance(agi::fs::path const& filename)

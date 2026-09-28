@@ -42,7 +42,14 @@ class wxWindow;
 struct lua_State;
 
 namespace Automation4 {
+	struct LuaWorkspaceRunRequest;
+
 	std::string_view GetLuaMacroExecutionId(cmd::Command const *command);
+	bool ValidateLuaMacroForWorkspace(
+		cmd::Command *command,
+		agi::Context const *context,
+		std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
+		BackgroundScriptRunner& runner);
 
 	class AutomationMutationJournal;
 

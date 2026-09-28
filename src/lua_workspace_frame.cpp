@@ -6,6 +6,7 @@
 #include "automation/automation_invocation_observer.h"
 #include "automation/automation_breakpoint_store.h"
 #include "automation/automation_debug_service.h"
+#include "automation/automation_live_host.h"
 #include "automation/karaoke_line_classifier.h"
 #include "auto4_base.h"
 #include "auto4_lua.h"
@@ -728,9 +729,9 @@ void LuaWorkspaceFrame::UpdateRunControls() {
 	step_in_button->Enable(busy && paused && attached);
 	step_over_button->Enable(busy && paused && attached);
 	step_out_button->Enable(busy && paused && attached);
-	pause_button->Enable(busy && active_run_request->debug_session && attached && !paused);
+	pause_button->Enable(busy && !active_run_request->macro_command.empty() && active_run_request->debug_session && attached && !paused);
 	stop_button->Enable(busy && !active_run_request->stop_requested->load());
-	detach_button->Enable(busy && attached);
+	detach_button->Enable(busy && !active_run_request->macro_command.empty() && attached);
 	if (apply)
 		apply->Enable(!busy && document && target_state.state != LuaWorkspaceDocumentState::Invalidated);
 	if (reload)
@@ -740,6 +741,10 @@ void LuaWorkspaceFrame::UpdateRunControls() {
 void LuaWorkspaceFrame::PollDebugState() {
 	if (!active_session)
 		return;
+	if (active_run_request && (active_run_request->macro_command.empty() || !active_run_request->debug_session)) {
+		UpdateRunControls();
+		return;
+	}
 	auto state = active_session->GetStateSnapshot();
 	if (state.version == last_debug_version)
 		return;
@@ -956,151 +961,14 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 		auto release_lease = agi::make_scope_exit([&] { release_session(); });
 		auto autosave_guard = context->subsController->InhibitAutosave();
 		auto const document_generation = context->subsController->GetDocumentGeneration();
-		std::unique_ptr<Script> local_script;
-		Script *script = nullptr;
-		cmd::Command *command = nullptr;
-		bool karaoke_templater = document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode;
-		if (karaoke_templater) {
-			std::vector<std::pair<Script *, cmd::Command *>> matches;
-			for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
-				if (!manager)
-					continue;
-				for (auto const& candidate : manager->GetScripts()) {
-					if (!candidate || !candidate->GetLoadedState())
-						continue;
-					for (auto *macro : candidate->GetMacros()) {
-						if (macro && candidate->GetEngineName() == "Lua" && GetLuaMacroExecutionId(macro) == karaoke_templater_execution_id)
-							matches.emplace_back(candidate.get(), macro);
-					}
-				}
-			}
-			if (matches.size() != 1) {
-				reject("Exactly one loaded karaoke templater macro is required for Workspace Run/Debug");
-				return;
-			}
-			script = matches.front().first;
-			command = matches.front().second;
-		}
-		else {
-			if (!SaveDocument()) {
-				reject("Save the Lua file successfully before Run/Debug");
-				return;
-			}
-			ScriptManager *managed = nullptr;
-			for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
-				if (!manager)
-					continue;
-				for (auto const& candidate : manager->GetScripts()) {
-					if (candidate && candidate->GetFilename() == document->GetFilename()) {
-						if (script) {
-							reject("The Lua file has more than one managed script identity");
-							return;
-						}
-						managed = manager;
-						script = candidate.get();
-					}
-				}
-			}
-			try {
-				if (managed)
-					managed->Reload(script, lease);
-				else {
-					local_script = ScriptFactory::CreateFromFile(document->GetFilename(), false);
-					script = local_script.get();
-				}
-			}
-			catch (agi::Exception const& error) {
-				reject(error.GetMessage());
-				return;
-			}
-			catch (std::exception const& error) {
-				reject(error.what());
-				return;
-			}
-			if (!script || !script->GetLoadedState() || script->GetEngineName() != "Lua") {
-				reject("The saved Lua file did not reload as an Automation Lua script");
-				return;
-			}
-			auto macros = script->GetMacros();
-			if (macros.empty()) {
-				no_macro_revision = document->GetRevision();
-				UpdateRunControls();
-				reject("The reloaded Lua file has no registered macro to run");
-				return;
-			}
-			wxArrayString names;
-			std::vector<std::string> command_names;
-			for (auto *macro : macros) {
-				names.Add(macro->StrDisplay(context));
-				command_names.emplace_back(macro->name());
-			}
-			int chosen = 0;
-			if (macros.size() > 1) {
-				wxSingleChoiceDialog choice(this, _("Select a macro from the saved and reloaded Lua file"), _("Lua Workspace macro"), names);
-				if (choice.ShowModal() != wxID_OK)
-					return;
-				chosen = choice.GetSelection();
-			}
-			if (chosen < 0 || static_cast<std::size_t>(chosen) >= macros.size()) {
-				reject("The selected Lua macro is no longer available");
-				return;
-			}
-			auto const& chosen_name = command_names[chosen];
-			if (managed) {
-				script = nullptr;
-				for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
-					if (!manager)
-						continue;
-					for (auto const& candidate : manager->GetScripts()) {
-						if (candidate && candidate->GetFilename() == document->GetFilename()) {
-							if (script) {
-								reject("The Lua file acquired multiple managed script identities");
-								return;
-							}
-							script = candidate.get();
-						}
-					}
-				}
-			}
-			if (script && script->GetLoadedState()) {
-				for (auto *macro : script->GetMacros()) {
-					if (macro && std::string_view(macro->name()) == chosen_name) {
-						if (command) {
-							reject("The reloaded Lua file has a duplicate macro command identity");
-							return;
-						}
-						command = macro;
-					}
-				}
-			}
-		}
-		if (context->subsController->GetDocumentGeneration() != document_generation) {
-			reject("The subtitle document changed while preparing this Workspace invocation");
+		bool const karaoke_templater = document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode;
+		if (!karaoke_templater && !SaveDocument()) {
+			reject("Save the Lua file successfully before Run/Debug");
 			return;
 		}
-		check = document->Check();
-		if (!check.Succeeded()) {
-			reject(check.message);
-			return;
-		}
-		bool qualified = !karaoke_templater;
-		if (karaoke_templater) {
-			for (auto const& line : context->ass->Events) {
-				auto const classification = ClassifyKaraokeLine(line.Comment, line.Effect.get());
-				if (classification.kind == KaraokeLineKind::Template ||
-					(classification.kind == KaraokeLineKind::Code && (classification.scopes & KaraokeOnce))) {
-					qualified = true;
-					break;
-				}
-			}
-		}
-		if (!script || !command || script->GetEngineName() != "Lua" || !qualified || (!karaoke_templater && !command->Validate(context))) {
-			reject("The selected Automation macro is not available for this subtitle document");
-			return;
-		}
+
 		auto request = std::make_shared<LuaWorkspaceRunRequest>();
 		request->invocation_id = ++next_run_id;
-		request->macro_command = command->name();
 		request->sources = std::make_shared<LuaWorkspaceSourceRegistry>();
 		request->stop_requested = std::make_shared<std::atomic<bool>>(false);
 		LuaWorkspaceSource source;
@@ -1108,21 +976,24 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 		source.revision = document->GetRevision();
 		source.display_name = document->GetDisplayName();
 		source.text = document->GetSource();
-		source.uri = document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode
+		source.uri = karaoke_templater
 						 ? MakeLuaWorkspaceSourceUri(request->invocation_id, source.source_identity, source.revision)
 						 : NormalizeAutomationDebugSource(agi::fs::PathToString(document->GetFilename()));
 		request->sources->Register(source);
-		if (document->GetKind() == LuaWorkspaceDocumentKind::KaraokeCode)
+		if (karaoke_templater)
 			request->source_override = LuaWorkspaceSourceOverride{.document_generation = document->GetDocumentGeneration(), .dialogue_id = document->GetDialogueId(), .source = source};
 		else
 			request->file_source = source;
-		lease->SetTarget({.engine_name = script->GetEngineName(), .script_file = script->GetFilename(), .feature_name = request->macro_command});
 		lease->SetBreakpoints(CaptureBreakpoints(source.uri));
 		lease->SetSourceRegistry(request->sources);
-		if (debug) {
+		if (debug)
 			request->debug_session = lease;
-			script->SetDebugSession(lease.get());
-		}
+
+		std::unique_ptr<Script> local_script;
+		Script *script = nullptr;
+		cmd::Command *command = nullptr;
+		std::string failure;
+		ClearRuntimeObservation();
 		active_run_request = request;
 		active_session = lease;
 		last_sources = request->sources;
@@ -1139,16 +1010,14 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 		UpdateLineNumberMargins();
 		execution_source->SetReadOnly(true);
 		execution_identity->SetLabel(_("No paused source."));
-		debug_location->SetLabel(_("Debug running; waiting for the next breakpoint or manual pause."));
+		debug_location->SetLabel(_("Preparing Lua Workspace invocation."));
 		context->lua_workspace_invocation_active = true;
-		run_status->SetLabel(debug ? _("Debug running; source and breakpoints are frozen for this invocation.")
-								   : _("Run active; unapplied source may still commit generated subtitles."));
+		run_status->SetLabel(_("Preparing Lua Workspace invocation; Stop cancels loading or validation."));
 		run_log->Clear();
 		RefreshDocument();
 		UpdateRunControls();
 		debug_timer->Start(100);
-		std::string failure;
-		auto finish = agi::make_scope_exit([this, script, debug, lease, request, &failure, &release_session, &release_lease] {
+		auto finish = agi::make_scope_exit([this, &script, debug, lease, request, &failure, &release_session, &release_lease] {
 			debug_timer->Stop();
 			PollDebugState();
 			if (auto final_state = lease->GetStateSnapshot(); final_state.current_pause)
@@ -1159,11 +1028,16 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 				if (active_observation->workspace_run)
 					outcome = active_observation->view.outcome;
 			}
-			lease->MarkCompleted(failure.empty() && outcome == AutomationInvocationOutcome::Completed ? 0 : 1,
-								 !failure.empty() ? failure : outcome == AutomationInvocationOutcome::Completed ? "completed"
-														  : outcome == AutomationInvocationOutcome::Cancelled   ? "cancelled"
-																												: "failed");
-			if (debug)
+			bool const failed = !failure.empty() || outcome == AutomationInvocationOutcome::Failed;
+			bool const cancelled = !failed && (outcome == AutomationInvocationOutcome::Cancelled ||
+											   (!outcome && request->stop_requested->load()));
+			bool const completed = !failed && !cancelled && outcome == AutomationInvocationOutcome::Completed;
+			lease->MarkCompleted(completed ? 0 : 1,
+								 !failure.empty() ? failure : failed  ? "failed"
+														  : cancelled ? "cancelled"
+														  : completed ? "completed"
+																	  : "unobserved");
+			if (debug && script)
 				script->SetDebugSession(nullptr);
 			release_session();
 			release_lease.release();
@@ -1182,11 +1056,11 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 			debug_location->SetToolTip(debug_location->GetLabel());
 			if (!failure.empty())
 				run_status->SetLabel(to_wx("Invocation failed: " + failure));
-			else if (outcome == AutomationInvocationOutcome::Failed)
+			else if (failed)
 				run_status->SetLabel(_("Invocation failed; inspect Runtime Context and the run log."));
-			else if (outcome == AutomationInvocationOutcome::Cancelled || request->stop_requested->load())
+			else if (cancelled)
 				run_status->SetLabel(_("Invocation cancelled after reaching a safe terminal state."));
-			else if (outcome == AutomationInvocationOutcome::Completed)
+			else if (completed)
 				run_status->SetLabel(_("Invocation completed."));
 			else
 				run_status->SetLabel(_("Invocation ended without an observed terminal result."));
@@ -1199,17 +1073,196 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 				CallAfter([this] { if (PrepareToClose()) Hide(); });
 			}
 		});
-		{
-			disabled_windows.emplace(this);
+		auto fail = [&](std::string message) {
+			failure = message;
+			reject(std::move(message));
+		};
+		disabled_windows.emplace(this);
+		std::unique_ptr<BackgroundScriptRunner> preparation_runner;
+		if (karaoke_templater) {
+			std::vector<std::pair<Script *, cmd::Command *>> matches;
+			for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
+				if (!manager)
+					continue;
+				for (auto const& candidate : manager->GetScripts()) {
+					if (!candidate || !candidate->GetLoadedState())
+						continue;
+					for (auto *macro : candidate->GetMacros()) {
+						if (macro && candidate->GetEngineName() == "Lua" && GetLuaMacroExecutionId(macro) == karaoke_templater_execution_id)
+							matches.emplace_back(candidate.get(), macro);
+					}
+				}
+			}
+			if (matches.size() != 1) {
+				fail("Exactly one loaded karaoke templater macro is required for Workspace Run/Debug");
+				return;
+			}
+			script = matches.front().first;
+			command = matches.front().second;
+		}
+		else {
+			ScriptManager *managed = nullptr;
+			Script *managed_script = nullptr;
+			for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {
+				if (!manager)
+					continue;
+				for (auto const& candidate : manager->GetScripts()) {
+					if (candidate && candidate->GetFilename() == document->GetFilename()) {
+						if (managed_script) {
+							fail("The Lua file has more than one managed script identity");
+							return;
+						}
+						managed = manager;
+						managed_script = candidate.get();
+					}
+				}
+			}
 			try {
-				(*command)(context);
+				auto host = CreateAutomationLiveHost(context);
+				preparation_runner = host->Ui().CreateWorkspaceBackgroundScriptRunner(request, "Preparing Lua Workspace");
+				if (!preparation_runner)
+					throw AutomationError("The Lua Workspace preparation runner is unavailable");
+				auto candidate = ScriptFactory::CreateFromFileForWorkspace(document->GetFilename(), request, *preparation_runner);
+				if (request->stop_requested->load())
+					return;
+				if (!candidate || !candidate->GetLoadedState() || candidate->GetEngineName() != "Lua") {
+					std::string message = "The saved Lua file did not reload as an Automation Lua script";
+					if (candidate && !candidate->GetDescription().empty())
+						message += ": " + candidate->GetDescription();
+					fail(std::move(message));
+					return;
+				}
+				if (managed)
+					script = managed->ReplaceForWorkspace(managed_script, std::move(candidate), lease);
+				else {
+					local_script = std::move(candidate);
+					script = local_script.get();
+				}
+			}
+			catch (agi::UserCancelException const&) {
+				request->stop_requested->store(true);
+				return;
 			}
 			catch (agi::Exception const& error) {
-				failure = error.GetMessage();
+				fail(error.GetMessage());
+				return;
 			}
 			catch (std::exception const& error) {
-				failure = error.what();
+				fail(error.what());
+				return;
 			}
+			auto macros = script->GetMacros();
+			if (macros.empty()) {
+				no_macro_revision = document->GetRevision();
+				UpdateRunControls();
+				fail("The reloaded Lua file has no registered macro to run");
+				return;
+			}
+			wxArrayString names;
+			std::vector<std::string> command_names;
+			for (auto *macro : macros) {
+				names.Add(macro->StrDisplay(context));
+				command_names.emplace_back(macro->name());
+			}
+			int chosen = 0;
+			if (macros.size() > 1) {
+				wxSingleChoiceDialog choice(this, _("Select a macro from the saved and reloaded Lua file"), _("Lua Workspace macro"), names);
+				if (choice.ShowModal() != wxID_OK) {
+					request->stop_requested->store(true);
+					return;
+				}
+				chosen = choice.GetSelection();
+			}
+			if (chosen < 0 || static_cast<std::size_t>(chosen) >= macros.size()) {
+				fail("The selected Lua macro is no longer available");
+				return;
+			}
+			auto const& chosen_name = command_names[chosen];
+			if (script && script->GetLoadedState()) {
+				for (auto *macro : script->GetMacros()) {
+					if (macro && std::string_view(macro->name()) == chosen_name) {
+						if (command) {
+							fail("The reloaded Lua file has a duplicate macro command identity");
+							return;
+						}
+						command = macro;
+					}
+				}
+			}
+		}
+		if (request->stop_requested->load())
+			return;
+		if (context->subsController->GetDocumentGeneration() != document_generation) {
+			fail("The subtitle document changed while preparing this Workspace invocation");
+			return;
+		}
+		check = document->Check();
+		if (!check.Succeeded()) {
+			fail(check.message);
+			return;
+		}
+		bool qualified = !karaoke_templater;
+		if (karaoke_templater) {
+			for (auto const& line : context->ass->Events) {
+				auto const classification = ClassifyKaraokeLine(line.Comment, line.Effect.get());
+				if (classification.kind == KaraokeLineKind::Template ||
+					(classification.kind == KaraokeLineKind::Code && (classification.scopes & KaraokeOnce))) {
+					qualified = true;
+					break;
+				}
+			}
+		}
+		if (!script || !command || script->GetEngineName() != "Lua" || !qualified) {
+			fail("The selected Automation macro is not available for this subtitle document");
+			return;
+		}
+		if (!karaoke_templater) {
+			try {
+				if (!preparation_runner)
+					throw AutomationError("The Lua Workspace preparation runner is unavailable");
+				bool const available = ValidateLuaMacroForWorkspace(command, context, request, *preparation_runner);
+				if (request->stop_requested->load())
+					return;
+				if (!available) {
+					fail("The selected Automation macro is not available for this subtitle document");
+					return;
+				}
+			}
+			catch (agi::UserCancelException const&) {
+				request->stop_requested->store(true);
+				return;
+			}
+			catch (agi::Exception const& error) {
+				fail(error.GetMessage());
+				return;
+			}
+			catch (std::exception const& error) {
+				fail(error.what());
+				return;
+			}
+		}
+		if (request->stop_requested->load())
+			return;
+		if (context->subsController->GetDocumentGeneration() != document_generation) {
+			fail("The subtitle document changed while validating this Workspace invocation");
+			return;
+		}
+		request->macro_command = command->name();
+		lease->SetTarget({.engine_name = script->GetEngineName(), .script_file = script->GetFilename(), .feature_name = request->macro_command});
+		if (debug)
+			script->SetDebugSession(lease.get());
+		debug_location->SetLabel(_("Debug running; waiting for the next breakpoint or manual pause."));
+		run_status->SetLabel(debug ? _("Debug running; source and breakpoints are frozen for this invocation.")
+								   : _("Run active; unapplied source may still commit generated subtitles."));
+		UpdateRunControls();
+		try {
+			(*command)(context);
+		}
+		catch (agi::Exception const& error) {
+			failure = error.GetMessage();
+		}
+		catch (std::exception const& error) {
+			failure = error.what();
 		}
 	}
 	std::weak_ptr<void> lifetime = observation_lifetime;

@@ -1376,6 +1376,33 @@ void AutomationLuaDebugBackend::SetWorkspaceRunRequest(std::shared_ptr<LuaWorksp
 	UpdateHookState();
 }
 
+void AutomationLuaDebugBackend::InstallSetHookGuard() {
+	lua_getglobal(L, "debug");
+	lua_getfield(L, -1, "sethook");
+	original_sethook = lua_tocfunction(L, -1);
+	lua_pop(L, 1);
+	if (!original_sethook) {
+		lua_pop(L, 1);
+		throw AutomationError("Lua debug.sethook is unavailable");
+	}
+	lua_pushcfunction(L, &AutomationLuaDebugBackend::GuardedSetHook);
+	lua_setfield(L, -2, "sethook");
+	lua_pop(L, 1);
+}
+
+int AutomationLuaDebugBackend::GuardedSetHook(lua_State *L) {
+	auto *backend = LoadBackend(L);
+	if (backend && backend->workspace_request)
+		return luaL_error(L, "debug.sethook cannot replace the Lua Workspace cancellation hook");
+	if (!backend || !backend->original_sethook)
+		return luaL_error(L, "Lua debug.sethook is unavailable");
+	int nargs = lua_gettop(L);
+	lua_pushcfunction(L, backend->original_sethook);
+	lua_insert(L, 1);
+	lua_call(L, nargs, LUA_MULTRET);
+	return lua_gettop(L);
+}
+
 void AutomationLuaDebugBackend::UpdateHookState()
 {
 	if (!L)

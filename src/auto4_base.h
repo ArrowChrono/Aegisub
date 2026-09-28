@@ -64,6 +64,7 @@ namespace cmd { class Command; }
 namespace Automation4 {
 	class AutomationHost;
 	class AutomationDebugSession;
+	struct LuaWorkspaceRunRequest;
 
 	DEFINE_EXCEPTION(AutomationError, agi::Exception);
 	DEFINE_EXCEPTION(ScriptLoadError, AutomationError);
@@ -265,6 +266,10 @@ namespace Automation4 {
 		virtual void Reload() = 0;
 		/// Reload a single managed script
 		virtual void Reload(Script *script, std::shared_ptr<AutomationDebugSession> const& owner = {});
+		Script *ReplaceForWorkspace(
+			Script *current,
+			std::unique_ptr<Script> replacement,
+			std::shared_ptr<AutomationDebugSession> const& owner);
 
 		/// Get all managed scripts (both loaded and invalid)
 		const std::vector<std::unique_ptr<Script>>& GetScripts() const { return scripts; }
@@ -320,6 +325,11 @@ namespace Automation4 {
 		static std::unique_ptr<Script> CreateFromFile(
 			agi::fs::path const& filename,
 			bool create_unknown = true,
+			bool *recognised_out = nullptr);
+		static std::unique_ptr<Script> CreateFromFileForWorkspace(
+			agi::fs::path const& filename,
+			std::shared_ptr<LuaWorkspaceRunRequest const> request,
+			BackgroundScriptRunner& runner,
 			bool *recognised_out = nullptr);
 	};
 

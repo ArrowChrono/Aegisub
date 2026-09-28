@@ -36,6 +36,9 @@ static int Supervise(string[] args)
     var timer = Stopwatch.StartNew();
     var artifactIndex = Array.IndexOf(args, "--artifacts");
     var exeIndex = Array.IndexOf(args, "--exe");
+    var scenarioIndex = Array.IndexOf(args, "--scenario");
+    var scenario = scenarioIndex >= 0 && scenarioIndex + 1 < args.Length ? args[scenarioIndex + 1] : "basic";
+    var budgetSeconds = scenario == "jit" ? 360 : scenario == "preparation" ? 300 : 240;
     if (artifactIndex < 0 || artifactIndex + 1 >= args.Length || exeIndex < 0 || exeIndex + 1 >= args.Length)
         throw new ArgumentException("--exe and --artifacts are required");
     var artifacts = Path.GetFullPath(args[artifactIndex + 1]);
@@ -55,7 +58,7 @@ static int Supervise(string[] args)
     foreach (var argument in args) start.ArgumentList.Add(argument);
     using var worker = Process.Start(start) ?? throw new InvalidOperationException("Could not start debug UIA worker");
     var timedOut = false;
-    var workerBudget = TimeSpan.FromSeconds(230) - timer.Elapsed;
+    var workerBudget = TimeSpan.FromSeconds(budgetSeconds - 10) - timer.Elapsed;
     if (workerBudget <= TimeSpan.Zero || !worker.WaitForExit(workerBudget))
     {
         timedOut = true;
@@ -100,11 +103,11 @@ static int Supervise(string[] args)
         clipboardStatus = "external-or-unreceipted-change-preserved";
     File.WriteAllText(Path.Combine(artifacts, "supervisor.json"), JsonSerializer.Serialize(new
     {
-        BudgetSeconds = 240, TimedOut = timedOut, HostLeftRunning = hostLeftRunning, WorkerExitCode = worker.ExitCode,
+        BudgetSeconds = budgetSeconds, TimedOut = timedOut, HostLeftRunning = hostLeftRunning, WorkerExitCode = worker.ExitCode,
         ClipboardStatus = clipboardStatus, InitialSequence = originalSequence, FinalSequence = finalSequence
     }, new JsonSerializerOptions { WriteIndented = true }));
     Ensure(clipboardStatus != "external-or-unreceipted-change-preserved", "Clipboard changed outside the verified test transaction; external data was preserved");
-    Ensure(!timedOut, "Lua Workspace debug GUI E2E exceeded its 240-second total limit");
+    Ensure(!timedOut, $"Lua Workspace debug GUI E2E exceeded its {budgetSeconds}-second total limit");
     return hostLeftRunning ? 1 : worker.ExitCode;
 }
 
@@ -126,7 +129,7 @@ static int Run(string[] args)
     if (exe is null || !File.Exists(exe) || artifacts is null)
         throw new ArgumentException("--exe and --artifacts are required");
     MenuObservation.Initialize(artifacts);
-    Ensure(scenario is "basic" or "launch" or "controls" or "files" or "dap" or "jit" or "language" or "language-unavailable"
+    Ensure(scenario is "basic" or "launch" or "controls" or "files" or "dap" or "jit" or "preparation" or "language" or "language-unavailable"
         or "entry-late" or "entry-zh" or "entry-once" or "entry-missing" or "entry-ambiguous", "Unknown debug scenario");
     var entryScenario = scenario.StartsWith("entry-", StringComparison.Ordinal);
     var fixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "debug.ass");
@@ -138,6 +141,10 @@ static int Run(string[] args)
     var entryFixture = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "workspace-entry.ass");
     var entryActions = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "workspace-entry-actions.lua");
     var entryDuplicate = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", "workspace-entry-duplicate.lua");
+    var preparationFixtures = new[] { "preparation-top-level-loop.lua", "preparation-include-loop.lua",
+        "preparation-include-loop-body.lua", "preparation-validation-loop.lua", "preparation-include-failure.lua",
+        "preparation-validation-failure.lua", "preparation-validation-error.lua", "preparation-sethook-loop.lua",
+        "preparation-gc-deferred.lua", "preparation-choice.lua" };
     var templater = Path.Combine("automation", "autoload", "kara-templater.lua");
     var includeRoot = Path.Combine("automation", "include");
     var driver = Path.Combine("tests", "gui-automation", "lua-workspace", "debug-uia.cs");
@@ -180,6 +187,7 @@ static int Run(string[] args)
     Directory.CreateDirectory(Path.Combine(artifacts, "profile"));
     if (scenario == "files") PrepareFiles();
     if (scenario == "jit") PrepareJit();
+    if (scenario == "preparation") PreparePreparation();
     if (scenario == "entry-zh")
     {
         PrepareChineseLocale(exe, artifacts, hashes);
@@ -225,6 +233,7 @@ static int Run(string[] args)
         : scenario == "files" ? FileSteps()
         : scenario == "dap" ? DapSteps()
         : scenario == "jit" ? JitSteps()
+        : scenario == "preparation" ? PreparationSteps()
         : entryScenario ? EntrySteps()
         : new[] { "host-ready", "open-workspace", "edit-unapplied", "breakpoint-debug-pause", "stale-source", "stop-rollback",
             "stop-live-rollback", "run-generated", "undo-restores", "debug-detach", "basic-normal-shutdown" };
@@ -261,7 +270,8 @@ static int Run(string[] args)
             else if (scenario == "files") RunFiles();
             else if (scenario == "dap") RunDap();
             else if (entryScenario) RunEntry();
-            else RunJit();
+            else if (scenario == "jit") RunJit();
+            else RunPreparation();
             foreach (var step in steps.Where(name => results.All(result => result.Name != name)))
                 results.Add(new StepResult(step, "not-run", "Scenario step was not executed"));
             finishedUtc = DateTimeOffset.UtcNow;
@@ -694,8 +704,8 @@ static int Run(string[] args)
             if (scenario is "entry-missing" or "entry-ambiguous")
             {
                 InvokeButton(workspace!, "Run");
-                WaitUntil(() => HasWorkspaceStaticText(workspace!, text => text.Contains(
-                    "Exactly one loaded karaoke templater macro is required", StringComparison.Ordinal)),
+                WaitUntil(() => ReadRunStatus(workspace!).Contains(
+                    "Exactly one loaded karaoke templater macro is required", StringComparison.Ordinal),
                     TimeSpan.FromSeconds(5), "Missing or ambiguous templater identity was not rejected explicitly");
                 Ensure(gui.Current.IsEnabled && FindButton(workspace!, "Run").Current.IsEnabled,
                     "Rejected Workspace entry retained a subtitle transaction or active run");
@@ -798,7 +808,7 @@ static int Run(string[] args)
         void WaitNoEntry(int expectedCount)
         {
             WaitUntil(() => MarkerCount() == expectedCount
-                && HasWorkspaceStaticText(workspace!, value => value.Contains("The reloaded Lua file has no registered macro to run", StringComparison.Ordinal)),
+                && ReadRunStatus(workspace!).Contains("The reloaded Lua file has no registered macro to run", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(8), "No-entry Run did not report the exact missing-macro condition after source load");
             Ensure(!FindButton(workspace!, "Run").Current.IsEnabled && !FindButton(workspace!, "Debug").Current.IsEnabled,
                 "No-entry revision left Run or Debug available");
@@ -833,7 +843,12 @@ static int Run(string[] args)
         void VerifyOriginal(string evidence)
         {
             var bytes = File.ReadAllBytes(input);
-            var task = Task.Run(() => InvokeMenu(gui, process, "Workspace Debug Verify Original", TimeSpan.FromSeconds(8)));
+            var commandReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var task = Task.Run(() => InvokeMenu(gui, process, "Workspace Debug Verify Original", TimeSpan.FromSeconds(8),
+                commandReady: () => commandReady.TrySetResult()));
+            WaitUntil(() => commandReady.Task.IsCompleted || task.IsCompleted, TimeSpan.FromSeconds(12),
+                "Live baseline verifier command did not become invokable");
+            if (!commandReady.Task.IsCompleted) task.GetAwaiter().GetResult();
             var dialog = WaitWindowContainingText(process, "Debug original live baseline verified", TimeSpan.FromSeconds(8));
             SaveEvidence(dialog, artifacts, evidence + "-live-dialog");
             InvokeButton(dialog, "OK");
@@ -1023,6 +1038,224 @@ static int Run(string[] args)
             Ensure(process.WaitForExit(TimeSpan.FromSeconds(10)), "File-scenario GUI host did not exit normally within ten seconds");
             Ensure(process.ExitCode == 0, "File-scenario GUI host returned nonzero after normal close");
             File.WriteAllText(Path.Combine(artifacts, "files-normal-shutdown.json"), JsonSerializer.Serialize(new
+            {
+                HostExitCode = process.ExitCode, Method = "WindowPattern.Close"
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        });
+    }
+
+    string[] PreparationSteps() => ["host-ready", "preparation-open", "preparation-top-level-stop",
+        "preparation-top-level-recovery", "preparation-include-stop", "preparation-include-recovery",
+        "preparation-validation-stop", "preparation-validation-recovery", "preparation-include-failure",
+        "preparation-validation-failure", "preparation-validation-error", "preparation-sethook-stop",
+        "preparation-sethook-recovery", "preparation-gc-deferred", "preparation-choice-cancel", "preparation-choice-recovery",
+        "preparation-normal-shutdown"];
+
+    void PreparePreparation()
+    {
+        foreach (var name in preparationFixtures)
+        {
+            var source = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", name);
+            hashes[name] = Hash(source);
+            File.Copy(source, Path.Combine(artifacts, name));
+        }
+    }
+
+    void RunPreparation()
+    {
+        var gui = main ?? throw new InvalidOperationException("Main GUI frame is unavailable");
+        var process = host ?? throw new InvalidOperationException("GUI host is unavailable");
+        const string healthyTemplate = "script_name = \"Preparation recovery\"\nscript_description = \"Preparation recovery\"\n"
+            + "script_author = \"Aegisub E2E\"\nscript_version = \"1\"\n\n"
+            + "aegisub.register_macro(\"Preparation Recovery TAG\", \"Confirm preparation cleanup\", function(subs, selected, active)\n"
+            + "  aegisub.debug.out(\"preparation-recovery|TAG\\n\")\n  return selected, active\nend)\n";
+        string? currentFile = null;
+
+        void Open(string file, string evidence)
+        {
+            OpenLuaFile(workspace!, process, Path.Combine(artifacts, file), artifacts, evidence);
+            currentFile = Path.Combine(artifacts, file);
+            Ensure(workspace!.Current.Name.Contains(file, StringComparison.Ordinal),
+                $"Preparation fixture {file} was not bound to Workspace");
+        }
+
+        void AssertPreparing(string label)
+        {
+            var stop = FindButton(workspace!, "Stop");
+            Ensure(ReadRunStatus(workspace!).StartsWith("Preparing", StringComparison.Ordinal),
+                $"{label} did not expose the Preparing status");
+            Ensure(!stop.Current.IsOffscreen && stop.Current.IsEnabled,
+                $"{label} did not expose a visible enabled Stop control while Preparing");
+            Ensure(!gui.Current.IsEnabled, $"{label} did not lock the main frame while Preparing");
+            foreach (var name in new[] { "Run", "Debug", "Open File", "Reload" })
+                Ensure(!FindButton(workspace!, name).Current.IsEnabled, $"{label} left unsafe {name} enabled while Preparing");
+        }
+
+        void VerifyOriginal(string evidence)
+        {
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                $"{evidence} changed the physical ASS baseline");
+            var bytes = File.ReadAllBytes(input);
+            var commandReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var verifier = Task.Run(() => InvokeMenu(gui, process, "Workspace Debug Verify Original", TimeSpan.FromSeconds(8),
+                commandReady: () => commandReady.TrySetResult()));
+            WaitUntil(() => commandReady.Task.IsCompleted || verifier.IsCompleted, TimeSpan.FromSeconds(12),
+                $"{evidence} live ASS verifier command did not become invokable");
+            if (!commandReady.Task.IsCompleted) verifier.GetAwaiter().GetResult();
+            var dialog = WaitWindowContainingText(process, "Debug original live baseline verified", TimeSpan.FromSeconds(8));
+            SaveEvidence(dialog, artifacts, evidence + "-live-baseline");
+            InvokeButton(dialog, "OK");
+            Ensure(verifier.Wait(TimeSpan.FromSeconds(10)), $"{evidence} live ASS verifier did not return");
+            WaitUntil(() => gui.Current.IsEnabled && FindProgressPane(process, "Workspace Debug Verify Original") is null,
+                TimeSpan.FromSeconds(8), $"{evidence} live ASS verifier did not release its execution UI");
+            Ensure(File.ReadAllBytes(input).SequenceEqual(bytes) && EventLines(File.ReadAllText(input)).SequenceEqual(baseline),
+                $"{evidence} live ASS verifier changed or disagreed with the physical baseline");
+        }
+
+        void AssertIdle(string label)
+        {
+            Ensure(gui.Current.IsEnabled, $"{label} did not release the main frame");
+            Ensure(!FindButton(workspace!, "Stop").Current.IsEnabled, $"{label} retained an enabled Stop control");
+            foreach (var name in new[] { "Run", "Debug", "Open File", "Reload" })
+                Ensure(FindButton(workspace!, name).Current.IsEnabled, $"{label} did not restore {name}");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), $"{label} changed the physical ASS baseline");
+        }
+
+        void CancelPreparation(string label, string evidence)
+        {
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitUntil(() => ReadRunStatus(workspace!).StartsWith("Preparing", StringComparison.Ordinal)
+                    && FindButton(workspace!, "Stop").Current.IsEnabled,
+                TimeSpan.FromSeconds(12), $"{label} did not reach a stoppable Preparing state");
+            AssertPreparing(label);
+            File.WriteAllText(Path.Combine(artifacts, evidence + "-preparing-status.txt"), ReadRunStatus(workspace!));
+            SaveEvidence(workspace!, artifacts, evidence + "-preparing");
+            InvokeButton(workspace!, "Stop");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(15)), $"{label} did not terminate through Stop");
+            WaitUntil(() => ReadRunStatus(workspace!).Contains("cancelled", StringComparison.OrdinalIgnoreCase)
+                    && gui.Current.IsEnabled,
+                TimeSpan.FromSeconds(8), $"{label} did not reach a cancelled terminal state and release the main frame");
+            AssertIdle(label);
+            File.WriteAllText(Path.Combine(artifacts, evidence + "-cancelled-status.txt"), ReadRunStatus(workspace!));
+            SaveEvidence(workspace!, artifacts, evidence + "-cancelled");
+            VerifyOriginal(evidence + "-cancelled");
+        }
+
+        void Recover(string tag, string evidence)
+        {
+            var source = healthyTemplate.Replace("TAG", tag, StringComparison.Ordinal);
+            Ensure(currentFile is not null, $"{tag} recovery has no bound source file");
+            File.WriteAllText(currentFile!, source, new UTF8Encoding(false));
+            Ensure(File.ReadAllText(currentFile!) == source, $"{tag} recovery source was not written exactly");
+            InvokeButton(workspace!, "Reload");
+            Ensure(workspace!.Current.Name.Contains(Path.GetFileName(currentFile!), StringComparison.Ordinal),
+                $"{tag} recovery Reload lost the bound file identity");
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitForInvocation(workspace!, process, invocation, "completed", artifacts, evidence);
+            WaitUntil(() => ReadRunLog(workspace!, process).Contains("preparation-recovery|" + tag, StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5), $"{tag} recovery macro did not execute");
+            AssertIdle(tag + " recovery");
+            VerifyOriginal(evidence);
+        }
+
+        void RejectAndRecover(string file, string expected, string tag, string evidence, string? logMarker = null)
+        {
+            Open(file, evidence + "-picker");
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitUntil(() => invocation.IsCompleted && ReadRunStatus(workspace!).Contains(expected, StringComparison.Ordinal),
+                TimeSpan.FromSeconds(12), $"{tag} did not report its exact preparation failure");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(3)), $"{tag} failure task did not return");
+            if (logMarker is not null)
+                Ensure(ReadRunLog(workspace!, process).Contains(logMarker, StringComparison.Ordinal),
+                    $"{tag} did not report the exact Lua runtime error");
+            AssertIdle(tag);
+            SaveEvidence(workspace!, artifacts, evidence + "-rejected");
+            VerifyOriginal(evidence + "-rejected");
+            Recover(tag, evidence + "-recovery");
+        }
+
+        Step("preparation-open", () =>
+        {
+            InvokeMenu(gui, process, "Workspace Debug Select First Code", TimeSpan.FromSeconds(8));
+            InvokeMenu(gui, process, "Open Code Line in Lua Workspace", TimeSpan.FromSeconds(8));
+            workspace = WaitWindow(process, "Lua Workspace", TimeSpan.FromSeconds(8));
+            Open("preparation-top-level-loop.lua", "preparation-top-level-picker");
+            SaveEvidence(workspace, artifacts, "preparation-opened");
+        });
+        Step("preparation-top-level-stop", () => CancelPreparation("Top-level loop", "preparation-top-level"));
+        Step("preparation-top-level-recovery", () => Recover("top-level", "preparation-top-level-recovery"));
+        Step("preparation-include-stop", () =>
+        {
+            Open("preparation-include-loop.lua", "preparation-include-picker");
+            CancelPreparation("Included-source loop", "preparation-include");
+        });
+        Step("preparation-include-recovery", () => Recover("include", "preparation-include-recovery"));
+        Step("preparation-validation-stop", () =>
+        {
+            Open("preparation-validation-loop.lua", "preparation-validation-picker");
+            CancelPreparation("Macro-validation loop", "preparation-validation");
+        });
+        Step("preparation-validation-recovery", () => Recover("validation", "preparation-validation-recovery"));
+        Step("preparation-include-failure", () => RejectAndRecover("preparation-include-failure.lua",
+            "preparation-missing-include.lua", "include-failure", "preparation-include-failure"));
+        Step("preparation-validation-failure", () => RejectAndRecover("preparation-validation-failure.lua",
+            "The selected Automation macro is not available for this subtitle document", "validation-failure", "preparation-validation-failure"));
+        Step("preparation-validation-error", () => RejectAndRecover("preparation-validation-error.lua",
+            "Lua macro validation failed", "validation-error", "preparation-validation-error", "preparation-validation-runtime-error"));
+        Step("preparation-sethook-stop", () =>
+        {
+            Open("preparation-sethook-loop.lua", "preparation-sethook-picker");
+            CancelPreparation("Lua debug.sethook override", "preparation-sethook");
+        });
+        Step("preparation-sethook-recovery", () => Recover("sethook", "preparation-sethook-recovery"));
+        Step("preparation-gc-deferred", () =>
+        {
+            Open("preparation-gc-deferred.lua", "preparation-gc-picker");
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitForInvocation(workspace!, process, invocation, "completed", artifacts, "preparation-gc-deferred");
+            Ensure(ReadRunLog(workspace!, process).Contains("preparation-gc-deferred|validated", StringComparison.Ordinal),
+                "Workspace forced a full GC between guarded validation and macro execution");
+            AssertIdle("Deferred Workspace GC");
+            VerifyOriginal("preparation-gc-deferred");
+        });
+        Step("preparation-choice-cancel", () =>
+        {
+            Open("preparation-choice.lua", "preparation-choice-picker");
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            var dialog = WaitWindow(process, "Lua Workspace macro", TimeSpan.FromSeconds(10));
+            SaveEvidence(dialog, artifacts, "preparation-choice-dialog");
+            InvokeButton(dialog, "Cancel");
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(8)), "Cancelling macro selection did not return the Run action");
+            WaitUntil(() => FindWindow(process, "Lua Workspace macro") is null && gui.Current.IsEnabled,
+                TimeSpan.FromSeconds(5), "Cancelling macro selection did not restore the Workspace owner");
+            AssertIdle("Macro-selection cancellation");
+            VerifyOriginal("preparation-choice-cancelled");
+        });
+        Step("preparation-choice-recovery", () =>
+        {
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            var dialog = WaitWindow(process, "Lua Workspace macro", TimeSpan.FromSeconds(10));
+            var choice = dialog.FindAll(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)).Cast<AutomationElement>()
+                .Single(item => !item.Current.IsOffscreen && item.Current.Name == "Preparation Choice Alpha");
+            Ensure(choice.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selection),
+                "Preparation recovery choice has no SelectionItemPattern");
+            ((SelectionItemPattern)selection).Select();
+            var okay = UiaDriver.FindDescendantByAutomationId(dialog, "5100", ControlType.Button)
+                ?? throw new InvalidOperationException("Preparation macro-choice dialog has no observed wx OK ID 5100");
+            UiaDriver.Invoke(okay);
+            WaitForInvocation(workspace!, process, invocation, "completed", artifacts, "preparation-choice-recovery");
+            AssertIdle("Macro-selection recovery");
+            VerifyOriginal("preparation-choice-recovery");
+        });
+        Step("preparation-normal-shutdown", () =>
+        {
+            Native.StabilizeOwnedClipboard(process.Id);
+            Ensure(gui.TryGetCurrentPattern(WindowPattern.Pattern, out var pattern), "Main frame lacks WindowPattern.Close");
+            ((WindowPattern)pattern).Close();
+            Ensure(process.WaitForExit(TimeSpan.FromSeconds(10)) && process.ExitCode == 0,
+                "Preparation host did not exit normally with code zero");
+            File.WriteAllText(Path.Combine(artifacts, "preparation-normal-shutdown.json"), JsonSerializer.Serialize(new
             {
                 HostExitCode = process.ExitCode, Method = "WindowPattern.Close"
             }, new JsonSerializerOptions { WriteIndented = true }));
@@ -1350,7 +1583,7 @@ static int Run(string[] args)
 
     string[] JitSteps()
     {
-        var names = new List<string> { "host-ready", "jit-open" };
+        var names = new List<string> { "host-ready", "jit-open", "jit-initial-prewarm" };
         foreach (var mode in new[] { "on", "off" })
             foreach (var outcome in new[] { "completed", "failed", "cancelled" })
                 foreach (var stage in new[] { "source", "run", "restored", "ass" })
@@ -1402,6 +1635,8 @@ static int Run(string[] args)
             OpenLuaFile(workspace, process, managedFile, artifacts, "jit-file-picker");
             Ensure(workspace.Current.Name.Contains("debug-jit.lua", StringComparison.Ordinal), "Workspace did not open the managed JIT file");
         });
+        Step("jit-initial-prewarm", () =>
+            JitAcknowledgeMenu(gui, process, "Workspace JIT Initial Prewarm", "Initial JIT trace verified", "jit-initial-prewarm"));
         foreach (var mode in new[] { "on", "off" })
         {
             foreach (var outcome in new[] { "completed", "failed", "cancelled" })
@@ -1470,7 +1705,7 @@ static int Run(string[] args)
                             "JIT Continue did not resume the paused hot_loop before Stop");
                         InvokeButton(workspace!, "Stop");
                     }
-                    var enter = $"jit-enter|{mode}|{outcome}|original={original}|workspace=false|prewarmed={original}|trace=";
+                    var enter = $"jit-enter|{mode}|{outcome}|original={original}|workspace=false|prewarmed=false|trace=";
                     WaitUntil(() => invocation.IsCompleted && gui.Current.IsEnabled
                         && ReadRunStatus(workspace!).Contains(outcome, StringComparison.OrdinalIgnoreCase)
                         && ReadRunLog(workspace!, process).Contains(enter, StringComparison.Ordinal), TimeSpan.FromSeconds(15),
@@ -1478,16 +1713,16 @@ static int Run(string[] args)
                     Ensure(invocation.Wait(TimeSpan.FromSeconds(5)), "JIT UIA invocation did not return after termination");
                     var log = ReadRunLog(workspace!, process);
                     var traceMatch = Regex.Match(log, Regex.Escape(enter) + @"(\d+)(?:\r?\n|$)", RegexOptions.CultureInvariant);
-                    Ensure(traceMatch.Success, "JIT log lacks the exact original/workspace/prewarmed trace observation");
+                    Ensure(traceMatch.Success, "JIT log lacks the exact original/workspace/guarded-preparation observation");
                     var trace = int.Parse(traceMatch.Groups[1].Value);
-                    Ensure(mode == "on" ? trace > 0 : trace == 0, "JIT trace evidence does not match the original engine mode");
+                    Ensure(trace == 0, "Workspace preparation retained a JIT trace before Macro Run");
                     if (outcome == "failed")
                         Ensure(log.Contains($"workspace-jit-{mode}-intentional-failure", StringComparison.Ordinal), "JIT failed for a reason other than its deliberate error");
                     Ensure(Hash(managedFile) == hashes[name + "-managed"], "JIT managed source changed between Save and execution");
                     Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "JIT invocation wrote the physical ASS before main Save");
                     evidence["terminal"] = ReadRunStatus(workspace!);
-                    evidence["retained_prewarm_trace"] = trace;
-                    evidence["prewarmed"] = mode == "on";
+                    evidence["prepared_trace"] = trace;
+                    evidence["prepared_without_trace"] = true;
                     evidence["workspace_engine"] = false;
                     File.WriteAllText(Path.Combine(artifacts, name + "-run.log"), log);
                     SaveEvidence(workspace!, artifacts, name + "-terminal");
@@ -1495,7 +1730,7 @@ static int Run(string[] args)
                 });
                 Step(name + "-restored", () =>
                 {
-                    var label = $"JIT restored|{mode}|{outcome}|engine={original}|prewarmed={original}|workspace=false|runs=1";
+                    var label = $"JIT restored|{mode}|{outcome}|engine={original}|prepared_without_trace=true|workspace=false|runs=1";
                     JitAcknowledgeMenu(gui, process, "Workspace JIT Verify", label, name + "-restored");
                     Ensure(Hash(managedFile) == hashes[name + "-managed"], "JIT verifier changed its managed script source");
                     evidence["same_state_restoration_label"] = label;
@@ -1546,8 +1781,9 @@ static int Run(string[] args)
         var choices = dialog.FindAll(TreeScope.Descendants,
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem)).Cast<AutomationElement>()
             .Where(item => !item.Current.IsOffscreen).ToArray();
-        Ensure(choices.Length == 2 && choices.Any(item => item.Current.Name == "Workspace JIT Exercise")
-            && choices.Any(item => item.Current.Name == "Workspace JIT Verify"), "JIT Save/Reload macro selection does not expose the exact two fixture macros");
+        Ensure(choices.Length == 3 && choices.Any(item => item.Current.Name == "Workspace JIT Initial Prewarm")
+            && choices.Any(item => item.Current.Name == "Workspace JIT Exercise")
+            && choices.Any(item => item.Current.Name == "Workspace JIT Verify"), "JIT Save/Reload macro selection does not expose the exact three fixture macros");
         var choice = choices.Single(item => item.Current.Name == "Workspace JIT Exercise");
         if (!choice.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var select))
             throw new InvalidOperationException("JIT Exercise choice lacks SelectionItemPattern");
@@ -1562,7 +1798,12 @@ static int Run(string[] args)
 
     void JitAcknowledgeMenu(AutomationElement gui, Process process, string macro, string label, string evidence)
     {
-        var invocation = Task.Run(() => InvokeMenu(gui, process, macro, TimeSpan.FromSeconds(8)));
+        var commandReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var invocation = Task.Run(() => InvokeMenu(gui, process, macro, TimeSpan.FromSeconds(8),
+            commandReady: () => commandReady.TrySetResult()));
+        WaitUntil(() => commandReady.Task.IsCompleted || invocation.IsCompleted, TimeSpan.FromSeconds(12),
+            $"JIT verifier {macro} did not become invokable");
+        if (!commandReady.Task.IsCompleted) invocation.GetAwaiter().GetResult();
         var dialog = WaitWindowContainingText(process, label, TimeSpan.FromSeconds(8));
         SaveEvidence(dialog, artifacts, evidence + "-dialog");
         InvokeButton(dialog, "OK");
@@ -1808,14 +2049,19 @@ static int Run(string[] args)
     }
     void WriteManifest() => File.WriteAllText(Path.Combine(artifacts, "manifest.json"), JsonSerializer.Serialize(new
     {
-        StartedUtc = startedUtc, FinishedUtc = finishedUtc, BudgetSeconds = 240, ExeSha256 = hashes["exe"],
+        StartedUtc = startedUtc, FinishedUtc = finishedUtc, BudgetSeconds = scenario == "jit" ? 360 : scenario == "preparation" ? 300 : 240,
+        ExeSha256 = hashes["exe"],
         Scenario = scenario,
         AcceptanceScope = entryScenario ? "R1 Workspace templater entry identity, full-document qualification, and unchanged Automation-menu validation; this scenario only."
             : languageScenario ? "S6 language refresh/source isolation and unavailable-service Run/Debug/Undo/Save; not full S6 on its own."
+            : scenario == "preparation" ? "R3 cancellable Lua-file load/include/validation preparation and cleanup; this scenario only."
             : "This scenario only. Full S4 requires basic, launch, controls, files, dap, jit, native virtual-source E2E, and S2/S3 regressions.",
         Fixtures = new[] { fixture.Replace('\\', '/'), actions.Replace('\\', '/'), expectedFile.Replace('\\', '/'),
             stepsFile.Replace('\\', '/'), loopFile.Replace('\\', '/'), infiniteLoopFile.Replace('\\', '/'), templater.Replace('\\', '/'),
-            entryFixture.Replace('\\', '/'), entryActions.Replace('\\', '/'), entryDuplicate.Replace('\\', '/') },
+            entryFixture.Replace('\\', '/'), entryActions.Replace('\\', '/'), entryDuplicate.Replace('\\', '/') }
+            .Concat(scenario == "preparation"
+                ? preparationFixtures.Select(name => Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", name).Replace('\\', '/'))
+                : []),
         Sha256 = hashes, ExitStatus = exitStatus, Steps = results
     }, new JsonSerializerOptions { WriteIndented = true }));
 }
@@ -2006,6 +2252,7 @@ static string ReadRunStatus(AutomationElement workspace, bool allowHidden = fals
 {
     using var host = Process.GetProcessById(workspace.Current.ProcessId);
     var controls = Native.ChildTextControls(workspace, host, "Static", value => value.StartsWith("Debug:", StringComparison.Ordinal)
+        || value.StartsWith("Preparing", StringComparison.Ordinal)
         || value.StartsWith("Invocation failed", StringComparison.Ordinal)
         || value.StartsWith("Invocation cancelled", StringComparison.Ordinal)
         || value.StartsWith("Invocation completed", StringComparison.Ordinal)

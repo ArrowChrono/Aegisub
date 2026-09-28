@@ -869,6 +869,32 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		ScriptsChanged();
 	}
 
+	Script *ScriptManager::ReplaceForWorkspace(
+		Script *current,
+		std::unique_ptr<Script> replacement,
+		std::shared_ptr<AutomationDebugSession> const& owner) {
+		agi::ui::VerifyAccess();
+		if (!config::automation_debug_service || !config::automation_debug_service->OwnsLocalSession(owner))
+			throw AutomationError("Cannot replace a script without owning the active Lua Workspace session");
+		if (!current || !replacement || !replacement->GetLoadedState())
+			throw AutomationError("Cannot replace a script with an unloaded Workspace candidate");
+
+		auto found = std::ranges::find_if(scripts, [&](std::unique_ptr<Script> const& script) {
+			return script.get() == current;
+		});
+		if (found == scripts.end())
+			throw AutomationError("The Workspace script is no longer managed");
+		if (replacement->GetFilename() != (*found)->GetFilename())
+			throw AutomationError("The Workspace replacement does not match the managed script");
+
+		auto *published = replacement.get();
+		std::swap(*found, replacement);
+		replacement.reset();
+		published->CommitPendingFeatures();
+		ScriptsChanged();
+		return published;
+	}
+
 	void CommitPendingFeatures(std::vector<std::unique_ptr<Script>>& scripts)
 	{
 		for (auto& script : scripts) {

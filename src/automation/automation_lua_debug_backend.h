@@ -34,6 +34,7 @@ class AutomationLuaDebugBackend final : public AutomationDebugBackend {
 	agi::fs::path script_file;
 	std::set<std::string> runtime_globals_baseline;
 	std::shared_ptr<LuaWorkspaceRunRequest const> workspace_request;
+	int (*original_sethook)(lua_State *) = nullptr;
 
 	void UpdateHookState();
 	void OnHook(lua_Debug *ar);
@@ -44,11 +45,13 @@ class AutomationLuaDebugBackend final : public AutomationDebugBackend {
 	std::vector<AutomationDebugFrame> CaptureFrames() const;
 
 	static void Hook(lua_State *L, lua_Debug *ar);
+	static int GuardedSetHook(lua_State *L);
 
 	public:
 		AutomationLuaDebugBackend(lua_State *L, agi::fs::path script_file);
 		~AutomationLuaDebugBackend();
 		void SetWorkspaceRunRequest(std::shared_ptr<LuaWorkspaceRunRequest const> request);
+		void InstallSetHookGuard();
 
 		void CaptureRuntimeBaseline() override;
 		bool IsRuntimeGlobal(std::string_view name) const;
