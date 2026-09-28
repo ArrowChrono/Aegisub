@@ -1958,7 +1958,8 @@ static AutomationElement? FindStyledText(AutomationElement workspace, bool insid
             var current = item.Current;
             if (current.ProcessId != workspace.Current.ProcessId || current.IsOffscreen
                 || current.ControlType != ControlType.Pane || current.ClassName != "wxWindow"
-                || current.NativeWindowHandle == 0 || !item.TryGetCurrentPattern(ScrollPattern.Pattern, out _))
+                || current.NativeWindowHandle == 0
+                || (current.Name != "stcwindow" && !item.TryGetCurrentPattern(ScrollPattern.Pattern, out _)))
                 continue;
             if (HasNotebookAncestor(item, workspace) == insideNotebook) candidates.Add(item);
         }
@@ -2109,7 +2110,12 @@ static AutomationElement WaitWindowContainingText(Process host, string exactText
 static void VerifySeed(AutomationElement main, Process host, string input, IReadOnlyList<AssEvent> seeded, string artifacts, string evidenceName)
 {
     var before = File.ReadAllBytes(input);
-    var task = Task.Run(() => InvokeMenu(main, host, "Workspace Debug Verify Seed Rollback", TimeSpan.FromSeconds(8)));
+    var commandReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var task = Task.Run(() => InvokeMenu(main, host, "Workspace Debug Verify Seed Rollback", TimeSpan.FromSeconds(8),
+        commandReady: () => commandReady.TrySetResult()));
+    WaitUntil(() => commandReady.Task.IsCompleted || task.IsCompleted, TimeSpan.FromSeconds(12),
+        "Live rollback verifier command did not become invokable");
+    if (!commandReady.Task.IsCompleted) task.GetAwaiter().GetResult();
     var dialog = WaitWindowContainingText(host, "Debug seed rollback verified", TimeSpan.FromSeconds(8));
     SaveEvidence(dialog, artifacts, evidenceName + "-dialog");
     InvokeButton(dialog, "OK");
@@ -2134,16 +2140,13 @@ static AutomationElement? FindVisibleMenuCommand(Process host, string name)
     return matches.SingleOrDefault();
 }
 
-static void InvokeMenu(AutomationElement main, Process host, string name, TimeSpan timeout, string menuName = "Automation")
+static void InvokeMenu(AutomationElement main, Process host, string name, TimeSpan timeout, string menuName = "Automation",
+    Action? commandReady = null)
 {
     AutomationElement? menu = null;
-    var menuBar = main.FindFirst(TreeScope.Children, new AndCondition(
-        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuBar),
-        new PropertyCondition(AutomationElement.AutomationIdProperty, "MenuBar")))
-        ?? throw new InvalidOperationException("Main application menu bar is missing");
-    WaitUntil(() => main.Current.IsEnabled && (menu = menuBar.FindAll(TreeScope.Children,
+    WaitUntil(() => main.Current.IsEnabled && (menu = main.FindAll(TreeScope.Descendants,
         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem))
-        .Cast<AutomationElement>().FirstOrDefault(item => !item.Current.IsOffscreen
+        .Cast<AutomationElement>().SingleOrDefault(item => item.Current.ProcessId == host.Id && !item.Current.IsOffscreen
             && (item.Current.Name ?? "").Replace("&", "", StringComparison.Ordinal)
                 .Equals(menuName, StringComparison.OrdinalIgnoreCase))) is not null,
         timeout, $"Main menu {menuName} was not exposed after execution UI completed");
@@ -2172,6 +2175,7 @@ static void InvokeMenu(AutomationElement main, Process host, string name, TimeSp
     MenuObservation.Record(menuSnapshot, "before-invoke", null);
     Ensure(current.IsEnabled && !current.IsOffscreen && hasInvoke,
         $"Exact visible menu command {name} was not enabled and invokable");
+    commandReady?.Invoke();
     try
     {
         UiaDriver.Invoke(command!);
