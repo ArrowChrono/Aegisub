@@ -18,7 +18,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.PACKAGES_CLEANUP_TOKEN }}
       ORG: ArrowChrono
       KEEP_VERSIONS: '2'
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
