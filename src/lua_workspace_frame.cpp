@@ -306,8 +306,8 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	auto open = icon_button(file_actions, wxID_OPEN, _("Open File"), CMD_ICON_BUNDLE_GET(open_toolbutton, wxLayout_Default));
 	open_button = open;
 	apply = icon_button(file_actions, wxID_SAVE, _("Apply"), CMD_ICON_BUNDLE_GET(save_toolbutton, wxLayout_Default));
-	format = text_button(file_actions, _("Format"));
-	reload = text_button(file_actions, _("Reload"));
+	format = icon_button(file_actions, wxID_ANY, _("Format"), CMD_ICON_BUNDLE_GET(format_toolbutton, wxLayout_Default));
+	reload = icon_button(file_actions, wxID_ANY, _("Reload"), CMD_ICON_BUNDLE_GET(reload_toolbutton, wxLayout_Default));
 	auto copy = icon_button(file_actions, wxID_COPY, _("Copy source"), CMD_ICON_BUNDLE_GET(copy_button, wxLayout_Default));
 	auto run_actions = group();
 	run_button = icon_button(run_actions, wxID_ANY, _("Run"), CMD_ICON_BUNDLE_GET(button_play, wxLayout_Default));
@@ -354,15 +354,16 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	editor->SetTabIndents(true);
 	editor->SetBackSpaceUnIndents(true);
 	editor->SetEOLMode(wxSTC_EOL_LF);
-	editor->SetMarginType(0, wxSTC_MARGIN_NUMBER);
-	editor->SetMarginWidth(0, 52);
+	editor->SetMarginType(0, wxSTC_MARGIN_SYMBOL);
+	editor->SetMarginMask(0, 1 << 1);
+	editor->SetMarginWidth(0, FromDIP(16));
+	editor->SetMarginSensitive(0, true);
 	editor->SetMarginType(1, wxSTC_MARGIN_SYMBOL);
-	editor->SetMarginMask(1, 1 << 1);
-	editor->SetMarginWidth(1, 18);
-	editor->SetMarginSensitive(1, true);
-	editor->SetMarginType(2, wxSTC_MARGIN_SYMBOL);
-	editor->SetMarginMask(2, 1 << 2);
-	editor->SetMarginWidth(2, 18);
+	editor->SetMarginMask(1, 1 << 2);
+	editor->SetMarginWidth(1, FromDIP(16));
+	editor->SetMarginType(2, wxSTC_MARGIN_NUMBER);
+	editor->SetMarginMask(2, 0);
+	editor->SetMarginWidth(2, FromDIP(24));
 	editor->MarkerDefine(1, wxSTC_MARK_CIRCLE, wxColour(180, 30, 30), wxColour(180, 30, 30));
 	editor->MarkerDefine(2, wxSTC_MARK_ARROW, wxColour(35, 70, 180), wxColour(35, 70, 180));
 	editor->IndicatorSetStyle(diagnostic_indicator, wxSTC_INDIC_SQUIGGLE);
@@ -386,8 +387,12 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	execution_source->SetCodePage(wxSTC_CP_UTF8);
 	execution_source->SetLexer(wxSTC_LEX_LUA);
 	execution_source->SetKeyWords(0, wxS("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"));
-	execution_source->SetMarginType(0, wxSTC_MARGIN_NUMBER);
-	execution_source->SetMarginWidth(0, 42);
+	execution_source->SetMarginType(0, wxSTC_MARGIN_SYMBOL);
+	execution_source->SetMarginMask(0, 1 << 2);
+	execution_source->SetMarginWidth(0, FromDIP(16));
+	execution_source->SetMarginType(1, wxSTC_MARGIN_NUMBER);
+	execution_source->SetMarginMask(1, 0);
+	execution_source->SetMarginWidth(1, FromDIP(24));
 	execution_source->MarkerDefine(2, wxSTC_MARK_ARROW, wxColour(35, 70, 180), wxColour(35, 70, 180));
 	execution_source->SetReadOnly(true);
 	execution_layout->Add(execution_identity, 0, wxEXPAND | wxALL, 4);
@@ -516,7 +521,7 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	toggle_breakpoint->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ToggleBreakpoint(editor->GetCurrentLine() + 1); });
 	clear_breakpoints->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editor->MarkerDeleteAll(1); });
 	editor->Bind(wxEVT_STC_MARGINCLICK, [this](wxStyledTextEvent& event) {
-		if (event.GetMargin() == 1)
+		if (event.GetMargin() == 0)
 			ToggleBreakpoint(editor->LineFromPosition(event.GetPosition()) + 1);
 	});
 	stack_frames->Bind(wxEVT_LISTBOX, [this](wxCommandEvent&) { ShowSelectedFrame(); });
@@ -529,6 +534,7 @@ LuaWorkspaceFrame::LuaWorkspaceFrame(agi::Context *value)
 	editor->Bind(wxEVT_STC_CHANGE, [this](wxStyledTextEvent&) {
 		if (loading || !document)
 			return;
+		UpdateLineNumberMargins();
 		FinishPendingDiscard(false);
 		source_diagnostic.reset();
 		action_message.clear();
@@ -796,6 +802,7 @@ void LuaWorkspaceFrame::ShowSelectedFrame() {
 	execution_source->SetReadOnly(false);
 	execution_source->MarkerDeleteAll(2);
 	execution_source->SetText(source ? to_wx(source->text) : wxString{});
+	UpdateLineNumberMargins();
 	execution_source->SetReadOnly(true);
 	RefreshExecutionIdentity();
 	if (source && is_current_pause && frame.location.line > 0 && frame.location.line <= execution_source->GetLineCount()) {
@@ -1115,6 +1122,7 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 		UpdatePausedEditorMarker({});
 		execution_source->SetReadOnly(false);
 		execution_source->SetText(wxString{});
+		UpdateLineNumberMargins();
 		execution_source->SetReadOnly(true);
 		execution_identity->SetLabel(_("No paused source."));
 		debug_location->SetLabel(_("Debug running; waiting for the next breakpoint or manual pause."));
@@ -1364,7 +1372,17 @@ void LuaWorkspaceFrame::ApplyEditorPreferences() {
 		source->StyleSetForeground(wxSTC_LUA_LITERALSTRING, wxColour(155, 60, 45));
 		source->StyleSetForeground(wxSTC_LUA_NUMBER, wxColour(125, 55, 135));
 		source->SetWrapMode(wrap);
-		source->SetMarginWidth(0, std::max(FromDIP(source == editor ? 52 : 42), source->TextWidth(wxSTC_STYLE_LINENUMBER, wxS("99999"))));
+	}
+	UpdateLineNumberMargins();
+}
+
+void LuaWorkspaceFrame::UpdateLineNumberMargins() {
+	for (auto source : {editor, execution_source}) {
+		auto const digits = std::to_string(std::max(1, source->GetLineCount())).size();
+		int const width = source->TextWidth(wxSTC_STYLE_LINENUMBER, to_wx(std::string(digits, '9'))) + FromDIP(8);
+		int const margin = source == editor ? 2 : 1;
+		if (source->GetMarginWidth(margin) != width)
+			source->SetMarginWidth(margin, width);
 	}
 }
 
@@ -1379,6 +1397,7 @@ void LuaWorkspaceFrame::ClearInvocationPresentation() {
 	variable_details->Clear();
 	execution_source->SetReadOnly(false);
 	execution_source->SetText(wxString{});
+	UpdateLineNumberMargins();
 	execution_source->SetReadOnly(true);
 	execution_identity->SetLabel(_("No paused source."));
 	execution_identity->SetToolTip(execution_identity->GetLabel());
@@ -1398,6 +1417,7 @@ void LuaWorkspaceFrame::SetEditorSource() {
 	editor->MarkerDeleteAll(2);
 	editor->SetReadOnly(false);
 	editor->SetText(document ? to_wx(document->GetSource()) : wxString{});
+	UpdateLineNumberMargins();
 	editor->EmptyUndoBuffer();
 	editor->SetSavePoint();
 	editor->SetReadOnly(!document);

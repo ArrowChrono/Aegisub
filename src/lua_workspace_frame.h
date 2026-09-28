@@ -98,6 +98,7 @@ class LuaWorkspaceFrame : public wxFrame {
 
 	void SetEditorSource();
 	void ApplyEditorPreferences();
+	void UpdateLineNumberMargins();
 	void ClearInvocationPresentation();
 	void RefreshDocument(bool check_target = true);
 	void ShowResult(Automation4::LuaWorkspaceDocumentResult const& result, bool remember = true);

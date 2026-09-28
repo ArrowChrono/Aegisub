@@ -791,6 +791,12 @@ static int RunWorkspaceUx(string exe, string artifacts)
                 Ensure(heights.Max() - heights.Min() <= 2,
                     $"{width} toolbar button heights differ by more than two physical pixels: {string.Join(',', heights.Select(value => value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)))}");
             }
+            static void AssertCompactIcons(AutomationElement[] buttons, string width)
+            {
+                var names = new[] { "Open File", "Apply", "Format", "Reload", "Copy source", "Run", "Pause", "Stop" };
+                var widths = names.Select(name => buttons.Single(button => button.Current.Name == name).Current.BoundingRectangle.Width).ToArray();
+                Ensure(widths.Max() - widths.Min() <= 2, $"{width} icon actions do not share one compact width");
+            }
             static void AssertSameRow(AutomationElement[] buttons, string[] names, string group)
             {
                 var centers = names.Select(name => buttons.Single(button => button.Current.Name == name).Current.BoundingRectangle)
@@ -833,6 +839,7 @@ static int RunWorkspaceUx(string exe, string artifacts)
             var wideRows = ButtonRowCount(wideButtons);
             var widePauseOnEntry = PauseOnEntryControl(workspace);
             AssertUniformHeights(wideButtons, "Wide");
+            AssertCompactIcons(wideButtons, "Wide");
             Ensure(wideRows == 1, $"Wide toolbar should fit all semantic groups on one row, observed {wideRows}");
             AssertSameRow(wideButtons, fileGroup, "Wide file");
             AssertExecutionAlignment(wideButtons, widePauseOnEntry, "Wide");
@@ -851,6 +858,7 @@ static int RunWorkspaceUx(string exe, string artifacts)
             var narrowRows = ButtonRowCount(narrowButtons);
             var narrowPauseOnEntry = PauseOnEntryControl(workspace);
             AssertUniformHeights(narrowButtons, "Narrow");
+            AssertCompactIcons(narrowButtons, "Narrow");
             Ensure(narrowRows > wideRows, $"Toolbar did not wrap to more rows after narrowing; wide={wideRows}, narrow={narrowRows}");
             AssertSameRow(narrowButtons, fileGroup, "Narrow file");
             AssertExecutionAlignment(narrowButtons, narrowPauseOnEntry, "Narrow");

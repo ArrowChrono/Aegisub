@@ -256,6 +256,11 @@ button/font_collector_button_24.png
 button/font_collector_button_32.png
 button/font_collector_button_48.png
 button/font_collector_button_64.png
+button/format_toolbutton_16.png
+button/format_toolbutton_24.png
+button/format_toolbutton_32.png
+button/format_toolbutton_48.png
+button/format_toolbutton_64.png
 button/forums_button_16.png
 button/forums_button_24.png
 button/forums_button_32.png
@@ -371,6 +376,11 @@ button/redo_button_24.png
 button/redo_button_32.png
 button/redo_button_48.png
 button/redo_button_64.png
+button/reload_toolbutton_16.png
+button/reload_toolbutton_24.png
+button/reload_toolbutton_32.png
+button/reload_toolbutton_48.png
+button/reload_toolbutton_64.png
 button/resample_toolbutton_16.png
 button/resample_toolbutton_24.png
 button/resample_toolbutton_32.png

@@ -497,7 +497,7 @@ static int Run(string[] args)
             Native.SendCtrlHome(sourceEditor, process);
             Native.SendKey(sourceEditor, process, 0x28);
             Native.SendKey(sourceEditor, process, 0x28);
-            InvokeButton(workspace, "Toggle Breakpoint");
+            Native.ClickBreakpointMargin(sourceEditor, process, 3);
             SaveEvidence(workspace, artifacts, "launch-default-ready");
         });
         Step("launch-default-breakpoint", () =>
@@ -2515,6 +2515,9 @@ static class Native
 
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint hwnd);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
+    [DllImport("user32.dll", EntryPoint = "WindowFromPoint", ExactSpelling = true)] private static extern nint WindowFromPoint(Point point);
     [DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll")] private static extern nint GetClipboardOwner();
     [DllImport("user32.dll")] private static extern int IsClipboardFormatAvailable(uint format);
@@ -2745,6 +2748,63 @@ static class Native
 
     public static void SendCtrlHome(AutomationElement editor, Process host) => Chord(editor, host, 0x24);
     public static void SendKey(AutomationElement editor, Process host, ushort key) => Send(editor, host, Key(key, false), Key(key, true));
+
+    public static void ClickBreakpointMargin(AutomationElement editor, Process host, int line)
+    {
+        PrepareFocus(editor, host);
+        var target = editor.Current;
+        Ensure(line > 0 && target.ProcessId == host.Id && target.ControlType == ControlType.Pane
+            && target.ClassName == "wxWindow" && target.NativeWindowHandle != 0 && !target.IsOffscreen,
+            "Breakpoint margin target is not the visible host STC");
+        var hwnd = new nint(target.NativeWindowHandle);
+        var dpi = GetDpiForWindow(hwnd);
+        Ensure(dpi >= 96, "Breakpoint margin target has no usable DPI");
+        var scale = dpi / 96.0;
+        var rect = target.BoundingRectangle;
+        var point = new Point((int)Math.Round(rect.Left + 8 * scale),
+            (int)Math.Round(rect.Top + 10 + (line - 1) * 20));
+        Console.WriteLine($"debug.margin-click=dpi:{dpi};rect:{rect};point:{point};requested-line:{line}");
+        Ensure(rect.Contains(point.X, point.Y), "Breakpoint margin click point left the source editor");
+        var hit = WindowFromPoint(point);
+        GetWindowThreadProcessId(hit, out var owner);
+        Ensure(hit == hwnd && owner == (uint)host.Id, "Breakpoint margin point does not hit the exact host STC");
+        GetWindowThreadProcessId(GetForegroundWindow(), out var foregroundOwner);
+        Ensure(foregroundOwner == (uint)host.Id, "Breakpoint margin host is not foreground");
+
+        var left = GetSystemMetrics(76);
+        var top = GetSystemMetrics(77);
+        var width = GetSystemMetrics(78);
+        var height = GetSystemMetrics(79);
+        Ensure(width > 1 && height > 1, "Virtual desktop metrics are invalid for breakpoint click");
+        Input Mouse(uint action) => new()
+        {
+            Type = 0,
+            Union = new InputUnion { Mouse = new MouseInput
+            {
+                X = checked((int)Math.Round((point.X - left) * 65535.0 / (width - 1))),
+                Y = checked((int)Math.Round((point.Y - top) * 65535.0 / (height - 1))),
+                Flags = 0x0001u | 0x4000u | 0x8000u | action
+            } }
+        };
+        void SendMouse(uint action)
+        {
+            Ensure(SendInput(1, new[] { Mouse(action) }, Marshal.SizeOf<Input>()) == 1,
+                "Guarded breakpoint margin click was partial");
+        }
+        var pressed = false;
+        try
+        {
+            SendMouse(0);
+            SendMouse(0x0002);
+            pressed = true;
+            SendMouse(0x0004);
+            pressed = false;
+        }
+        finally
+        {
+            if (pressed) _ = SendInput(1, new[] { Mouse(0x0004) }, Marshal.SizeOf<Input>());
+        }
+    }
 
     public static void Focus(AutomationElement editor, Process host) => PrepareFocus(editor, host);
     public static void SendKeyToControl(AutomationElement control, Process host, ushort virtualKey)
