@@ -1406,7 +1406,7 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 			}
 			auto macros = script->GetMacros();
 			if (macros.empty()) {
-				no_macro_revision = document->GetRevision();
+				no_macro_revision = source.revision;
 				UpdateRunControls();
 				fail("The reloaded Lua file has no registered macro to run");
 				return;

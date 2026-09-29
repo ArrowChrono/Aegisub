@@ -772,13 +772,14 @@ static int Run(string[] args)
     }
 
     string[] FileSteps() => new[] { "host-ready", "files-open-noentry", "files-noentry-first-run", "files-noentry-reload",
-        "files-noentry-recover", "files-noentry-undo", "files-readonly-failure", "files-readonly-live-baseline",
+        "files-noentry-recover", "files-noentry-undo", "files-noentry-inflight-edit", "files-noentry-inflight-run",
+        "files-noentry-inflight-undo", "files-readonly-failure", "files-readonly-live-baseline",
         "files-readonly-recovery", "files-readonly-undo", "files-managed-beta", "files-managed-beta-undo",
         "files-managed-gamma", "files-managed-gamma-undo", "files-normal-shutdown" };
 
     void PrepareFiles()
     {
-        foreach (var name in new[] { "debug-file-noentry.lua", "debug-file-save.lua", "debug-file-save-edited.lua",
+        foreach (var name in new[] { "debug-file-noentry.lua", "debug-file-noentry-gated.lua", "debug-file-save.lua", "debug-file-save-edited.lua",
             "debug-file-macros.lua", "debug-file-macros-v2.lua" })
         {
             var source = Path.Combine("tests", "gui-automation", "lua-workspace", "fixtures", name);
@@ -801,12 +802,17 @@ static int Run(string[] args)
         var process = host ?? throw new InvalidOperationException("GUI host is unavailable");
         var noentry = Path.Combine(artifacts, "debug-file-noentry.lua");
         var marker = Path.Combine(artifacts, "debug-noentry-loads.txt");
+        var gatedNoentry = Path.Combine(artifacts, "debug-file-noentry-gated.lua");
+        var gateEntered = Path.Combine(artifacts, "debug-noentry-gate-entered.txt");
+        var gateRelease = Path.Combine(artifacts, "debug-noentry-gate-release.txt");
         var saveFile = Path.Combine(artifacts, "debug-file-save.lua");
         var savedEdited = File.ReadAllText(Path.Combine(artifacts, "debug-file-save-edited.lua"));
         var managedFile = Path.Combine(artifacts, "debug-file-macros.lua");
         var managedEdited = File.ReadAllText(Path.Combine(artifacts, "debug-file-macros-v2.lua"));
         var recovered = baseline.ToArray();
         recovered[0] = recovered[0] with { Effect = "noentry-recovered" };
+        var inflightRecovered = baseline.ToArray();
+        inflightRecovered[0] = inflightRecovered[0] with { Effect = "inflight-recovered" };
         var saved = baseline.ToArray();
         saved[0] = saved[0] with { Effect = "file-saved" };
         var beta = baseline.ToArray();
@@ -979,6 +985,52 @@ static int Run(string[] args)
             SaveMainAss(gui, input, recovered, artifacts, "noentry-recovered.ass");
         });
         Step("files-noentry-undo", () => UndoToOriginal("noentry-undone.ass"));
+        Step("files-noentry-inflight-edit", () =>
+        {
+            OpenLuaFile(workspace!, process, gatedNoentry, artifacts, "files-noentry-inflight-picker");
+            var original = File.ReadAllText(gatedNoentry);
+            Ensure(!File.Exists(gateEntered) && !File.Exists(gateRelease), "Gated no-entry markers predate the first load");
+            var edited = original + "\naegisub.register_macro(\"Workspace Inflight Recovered\", \"Recovered during old load\", function(subs, selected, active)\n"
+                + "  local line = subs[active]\n  line.effect = \"inflight-recovered\"\n  subs[active] = line\n  return selected, active\nend)\n";
+            var editedPath = Path.Combine(artifacts, "noentry-inflight-edited.lua");
+            File.WriteAllText(editedPath, edited, new UTF8Encoding(false));
+            hashes["files-generated-noentry-inflight-edited"] = Hash(editedPath);
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitUntil(() => File.Exists(gateEntered) && ReadRunStatus(workspace!).StartsWith("Preparing", StringComparison.Ordinal)
+                    && !invocation.IsCompleted,
+                TimeSpan.FromSeconds(12), "Gated no-entry source did not enter its still-active preparation load");
+            File.WriteAllText(Path.Combine(artifacts, "noentry-inflight-preparing-status.txt"), ReadRunStatus(workspace!));
+            SaveEvidence(workspace!, artifacts, "files-noentry-inflight-preparing");
+            var editor = FindStyledText(workspace!, insideNotebook: false)
+                ?? throw new InvalidOperationException("Gated no-entry source editor was not found");
+            Native.ReplaceWithClipboard(editor, process, edited);
+            Ensure(!invocation.IsCompleted && File.ReadAllText(gatedNoentry) == original,
+                "The old load finished or saved the new editor revision before gate release");
+            SaveEvidence(workspace!, artifacts, "files-noentry-inflight-edited");
+            File.WriteAllText(gateRelease, "release\n", new UTF8Encoding(false));
+            Ensure(invocation.Wait(TimeSpan.FromSeconds(12)), "Old gated no-entry load did not terminate after release");
+            WaitUntil(() => ReadRunStatus(workspace!).Contains("The reloaded Lua file has no registered macro to run", StringComparison.Ordinal)
+                    && gui.Current.IsEnabled,
+                TimeSpan.FromSeconds(8), "Old gated revision did not report its exact no-macro result");
+            Ensure(File.ReadAllLines(gateEntered).Length == 1 && File.ReadAllText(gatedNoentry) == original,
+                "Old gated load did not preserve the newer editor-only macro source");
+            Ensure(FindButton(workspace!, "Run").Current.IsEnabled && FindButton(workspace!, "Debug").Current.IsEnabled,
+                "Old no-macro result disabled Run/Debug for the newer editor revision");
+            File.WriteAllText(Path.Combine(artifacts, "noentry-inflight-result-status.txt"), ReadRunStatus(workspace!));
+            SaveEvidence(workspace!, artifacts, "files-noentry-inflight-result");
+            Ensure(EventLines(File.ReadAllText(input)).SequenceEqual(baseline), "Gated no-entry load changed the physical ASS baseline");
+        });
+        Step("files-noentry-inflight-run", () =>
+        {
+            var invocation = Task.Run(() => InvokeButton(workspace!, "Run"));
+            WaitFileRun(invocation, "debug-file-noentry-gated", "Workspace Inflight Recovered");
+            Ensure(File.ReadAllLines(gateEntered).Length == 2
+                && Normalize(File.ReadAllText(gatedNoentry)) == Normalize(File.ReadAllText(Path.Combine(artifacts, "noentry-inflight-edited.lua"))),
+                "Recovered Run did not save and reload the newer macro source exactly once");
+            SaveMainAss(gui, input, inflightRecovered, artifacts, "noentry-inflight-recovered.ass");
+            SaveEvidence(workspace!, artifacts, "files-noentry-inflight-completed");
+        });
+        Step("files-noentry-inflight-undo", () => UndoToOriginal("noentry-inflight-undone.ass"));
         Step("files-readonly-failure", () =>
         {
             OpenLuaFile(workspace!, process, saveFile, artifacts, "files-readonly-picker");
