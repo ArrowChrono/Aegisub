@@ -1,6 +1,9 @@
 local original_mode = "on"
 local outcome = "completed"
 local jit_util = require("jit.util")
+local cached_jit_off = jit.off
+jit.off(true, true)
+jit.on(true, true)
 local expected_engine = original_mode == "on"
 assert(original_mode == "on" or original_mode == "off", "Unexpected JIT mode")
 assert(outcome == "completed" or outcome == "failed" or outcome == "cancelled", "Unexpected JIT outcome")
@@ -60,6 +63,8 @@ aegisub.register_macro("Workspace JIT Initial Prewarm", "Verify ordinary managed
 end, function() return expected_engine and prewarmed end)
 
 aegisub.register_macro("Workspace JIT Exercise", "Verify a scoped JIT lifecycle with real source and subtitle changes", function(subs, selected, active)
+  cached_jit_off(true, true)
+  jit.on(true, true)
   local workspace_mode = jit.status()
   assert(workspace_mode == false, "Workspace did not disable the JIT engine")
   assert(jit_util.traceinfo(1) == nil, "Workspace retained a JIT trace after guarded preparation and flush")

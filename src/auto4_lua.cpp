@@ -128,10 +128,7 @@ namespace {
 			return 0;
 		}
 
-		lua_pushvalue(L, lua_upvalueindex(1));
-		lua_insert(L, 1);
-		lua_call(L, nargs, LUA_MULTRET);
-		return lua_gettop(L);
+		return lua_tocfunction(L, lua_upvalueindex(1))(L);
 	}
 
 	wxString get_wxstring(lua_State *L, int idx)

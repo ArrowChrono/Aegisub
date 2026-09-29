@@ -1636,7 +1636,7 @@ static int Run(string[] args)
             Ensure(matches.Length == 1, "JIT source statement is not unique: " + statement);
             return matches[0].index + 1;
         }
-        var entryLine = JitLine("local workspace_mode = jit.status()");
+        var entryLine = JitLine("cached_jit_off(true, true)");
         var loopLines = new[] { JitLine("for index = 1, limit do"), JitLine("total = total + index % 97") };
         Step("jit-open", () =>
         {

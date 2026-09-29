@@ -16,6 +16,8 @@ The `syntax-boundaries` case combines vararg unpacking, a standalone EmmyLua ann
 
 The generated `scalability` case exercises 512 adjacent ordinary calls, 512 explicit statement semicolons, and 8000 sequential while loops, plus an implicit boundary between a numeric expression and a parenthesized call. It executes the original, formatted, and serialized source against the independent `1025:1` result and retains each stage. The CTest-level 60-second timeout bounds the complete source-roundtrip E2E rather than relying on an unbounded timing retry.
 
+The JIT GUI matrix also invokes the documented current-function form `jit.off(true, true)` and `jit.on(true, true)` during preparation and through a cached function reference at runtime.
+
 From the repository root, with the configured `build-dir` and `RelWithDebInfo` configuration:
 
 ```powershell
