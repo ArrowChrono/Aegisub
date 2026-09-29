@@ -58,10 +58,11 @@ static int Supervise(string[] args)
     var requestedScenario = args.Zip(args.Skip(1)).FirstOrDefault(pair => pair.First == "--scenario").Second;
     var unavailableEditor = requestedScenario == "editor-unavailable";
     var workspaceUx = requestedScenario == "workspace-ux";
-    var totalBudgetSeconds = workspaceUx ? 240 : unavailableEditor ? 150 : 120;
+    var languageSettings = requestedScenario == "language-settings";
+    var totalBudgetSeconds = languageSettings ? 300 : workspaceUx ? 240 : unavailableEditor ? 150 : 120;
     try
     {
-        var workerBudget = TimeSpan.FromSeconds(workspaceUx ? 230 : unavailableEditor ? 140 : 110) - total.Elapsed;
+        var workerBudget = TimeSpan.FromSeconds(languageSettings ? 290 : workspaceUx ? 230 : unavailableEditor ? 140 : 110) - total.Elapsed;
         if (workerBudget <= TimeSpan.Zero || !worker.WaitForExit(workerBudget))
         {
             timedOut = true;
@@ -1325,10 +1326,14 @@ static int RunLanguageSettings(string exe, string artifacts)
     var customRuntimeExe = Path.Combine(customRuntime, "bin", "lua-language-server.exe");
     var incompleteRuntime = Path.Combine(artifacts, "LuaLS incomplete");
     var missingRuntime = Path.Combine(artifacts, "LuaLS missing");
+    var failedStartRuntime = Path.Combine(artifacts, "LuaLS failed start");
+    var failedStartRuntimeExe = Path.Combine(failedStartRuntime, "bin", "lua-language-server.exe");
     var input = Path.Combine(artifacts, "input.ass");
-    var luaFile = Path.Combine(artifacts, "language-settings-file.lua");
+    var sourceDirectory = Path.Combine(artifacts, "source");
+    var luaFile = Path.Combine(sourceDirectory, "language-settings-file.lua");
     var profile = Path.Combine(artifacts, "profile");
     Directory.CreateDirectory(profile);
+    Directory.CreateDirectory(sourceDirectory);
     File.Copy(fixture, input, overwrite: true);
     File.Copy(mutationFixture, Path.Combine(artifacts, "metadata-mutations.lua"), overwrite: true);
     File.Copy(languageFixture, luaFile, overwrite: true);
@@ -1336,13 +1341,20 @@ static int RunLanguageSettings(string exe, string artifacts)
     CopyDirectory(defaultRuntime, customRuntime);
     Directory.CreateDirectory(incompleteRuntime);
     File.Copy(Path.Combine(defaultRuntime, "main.lua"), Path.Combine(incompleteRuntime, "main.lua"), overwrite: true);
+    Directory.CreateDirectory(Path.Combine(failedStartRuntime, "bin"));
+    Directory.CreateDirectory(Path.Combine(failedStartRuntime, "script"));
+    Directory.CreateDirectory(Path.Combine(failedStartRuntime, "meta"));
+    File.Copy(Path.Combine(defaultRuntime, "main.lua"), Path.Combine(failedStartRuntime, "main.lua"), overwrite: true);
+    File.WriteAllBytes(failedStartRuntimeExe, Encoding.ASCII.GetBytes("not a Windows executable"));
     Ensure(IsCompleteLuaLsRelease(customRuntime), "Copied custom LuaLS directory is not a complete release");
     Ensure(!IsCompleteLuaLsRelease(incompleteRuntime) && !Directory.Exists(missingRuntime), "Fault-injection LuaLS directories are not invalid and missing");
+    Ensure(IsCompleteLuaLsRelease(failedStartRuntime), "Failed-start LuaLS release does not pass structural validation");
     DriverTiming.Start(artifacts);
     var results = new List<StepResult>();
     var evidence = new List<object>();
+    var localVisualEvidence = new List<object>();
     var statuses = new Dictionary<string, string>();
-    var allSteps = new[] { "host-ready", "default-settings", "cancel-does-not-apply", "disable-apply", "custom-release-apply", "incomplete-no-fallback-edit", "missing-no-fallback", "restore-real-completion", "normal-close" };
+    var allSteps = new[] { "host-ready", "default-settings", "cancel-does-not-apply", "disable-apply", "disabled-local-host-hints", "custom-release-apply", "incomplete-no-fallback-edit", "incomplete-local-host-hints", "missing-no-fallback", "missing-local-host-hints", "failed-start-local-host-hints", "restore-real-completion", "normal-close" };
     var status = "running";
     Process? host = null;
     AutomationElement? main = null;
@@ -1372,7 +1384,7 @@ static int RunLanguageSettings(string exe, string artifacts)
             OpenLuaFile(workspace, host, luaFile, artifacts);
             editor = FindNamed(workspace, "Lua source") ?? throw new InvalidOperationException("Lua source editor is absent");
             SelectLanguageTab(workspace);
-            WaitForLanguageStatus(workspace, value => value.Contains("ready", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(15), "Default LuaLS did not become ready");
+            WaitForLanguageStatus(workspace, value => value.Contains("ready", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(45), "Default LuaLS did not become ready");
             statuses["default"] = LanguageStatus(workspace);
             var (preferences, invocation) = OpenAutomationPreferences(main!, configureButton!, host);
             var controls = LanguageSettingsControls(preferences, host.Id);
@@ -1410,6 +1422,7 @@ static int RunLanguageSettings(string exe, string artifacts)
             statuses["disabled"] = LanguageStatus(workspace!);
             Ensure(NormalizeSource(ReadEditor(editor!)) == NormalizeSource(File.ReadAllText(luaFile)), "Disabling LuaLS changed source");
         });
+        Step("disabled-local-host-hints", () => CheckLocalHostHints("disabled", signature: true));
         Step("custom-release-apply", () =>
         {
             var (preferences, invocation) = OpenAutomationPreferences(main!, configureButton!, host);
@@ -1419,7 +1432,7 @@ static int RunLanguageSettings(string exe, string artifacts)
             SaveSettingsEvidence(preferences, "settings-custom-release");
             InvokeButton(preferences, "Apply");
             ClosePreferencesWithCancel(preferences, invocation, host);
-            WaitForLanguageStatus(workspace!, value => value.Contains("ready", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(15), "Custom LuaLS release did not become ready");
+            WaitForLanguageStatus(workspace!, value => value.Contains("ready", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(45), "Custom LuaLS release did not become ready");
             statuses["custom"] = LanguageStatus(workspace!);
             WaitUntil(() => NativeProcess.DirectChildExecutablePaths(host.Id).Any(path => PathsEqual(path, customRuntimeExe)), TimeSpan.FromSeconds(4), "The ready LuaLS child did not run from the custom Unicode/space directory");
             File.WriteAllLines(Path.Combine(artifacts, "custom-runtime-child-paths.txt"),
@@ -1443,6 +1456,7 @@ static int RunLanguageSettings(string exe, string artifacts)
             WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == originalSource, TimeSpan.FromSeconds(5), "Local Undo failed while LuaLS was unavailable");
             File.WriteAllText(Path.Combine(artifacts, "unavailable-undo.lua"), NormalizeSource(ReadEditor(editor!)), new UTF8Encoding(false));
         });
+        Step("incomplete-local-host-hints", () => CheckLocalHostHints("incomplete", signature: false));
         Step("missing-no-fallback", () =>
         {
             ApplyLanguageSettings(main!, host, missingRuntime, true);
@@ -1451,10 +1465,21 @@ static int RunLanguageSettings(string exe, string artifacts)
             Ensure(!NativeProcess.DirectChildExecutablePaths(host.Id).Any(path => PathsEqual(path, defaultRuntimeExe)), "Missing LuaLS release silently fell back to the default server");
             SaveSettingsEvidence(workspace!, "settings-missing-unavailable");
         });
+        Step("missing-local-host-hints", () => CheckLocalHostHints("missing", signature: false));
+        Step("failed-start-local-host-hints", () =>
+        {
+            ApplyLanguageSettings(main!, host, failedStartRuntime, true);
+            WaitForLanguageStatus(workspace!, value => value.Contains("LuaLS unavailable:", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(8), "Structurally complete but invalid LuaLS executable did not report startup failure");
+            statuses["failed-start"] = LanguageStatus(workspace!);
+            Ensure(!NativeProcess.DirectChildExecutablePaths(host.Id).Any(path => PathsEqual(path, defaultRuntimeExe)),
+                "Failed LuaLS launch silently started the default release");
+            CheckLocalHostHints("failed-start", signature: true);
+        });
         Step("restore-real-completion", () =>
         {
             ApplyLanguageSettings(main!, host, "?data/runtimes/LuaLS", true);
-            WaitForLanguageStatus(workspace!, value => value.Contains("ready", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(15), "Restored default LuaLS did not become ready");
+            WaitForLanguageStatus(workspace!, value => value.Contains("ready", StringComparison.OrdinalIgnoreCase), TimeSpan.FromSeconds(45), "Restored default LuaLS did not become ready");
             statuses["restored"] = LanguageStatus(workspace!);
             const string completionSource = "local catalog = { value = '星🌟' }\nreturn catalog.val";
             WriteEditor(editor!, completionSource, host);
@@ -1483,7 +1508,7 @@ static int RunLanguageSettings(string exe, string artifacts)
             Ensure(host.WaitForExit(TimeSpan.FromSeconds(7)), "GUI host did not exit through its own close action");
             Ensure(host.ExitCode == 0, $"GUI host exited with code {host.ExitCode}");
         });
-        status = "passed";
+        status = "awaiting-visual-review";
         WriteManifest();
         return 0;
     }
@@ -1525,6 +1550,130 @@ static int RunLanguageSettings(string exe, string artifacts)
         evidence.Add(new { Artifact = Path.GetFileName(image), Sha256 = Sha256File(image), Contract = name });
     }
 
+    void CheckLocalHostHints(string stage, bool signature)
+    {
+        var label = LanguageStatus(workspace!);
+        Ensure(label.Contains("local host hints (limited)", StringComparison.Ordinal), $"{stage} did not disclose limited local host hints");
+        var original = NormalizeSource(ReadEditor(editor!));
+        const string prefix = "return aegisub.text_ex";
+        WriteEditor(editor!, prefix, host!);
+        GuardedKeyboard.FocusEditor(editor!, host!);
+        GuardedKeyboard.SendChord(editor!, host!, (ushort)0x23);
+        GuardedKeyboard.SendChord(editor!, host!, (ushort)0x20);
+        AutomationElement? popup = null;
+        WaitUntil(() => (popup = FindVisibleLanguagePopup(workspace!, host!, "AutoCompListBox")) is not null,
+            TimeSpan.FromSeconds(5), $"{stage} local host completion was not visible");
+        var image = Path.Combine(artifacts, $"settings-{stage}-local-completion.png");
+        var capture = ScreenCapture.SaveWindowPng(popup!, image);
+        var completionEvidence = new { Artifact = Path.GetFileName(image), Sha256 = Sha256File(image), Contract = $"{stage}: local aegisub.text_extents completion", capture.Width, capture.Height };
+        evidence.Add(completionEvidence);
+        localVisualEvidence.Add(completionEvidence);
+        GuardedKeyboard.SendKey(editor!, host!, 0x0D);
+        WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == "return aegisub.text_extents", TimeSpan.FromSeconds(5),
+            $"{stage} local completion did not replace exactly the host member prefix");
+        File.WriteAllText(Path.Combine(artifacts, $"settings-{stage}-local-completion.lua"), NormalizeSource(ReadEditor(editor!)), new UTF8Encoding(false));
+        GuardedKeyboard.FocusEditor(editor!, host!);
+        GuardedKeyboard.SendChord(editor!, host!, 'Z');
+        WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == prefix, TimeSpan.FromSeconds(5), $"{stage} one Undo did not remove the local completion");
+        if (signature)
+        {
+            WriteEditor(editor!, "return aegisub.text_extents(", host!);
+            GuardedKeyboard.FocusEditor(editor!, host!);
+            GuardedKeyboard.SendChord(editor!, host!, (ushort)0x23);
+            GuardedKeyboard.SendChord(editor!, host!, (ushort)0x20, shift: true);
+            popup = null;
+            WaitUntil(() => (popup = FindVisibleLanguagePopup(workspace!, host!, "wxSTCCallTip")) is not null,
+                TimeSpan.FromSeconds(5), "Disabled LuaLS did not show the local signature calltip");
+            image = Path.Combine(artifacts, $"settings-{stage}-local-signature.png");
+            capture = ScreenCapture.SaveWindowPng(popup!, image);
+            var signatureEvidence = new { Artifact = Path.GetFileName(image), Sha256 = Sha256File(image), Contract = $"{stage}: Local host hint (limited), aegisub.text_extents signature", capture.Width, capture.Height };
+            evidence.Add(signatureEvidence);
+            localVisualEvidence.Add(signatureEvidence);
+            GuardedKeyboard.FocusEditor(editor!, host!);
+            GuardedKeyboard.SendKey(editor!, host!, 0x1B);
+            WriteEditor(editor!, "return aegisub.text_extents(style", host!);
+            GuardedKeyboard.FocusEditor(editor!, host!);
+            GuardedKeyboard.SendChord(editor!, host!, (ushort)0x23);
+            GuardedKeyboard.TypeText(editor!, host!, ",");
+            WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == "return aegisub.text_extents(style,", TimeSpan.FromSeconds(5),
+                "Typing the second argument separator changed the host call source");
+            popup = null;
+            WaitUntil(() => (popup = FindVisibleLanguagePopup(workspace!, host!, "wxSTCCallTip")) is not null,
+                TimeSpan.FromSeconds(5), "Comma did not redisplay the bounded local host signature");
+            image = Path.Combine(artifacts, $"settings-{stage}-local-comma-signature.png");
+            capture = ScreenCapture.SaveWindowPng(popup!, image);
+            var commaEvidence = new { Artifact = Path.GetFileName(image), Sha256 = Sha256File(image), Contract = $"{stage}: local host signature after comma", capture.Width, capture.Height };
+            evidence.Add(commaEvidence);
+            localVisualEvidence.Add(commaEvidence);
+            GuardedKeyboard.FocusEditor(editor!, host!);
+            GuardedKeyboard.SendKey(editor!, host!, 0x1B);
+            GuardedKeyboard.SendChord(editor!, host!, (ushort)0x20, shift: true);
+            popup = null;
+            WaitUntil(() => (popup = FindVisibleLanguagePopup(workspace!, host!, "wxSTCCallTip")) is not null,
+                TimeSpan.FromSeconds(5), "Manual signature request inside the same host call did not redisplay the local hint");
+            image = Path.Combine(artifacts, $"settings-{stage}-local-manual-signature.png");
+            capture = ScreenCapture.SaveWindowPng(popup!, image);
+            var manualEvidence = new { Artifact = Path.GetFileName(image), Sha256 = Sha256File(image), Contract = $"{stage}: manual local host signature inside arguments", capture.Width, capture.Height };
+            evidence.Add(manualEvidence);
+            localVisualEvidence.Add(manualEvidence);
+            GuardedKeyboard.FocusEditor(editor!, host!);
+            GuardedKeyboard.TypeText(editor!, host!, ")");
+            WaitUntil(() => FindVisibleLanguagePopup(workspace!, host!, "wxSTCCallTip") is null,
+                TimeSpan.FromSeconds(3), "Local signature remained visible after leaving the host call");
+            if (stage == "disabled") CheckLocalHover();
+        }
+        WriteEditor(editor!, original, host!);
+        WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == original, TimeSpan.FromSeconds(5),
+            $"{stage} local hint checks changed the retained source");
+        File.WriteAllText(Path.Combine(artifacts, "visual-review.json"), JsonSerializer.Serialize(new
+        {
+            Status = "pending-human-review",
+            Evidence = localVisualEvidence
+        }, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    void CheckLocalHover()
+    {
+        const string source = "-- aegisub in comment\naegisub.text_extents(nil, 'x')";
+        WriteEditor(editor!, source, host!);
+        WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == source, TimeSpan.FromSeconds(5), "Local hover source was not installed");
+        GuardedKeyboard.FocusEditor(editor!, host!);
+        GuardedKeyboard.SendChord(editor!, host!, (ushort)0x23);
+        var sourceImage = Path.Combine(artifacts, "settings-disabled-hover-source.png");
+        ScreenCapture.SaveWindowPng(editor!, sourceImage);
+        var commentPoint = NativeMessage.GuardedEditorTextPoint(editor!, line: 0, column: 3, host!.Id);
+        var codePoint = NativeMessage.GuardedEditorTextPoint(editor!, line: 1, column: 0, host!.Id);
+        var annotatedImage = Path.Combine(artifacts, "settings-disabled-hover-targets.png");
+        var editorBounds = editor!.Current.BoundingRectangle;
+        using (var bitmap = new Bitmap(sourceImage))
+        {
+            using var graphics = Graphics.FromImage(bitmap);
+            graphics.DrawEllipse(Pens.Red, (float)(commentPoint.X - editorBounds.Left - 4), (float)(commentPoint.Y - editorBounds.Top - 4), 8, 8);
+            graphics.DrawEllipse(Pens.Blue, (float)(codePoint.X - editorBounds.Left - 4), (float)(codePoint.Y - editorBounds.Top - 4), 8, 8);
+            bitmap.Save(annotatedImage);
+        }
+        File.WriteAllText(Path.Combine(artifacts, "settings-disabled-hover-targets.json"), JsonSerializer.Serialize(new
+        {
+            SourceImage = Path.GetFileName(sourceImage), SourceSha256 = Sha256File(sourceImage),
+            AnnotatedImage = Path.GetFileName(annotatedImage), AnnotatedSha256 = Sha256File(annotatedImage),
+            Comment = new { commentPoint.X, commentPoint.Y, Symbol = "aegisub" },
+            Code = new { codePoint.X, codePoint.Y, Symbol = "aegisub" }
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        localVisualEvidence.Add(new { Artifact = Path.GetFileName(annotatedImage), Sha256 = Sha256File(annotatedImage), Contract = "Red comment target; blue first code character after comment" });
+        Cursor.Position = commentPoint;
+        Thread.Sleep(750);
+        Ensure(FindVisibleLanguagePopup(workspace!, host!, "wxSTCCallTip") is null, "Comment text unexpectedly received a local host hover");
+        Cursor.Position = codePoint;
+        AutomationElement? popup = null;
+        WaitUntil(() => (popup = FindVisibleLanguagePopup(workspace!, host!, "wxSTCCallTip")) is not null,
+            TimeSpan.FromSeconds(5), "First code byte after a Lua comment did not receive local host hover");
+        var image = Path.Combine(artifacts, "settings-disabled-local-hover.png");
+        var capture = ScreenCapture.SaveWindowPng(popup!, image);
+        var hoverEvidence = new { Artifact = Path.GetFileName(image), Sha256 = Sha256File(image), Contract = "Disabled: local aegisub root hover immediately after a comment line", capture.Width, capture.Height };
+        evidence.Add(hoverEvidence);
+        localVisualEvidence.Add(hoverEvidence);
+    }
+
     void ApplyLanguageSettings(AutomationElement root, Process process, string directory, bool enabled)
     {
         var (preferences, invocation) = OpenAutomationPreferences(root, configureButton!, process);
@@ -1544,12 +1693,15 @@ static int RunLanguageSettings(string exe, string artifacts)
         Scope = "E19a settings Apply/Cancel, enable/disable, custom complete release, invalid/missing refusal, unavailable editing, and restored completion",
         StartedUtc = startedUtc,
         FinishedUtc = DateTimeOffset.UtcNow,
-        BudgetSeconds = 120,
+        BudgetSeconds = 300,
         ExeSha256 = Sha256File(exe),
         DriverSha256 = Sha256File(driver),
         DefaultRuntimeExeSha256 = File.Exists(defaultRuntimeExe) ? Sha256File(defaultRuntimeExe) : null,
         CustomRuntimeExeSha256 = File.Exists(customRuntimeExe) ? Sha256File(customRuntimeExe) : null,
+        FailedStartRuntimeExeSha256 = Sha256File(failedStartRuntimeExe),
         CustomRuntime = Path.GetRelativePath(artifacts, customRuntime).Replace('\\', '/'),
+        FailedStartRuntime = Path.GetRelativePath(artifacts, failedStartRuntime).Replace('\\', '/'),
+        SourceFile = Path.GetRelativePath(artifacts, luaFile).Replace('\\', '/'),
         HostExitCode = host is { HasExited: true } ? (int?)host.ExitCode : null,
         Statuses = statuses,
         Evidence = evidence,
@@ -2318,12 +2470,16 @@ static AutomationElement? FindVisibleLanguagePopup(AutomationElement workspace, 
         var selected = named.Length == 1 ? named[0] : named.Length == 0 && popups.Count == 1 ? popups[0] : 0;
         if (selected != 0)
         {
-            var popup = AutomationElement.FromHandle(selected);
-            var current = popup.Current;
-            var rect = current.BoundingRectangle;
-            if (current.ProcessId == host.Id && current.IsEnabled && !current.IsOffscreen
-                && rect.Width > 0 && rect.Height > 0)
-                return popup;
+            try
+            {
+                var popup = AutomationElement.FromHandle(selected);
+                var current = popup.Current;
+                var rect = current.BoundingRectangle;
+                if (current.ProcessId == host.Id && current.IsEnabled && !current.IsOffscreen
+                    && rect.Width > 0 && rect.Height > 0)
+                    return popup;
+            }
+            catch (ElementNotAvailableException) { }
         }
     }
     var roots = AutomationElement.RootElement.FindAll(TreeScope.Children, new PropertyCondition(AutomationElement.ProcessIdProperty, host.Id));
@@ -3582,6 +3738,12 @@ static class NativeMessage
     [DllImport("user32.dll", EntryPoint = "GetWindowRect", ExactSpelling = true)]
     private static extern int GetWindowRect(nint hwnd, out WindowRect rect);
 
+    [DllImport("user32.dll", EntryPoint = "WindowFromPoint", ExactSpelling = true)]
+    private static extern nint WindowFromPoint(Point point);
+
+    [DllImport("user32.dll", EntryPoint = "GetDpiForWindow", ExactSpelling = true)]
+    private static extern uint GetDpiForWindow(nint hwnd);
+
     [DllImport("user32.dll", EntryPoint = "GetClassNameW", ExactSpelling = true, CharSet = CharSet.Unicode)]
     private static extern int GetClassName(nint hwnd, StringBuilder buffer, int capacity);
 
@@ -3902,6 +4064,24 @@ static class NativeMessage
         if (SendMessageTimeoutRaw(hwnd, (uint)message, wParam, lParam, 0x0002, 2000, out var result) == 0)
             throw new TimeoutException($"Native editor message {message} timed out or failed");
         return result;
+    }
+
+    public static Point GuardedEditorTextPoint(AutomationElement editor, int line, int column, int hostPid)
+    {
+        var hwnd = (nint)editor.Current.NativeWindowHandle;
+        if (hwnd == 0 || ProcessId(hwnd) != hostPid || line is < 0 or > 1 || column is < 0 or > 3)
+            throw new InvalidOperationException("Hover target is not the expected GUI host editor text");
+        var dpi = GetDpiForWindow(hwnd);
+        if (dpi == 0) throw new InvalidOperationException("Hover editor DPI is unavailable");
+        var scale = dpi / 96.0;
+        var bounds = editor.Current.BoundingRectangle;
+        var screen = new Point(
+            checked((int)Math.Round(bounds.Left + (63 + 8 * column + 2) * scale)),
+            checked((int)Math.Round(bounds.Top + (10 + 20 * line) * scale)));
+        if (screen.X <= bounds.Left || screen.X >= bounds.Right || screen.Y <= bounds.Top || screen.Y >= bounds.Bottom
+            || WindowFromPoint(screen) != hwnd)
+            throw new InvalidOperationException("Hover target does not hit the visible GUI host editor text");
+        return screen;
     }
 
     public static string GetWindowText(nint hwnd)

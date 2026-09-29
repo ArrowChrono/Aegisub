@@ -1,5 +1,6 @@
 #pragma once
 
+#include "automation/lua_language_environment.h"
 #include "automation/lua_language_server.h"
 
 #include <wx/event.h>
@@ -24,6 +25,7 @@ class LuaWorkspaceLanguage final : public wxEvtHandler {
 	wxTimer timer;
 	Automation4::LuaLanguageServer server;
 	Automation4::LuaLanguageConfiguration configuration;
+	Automation4::LuaHostHints host_hints;
 	std::optional<Automation4::LuaLanguageDocument> document;
 	std::optional<unsigned> scopes;
 	std::uint64_t generation = 0;
@@ -38,6 +40,9 @@ class LuaWorkspaceLanguage final : public wxEvtHandler {
 	bool enabled = false;
 	bool applying = false;
 	bool completion_refresh_pending = false;
+	bool local_available = false;
+	bool configuration_error = false;
+	std::uint64_t local_request_id = 0;
 	std::string completion_identity;
 	int completion_position = 0;
 	std::string directory_option;
@@ -48,6 +53,10 @@ class LuaWorkspaceLanguage final : public wxEvtHandler {
 	void ClearDiagnostics();
 	void ClearTip();
 	void Request(Automation4::LuaLanguageRequest kind, int position);
+	std::string HostReceiver(int end) const;
+	int HostCallOpen(int position) const;
+	void PresentCompletion(Automation4::LuaLanguageEvent event);
+	void PresentTip(Automation4::LuaLanguageEvent const& event);
 	void AfterCharacter(int character);
 	void OnTimer(wxTimerEvent& event);
 	void OnCharHook(wxKeyEvent& event);

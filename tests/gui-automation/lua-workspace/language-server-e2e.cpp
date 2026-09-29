@@ -26,6 +26,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -40,6 +41,7 @@ namespace {
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
+using Automation4::LuaHostHint;
 using Automation4::LuaLanguageConfiguration;
 using Automation4::LuaLanguageDocument;
 using Automation4::LuaLanguageEvent;
@@ -446,6 +448,31 @@ int main(int argc, char **argv) {
 			WriteFile(artifacts / "expected-result.txt", expected);
 			generation = server.Update(configuration, Document("file-source", input, source));
 			observer.Ready(generation);
+		});
+		step("local-host-hints-scope", [&] {
+			auto ordinary = Automation4::BuildLuaLanguageEnvironment(0).host_hints;
+			auto ordinary_api = ordinary.Find("aegisub", "text_extents");
+			Require(ordinary_api && ordinary_api->type.starts_with("fun("), "Ordinary local hints lost the declared aegisub.text_extents signature");
+			Require(!ordinary.Find("meta", "res_x") && !ordinary.Find("_G.aegisub", "text_extents"), "Ordinary local hints leaked Karaoke globals");
+			auto once = Automation4::BuildLuaLanguageEnvironment(Automation4::KaraokeOnce).host_hints;
+			Require(once.Find("_G.aegisub", "text_extents") && once.Find("meta", "res_x"), "Once-scope local hints lost declared host members");
+			Require(!once.Find("aegisub", "text_extents") && !once.Find("line", "start_time") && !once.Find("syl", "duration"), "Once-scope local hints exposed unavailable globals");
+			auto line = Automation4::BuildLuaLanguageEnvironment(Automation4::KaraokeLine).host_hints;
+			Require(line.Find("line", "start_time") && !line.Find("syl", "duration"), "Line-scope local hints lost inherited fields or leaked syllables");
+			auto syllable = Automation4::BuildLuaLanguageEnvironment(Automation4::KaraokeSyllable).host_hints;
+			Require(syllable.Find("syl", "duration") && syllable.Find("line", "start_time"), "Syllable-scope local hints lost inherited fields");
+			auto combined = Automation4::BuildLuaLanguageEnvironment(Automation4::KaraokeSyllable | Automation4::KaraokeFurigana).host_hints;
+			Require(combined.Find("syl", "duration") && combined.Find("syl", "furi") && combined.Find("syl", "syl"), "Combined-scope local hints lost union members");
+			Require(!combined.Find("userLocal", "text_extents"), "Local host hints inferred an undeclared user variable");
+			std::string observed;
+			for (auto const& [scope, path, hint] : std::vector<std::tuple<std::string_view, std::string_view, std::optional<LuaHostHint>>>{
+					 {"ordinary", "aegisub.text_extents", ordinary_api},
+					 {"once", "_G.aegisub.text_extents", once.Find("_G.aegisub", "text_extents")},
+					 {"once", "meta.res_x", once.Find("meta", "res_x")},
+					 {"line", "line.start_time", line.Find("line", "start_time")},
+					 {"syllable", "syl.duration", syllable.Find("syl", "duration")}})
+				observed += std::string(scope) + " " + std::string(path) + ": " + hint->type + "\n";
+			WriteFile(artifacts / "local-host-hints.txt", observed);
 		});
 		step("hover-and-signature-after-unicode", [&] {
 			auto const hover_position = After(source, "object.co");

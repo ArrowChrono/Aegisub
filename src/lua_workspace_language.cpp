@@ -19,14 +19,22 @@
 
 #include <algorithm>
 #include <limits>
-#include <set>
 #include <ranges>
+#include <set>
 #include <utility>
 
 using namespace Automation4;
 
 namespace {
 constexpr int language_indicator = 9;
+
+bool HostNameStart(int character) {
+	return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || character == '_';
+}
+
+bool HostNamePart(int character) {
+	return HostNameStart(character) || (character >= '0' && character <= '9');
+}
 
 bool IsLuaStringStyle(int style) {
 	switch (style) {
@@ -118,7 +126,7 @@ void LuaWorkspaceLanguage::ClearTip() {
 }
 
 void LuaWorkspaceLanguage::Invalidate() {
-	completion_refresh_pending = !applying && active && enabled && document && document->identity == completion_identity && (completion_request != 0 || completion_refresh_pending);
+	completion_refresh_pending = !applying && active && document && document->identity == completion_identity && (completion_request != 0 || completion_refresh_pending);
 	if (completion_refresh_pending) {
 		completion_position = editor->GetCurrentPos();
 		selection_start = editor->GetSelectionStart();
@@ -147,6 +155,7 @@ void LuaWorkspaceLanguage::Update(LuaWorkspaceDocument const *value, unsigned co
 			auto environment = BuildLuaLanguageEnvironment(code_scopes);
 			document->definitions = std::move(environment.definitions);
 			document->disabled_builtins = std::move(environment.disabled_builtins);
+			host_hints = std::move(environment.host_hints);
 			scopes = code_scopes;
 		}
 	}
@@ -160,8 +169,12 @@ void LuaWorkspaceLanguage::SetActive(bool value) {
 
 void LuaWorkspaceLanguage::Synchronize() {
 	try {
+		bool previous_enabled = enabled;
+		auto previous_directory = directory_option;
 		enabled = OPT_GET("Automation/Lua Workspace/Enable LuaLS")->GetBool();
 		directory_option = OPT_GET("Automation/Lua Workspace/LuaLS Directory")->GetString();
+		if (previous_enabled != enabled || previous_directory != directory_option || !active || !document)
+			local_available = false;
 		includes_option = OPT_GET("Path/Automation/Include")->GetString();
 		configuration.directory = config::path->Decode(directory_option);
 		configuration.cache_directory = config::path->Decode("?local/lua-workspace/luals");
@@ -174,29 +187,107 @@ void LuaWorkspaceLanguage::Synchronize() {
 			}
 		}
 		auto next = server.Update(configuration, active && enabled ? document : std::nullopt);
+		configuration_error = false;
 		if (next != generation) {
 			generation = next;
 			Invalidate();
-			status->SetLabel(!enabled ? _("LuaLS: disabled") : !active || !document ? _("LuaLS: inactive")
-																					: _("LuaLS: synchronizing..."));
+			status->SetLabel(!enabled ? _("LuaLS: disabled; local host hints (limited)") : !active || !document ? _("LuaLS: inactive")
+																												: _("LuaLS: synchronizing..."));
+			status->SetToolTip(status->GetLabel());
+			if (!enabled && active && document)
+				diagnostics->ChangeValue(_("LuaLS diagnostics unavailable; local host hints are limited."));
 		}
 	}
 	catch (std::exception const& error) {
 		generation = server.Update({}, std::nullopt);
 		Invalidate();
-		status->SetLabel(_("LuaLS configuration error: ") + to_wx(error.what()));
+		local_available = true;
+		configuration_error = true;
+		status->SetLabel(_("LuaLS configuration error: ") + to_wx(error.what()) + _("; local host hints (limited)"));
+		status->SetToolTip(status->GetLabel());
+		diagnostics->ChangeValue(_("LuaLS diagnostics unavailable; local host hints are limited."));
 	}
 }
 
+std::string LuaWorkspaceLanguage::HostReceiver(int end) const {
+	std::string path;
+	int cursor = end - 1;
+	while (cursor >= 0 && editor->GetCharAt(cursor) == '.') {
+		int segment_end = cursor--;
+		while (cursor >= 0 && HostNamePart(editor->GetCharAt(cursor)))
+			--cursor;
+		int start = cursor + 1;
+		if (start == segment_end || !HostNameStart(editor->GetCharAt(start)))
+			return {};
+		auto segment = from_wx(editor->GetTextRange(start, segment_end));
+		if (path.empty())
+			path = std::move(segment);
+		else {
+			path.insert(0, ".");
+			path.insert(0, segment);
+		}
+	}
+	return path;
+}
+
+int LuaWorkspaceLanguage::HostCallOpen(int position) const {
+	std::string closers;
+	for (int cursor = position - 1; cursor >= std::max(0, position - 8192); --cursor) {
+		if (IsLuaTextStyle(editor->GetStyleAt(cursor)))
+			continue;
+		int character = editor->GetCharAt(cursor);
+		if (character == ')' || character == ']' || character == '}')
+			closers.push_back(static_cast<char>(character));
+		else if (character == '(' || character == '[' || character == '{') {
+			if (closers.empty())
+				return character == '(' ? cursor : -1;
+			char expected = character == '(' ? ')' : character == '[' ? ']'
+																	  : '}';
+			if (closers.back() != expected)
+				return -1;
+			closers.pop_back();
+		}
+	}
+	return -1;
+}
+
+void LuaWorkspaceLanguage::PresentCompletion(LuaLanguageEvent event) {
+	if (event.request != completion_request || !std::cmp_equal(event.position, editor->GetCurrentPos()) || selection_start != editor->GetSelectionStart() || selection_end != editor->GetSelectionEnd())
+		return;
+	std::set<std::string> labels;
+	std::erase_if(event.completions, [&](auto const& item) { return !labels.insert(item.label).second; });
+	wxString list;
+	for (auto const& item : event.completions) {
+		if (!list.empty())
+			list += wxS("\n");
+		list += to_wx(item.label);
+	}
+	if (!list.empty()) {
+		completion = std::move(event);
+		editor->AutoCompShow(0, list);
+	}
+	else
+		completion_request = 0;
+}
+
+void LuaWorkspaceLanguage::PresentTip(LuaLanguageEvent const& event) {
+	if (event.text.empty() || editor->AutoCompActive() || (tip_kind == LuaLanguageRequest::Signature && !std::cmp_equal(event.position, editor->GetCurrentPos())))
+		ClearTip();
+	else
+		editor->CallTipShow(static_cast<int>(event.position), to_wx(event.text));
+}
+
 void LuaWorkspaceLanguage::Request(LuaLanguageRequest kind, int position) {
-	if (!active || !enabled || !document || position < 0 || applying)
+	if (!active || !document || position < 0 || applying)
 		return;
 	int start = editor->GetSelectionStart(), end = editor->GetSelectionEnd();
+	bool had_selection = start != end;
 	if (kind != LuaLanguageRequest::Completion)
 		start = end = position;
-	else if (start == end)
+	else if (!had_selection)
 		start = editor->WordStartPosition(position, true);
-	auto id = server.Request(kind, position, start, end);
+	bool local = !enabled || local_available;
+	auto id = local ? ++local_request_id : server.Request(kind, position, start, end);
 	ClearTip();
 	if (kind == LuaLanguageRequest::Completion) {
 		completion_refresh_pending = false;
@@ -211,6 +302,98 @@ void LuaWorkspaceLanguage::Request(LuaLanguageRequest kind, int position) {
 		tip_kind = kind;
 		tip_position = position;
 	}
+	if (!local)
+		return;
+	auto reject = [&] {
+		if (kind == LuaLanguageRequest::Completion)
+			completion_request = 0;
+		else
+			ClearTip();
+	};
+	LuaLanguageEvent event{.kind = kind == LuaLanguageRequest::Completion ? LuaLanguageEvent::Kind::Completion : kind == LuaLanguageRequest::Signature ? LuaLanguageEvent::Kind::Signature
+																																					   : LuaLanguageEvent::Kind::Hover,
+						   .generation = generation,
+						   .request = id,
+						   .position = static_cast<std::size_t>(position)};
+	if (kind == LuaLanguageRequest::Hover) {
+		if (position >= editor->GetTextLength()) {
+			reject();
+			return;
+		}
+		editor->Colourise(0, position + 1);
+		if (IsLuaTextStyle(editor->GetStyleAt(position))) {
+			reject();
+			return;
+		}
+	}
+	else if (position > 0) {
+		editor->Colourise(0, position);
+		if (IsLuaTextStyle(editor->GetStyleAt(position - 1))) {
+			reject();
+			return;
+		}
+	}
+	if (kind == LuaLanguageRequest::Completion) {
+		auto receiver = HostReceiver(start);
+		if (receiver.empty()) {
+			reject();
+			return;
+		}
+		auto prefix = had_selection ? std::string{} : from_wx(editor->GetTextRange(start, position));
+		for (auto const& hint : host_hints.Members(receiver)) {
+			if (!hint.name.starts_with(prefix))
+				continue;
+			LuaLanguageCompletion item;
+			item.label = hint.name;
+			item.detail = hint.type;
+			item.caret = static_cast<std::size_t>(start) + hint.name.size();
+			item.edits.push_back({.start = static_cast<std::size_t>(start), .end = static_cast<std::size_t>(end), .text = hint.name});
+			event.completions.push_back(std::move(item));
+		}
+		PresentCompletion(std::move(event));
+		return;
+	}
+	int word_end = position;
+	if (kind == LuaLanguageRequest::Signature) {
+		word_end = HostCallOpen(position);
+		if (word_end < 0) {
+			reject();
+			return;
+		}
+	}
+	else
+		while (word_end < editor->GetTextLength() && HostNamePart(editor->GetCharAt(word_end)))
+			++word_end;
+	int word_start = word_end;
+	while (word_start > 0 && HostNamePart(editor->GetCharAt(word_start - 1)))
+		--word_start;
+	if (word_start == word_end || !HostNameStart(editor->GetCharAt(word_start))) {
+		reject();
+		return;
+	}
+	auto name = from_wx(editor->GetTextRange(word_start, word_end));
+	auto receiver = HostReceiver(word_start);
+	if (receiver.empty()) {
+		if (kind == LuaLanguageRequest::Hover) {
+			if (auto root = host_hints.roots.find(name); root != host_hints.roots.end() && host_hints.classes.contains(root->second)) {
+				event.text = "Local host hint (limited)\n";
+				event.text += name;
+				event.text += ": ";
+				event.text += root->second;
+				PresentTip(event);
+				return;
+			}
+		}
+		reject();
+		return;
+	}
+	auto hint = host_hints.Find(receiver, name);
+	if (!hint || (kind == LuaLanguageRequest::Signature && !hint->type.starts_with("fun("))) {
+		reject();
+		return;
+	}
+	event.text = "Local host hint (limited)\n" + receiver + "." + name + (hint->optional ? "?" : "") + ": " + hint->type;
+	PresentTip(event);
 }
 
 void LuaWorkspaceLanguage::OnCharHook(wxKeyEvent& event) {
@@ -344,16 +527,33 @@ void LuaWorkspaceLanguage::OnTimer(wxTimerEvent&) {
 			completion_refresh_pending = false;
 	}
 	for (auto& event : server.Drain()) {
+		if (configuration_error)
+			continue;
 		if (event.generation != generation || !active || !enabled || !document)
 			continue;
 		if (event.kind == LuaLanguageEvent::Kind::Status) {
-			status->SetLabel(to_wx(event.text));
-			status->SetToolTip(to_wx(event.text));
-			if (!event.ready) {
+			bool next_local = event.text.starts_with("LuaLS unavailable:");
+			bool was_local = local_available;
+			if (local_available && !next_local) {
+				completion_request = 0;
+				completion_refresh_pending = false;
+				completion.reset();
+				editor->AutoCompCancel();
+				ClearTip();
+			}
+			local_available = next_local;
+			auto status_text = to_wx(event.text);
+			if (local_available)
+				status_text += _("; local host hints (limited)");
+			status->SetLabel(status_text);
+			status->SetToolTip(status_text);
+			if (!event.ready && (!next_local || !was_local)) {
 				completion.reset();
 				editor->AutoCompCancel();
 				editor->CallTipCancel();
 				ClearDiagnostics();
+				if (next_local)
+					diagnostics->ChangeValue(_("LuaLS diagnostics unavailable; local host hints are limited."));
 			}
 		}
 		else if (event.kind == LuaLanguageEvent::Kind::Diagnostics) {
@@ -370,29 +570,11 @@ void LuaWorkspaceLanguage::OnTimer(wxTimerEvent&) {
 			}
 			diagnostics->ChangeValue(text.empty() ? _("LuaLS reported no diagnostics for this buffer version.") : text);
 		}
-		else if (event.kind == LuaLanguageEvent::Kind::Completion) {
-			if (event.request != completion_request || !std::cmp_equal(event.position, editor->GetCurrentPos()) || selection_start != editor->GetSelectionStart() || selection_end != editor->GetSelectionEnd())
-				continue;
-			std::set<std::string> labels;
-			std::erase_if(event.completions, [&](auto const& item) { return !labels.insert(item.label).second; });
-			wxString list;
-			for (auto const& item : event.completions) {
-				if (!list.empty())
-					list += wxS("\n");
-				list += to_wx(item.label);
-			}
-			if (!list.empty()) {
-				completion = std::move(event);
-				editor->AutoCompShow(0, list);
-			}
-			else
-				completion_request = 0;
-		}
+		else if (event.kind == LuaLanguageEvent::Kind::Completion && !local_available)
+			PresentCompletion(std::move(event));
 		else if ((event.kind == LuaLanguageEvent::Kind::Hover || event.kind == LuaLanguageEvent::Kind::Signature) && tip_request && event.request == tip_request) {
-			if (event.text.empty() || editor->AutoCompActive() || (tip_kind == LuaLanguageRequest::Signature && !std::cmp_equal(event.position, editor->GetCurrentPos())))
-				ClearTip();
-			else
-				editor->CallTipShow(static_cast<int>(event.position), to_wx(event.text));
+			if (!local_available)
+				PresentTip(event);
 		}
 	}
 }

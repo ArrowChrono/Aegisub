@@ -2,6 +2,10 @@
 
 #include "karaoke_line_classifier.h"
 
+#include <algorithm>
+#include <map>
+#include <ranges>
+
 namespace Automation4 {
 namespace {
 constexpr auto record_types = R"lua(---@meta
@@ -304,6 +308,127 @@ function remember_basesyl(name, value) end
 ---@return any
 function remember_if(name, value, condition, decorator) end
 )lua";
+
+std::string_view Trim(std::string_view value) {
+	auto first = value.find_first_not_of(" \t\r");
+	if (first == std::string_view::npos)
+		return {};
+	return value.substr(first, value.find_last_not_of(" \t\r") - first + 1);
+}
+
+bool Identifier(std::string_view value) {
+	auto start = [](char character) { return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || character == '_'; };
+	if (value.empty() || !start(value.front()))
+		return false;
+	return std::ranges::all_of(value.substr(1), [&](char character) { return start(character) || (character >= '0' && character <= '9'); });
+}
+
+LuaHostHints ParseHostHints(std::string_view definitions) {
+	LuaHostHints hints;
+	std::string current_class;
+	std::string pending_type;
+	while (!definitions.empty()) {
+		auto end = definitions.find('\n');
+		auto line = Trim(definitions.substr(0, end));
+		definitions = end == std::string_view::npos ? std::string_view{} : definitions.substr(end + 1);
+		if (line.starts_with("---@class ")) {
+			auto value = Trim(line.substr(10));
+			auto name_end = value.find_first_of(" :\t");
+			current_class = std::string(value.substr(0, name_end));
+			if (!Identifier(current_class)) {
+				current_class.clear();
+				continue;
+			}
+			auto& entry = hints.classes[current_class];
+			if (auto colon = value.find(':'); colon != std::string_view::npos)
+				entry.parent = std::string(Trim(value.substr(colon + 1)));
+			continue;
+		}
+		if (line.starts_with("---@field ") && !current_class.empty()) {
+			auto value = Trim(line.substr(10));
+			auto name_end = value.find_first_of(" \t");
+			auto name = value.substr(0, name_end);
+			bool optional = name.ends_with('?');
+			if (optional)
+				name.remove_suffix(1);
+			if (Identifier(name) && name_end != std::string_view::npos)
+				hints.classes[current_class].fields.push_back({.name = std::string(name), .type = std::string(Trim(value.substr(name_end))), .optional = optional});
+			continue;
+		}
+		if (line.starts_with("---@type ")) {
+			pending_type = std::string(Trim(line.substr(9)));
+			current_class.clear();
+			continue;
+		}
+		if (!pending_type.empty()) {
+			if (auto equal = line.find('='); equal != std::string_view::npos) {
+				auto name = Trim(line.substr(0, equal));
+				if (Identifier(name))
+					hints.roots[std::string(name)] = pending_type;
+			}
+			pending_type.clear();
+		}
+	}
+	return hints;
+}
+
+void CollectFields(LuaHostHints const& hints, std::string_view type, std::map<std::string, LuaHostHint>& fields) {
+	while (!type.empty()) {
+		auto separator = type.find('|');
+		auto name = Trim(type.substr(0, separator));
+		if (auto found = hints.classes.find(std::string(name)); found != hints.classes.end()) {
+			if (!found->second.parent.empty())
+				CollectFields(hints, found->second.parent, fields);
+			for (auto const& field : found->second.fields) {
+				auto& slot = fields[field.name];
+				if (!slot.name.empty() && slot.type != field.type)
+					slot.type += "|" + field.type;
+				else
+					slot = field;
+			}
+		}
+		if (separator == std::string_view::npos)
+			break;
+		type.remove_prefix(separator + 1);
+	}
+}
+}
+
+std::vector<LuaHostHint> LuaHostHints::Members(std::string_view path) const {
+	auto separator = path.find('.');
+	auto root = path.substr(0, separator);
+	if (!Identifier(root))
+		return {};
+	auto found = roots.find(std::string(root));
+	if (found == roots.end())
+		return {};
+	std::string type = found->second;
+	while (separator != std::string_view::npos) {
+		path.remove_prefix(separator + 1);
+		separator = path.find('.');
+		auto member = path.substr(0, separator);
+		if (!Identifier(member))
+			return {};
+		std::map<std::string, LuaHostHint> fields;
+		CollectFields(*this, type, fields);
+		auto next = fields.find(std::string(member));
+		if (next == fields.end())
+			return {};
+		type = next->second.type;
+	}
+	std::map<std::string, LuaHostHint> fields;
+	CollectFields(*this, type, fields);
+	std::vector<LuaHostHint> result;
+	result.reserve(fields.size());
+	for (auto& [name, field] : fields)
+		result.push_back(std::move(field));
+	return result;
+}
+
+std::optional<LuaHostHint> LuaHostHints::Find(std::string_view path, std::string_view name) const {
+	auto members = Members(path);
+	auto found = std::ranges::find(members, name, &LuaHostHint::name);
+	return found == members.end() ? std::nullopt : std::make_optional(*found);
 }
 
 LuaLanguageEnvironment BuildLuaLanguageEnvironment(unsigned scopes) {
@@ -312,6 +437,7 @@ LuaLanguageEnvironment BuildLuaLanguageEnvironment(unsigned scopes) {
 	environment.definitions += automation_api_types;
 	if (scopes == 0) {
 		environment.definitions += automation_globals;
+		environment.host_hints = ParseHostHints(environment.definitions);
 		return environment;
 	}
 	environment.definitions += karaoke_types;
@@ -344,6 +470,7 @@ LuaLanguageEnvironment BuildLuaLanguageEnvironment(unsigned scopes) {
 	else
 		environment.definitions += "---@type KaraokeEnvironment\ntenv = {}\n";
 	environment.disabled_builtins = {"basic", "table", "coroutine", "package", "io", "os", "debug", "utf8", "bit", "bit32", "jit", "ffi"};
+	environment.host_hints = ParseHostHints(environment.definitions);
 	return environment;
 }
 
