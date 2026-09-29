@@ -173,6 +173,8 @@ LuaWorkspaceDocumentResult LuaWorkspaceDocument::Save(LuaWorkspaceSnapshot const
 	}
 	else if (bom)
 		persisted.insert(0, "\xef\xbb\xbf");
+	if (auto error = ValidateText(persisted))
+		return Error(*error);
 	auto current = ReadCurrent();
 	if (!current.Succeeded())
 		return current;

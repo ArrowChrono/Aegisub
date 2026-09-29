@@ -5,6 +5,7 @@
 #include "../../../src/automation/lua_source_tools.h"
 
 #include <libaegisub/vfr.h>
+#include <libaegisub/charset_conv.h>
 
 #include <lua.hpp>
 #include <luajit.h>
@@ -238,6 +239,7 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 	Require(serialized.Succeeded(), "Serialization failed: " + (serialized.diagnostic ? serialized.diagnostic->message : std::string()));
 	WriteFile(artifacts / "serialized.lua", serialized.source);
 	Require(serialized.source.find_first_of("\r\n") == std::string::npos, "Serialized source contains a physical line break");
+	agi::charset::IconvWrapper("UTF-8", "UTF-8", false).Convert(serialized.source.data(), serialized.source.size());
 	Require(!Automation4::ValidateLuaSource(serialized.source), "Serialized source failed validation");
 	if (name == "member-access") {
 		CheckMemberAccessFormat(serialized.source, "Serialization");
@@ -534,7 +536,7 @@ int main(int argc, char **argv) {
 		};
 		run("classifier", [&] { fs::create_directories(artifacts / "classifier"); CheckClassifier(artifacts / "classifier"); });
 		run("punctuation", [&] { RunPunctuationCase(artifacts / "punctuation"); });
-		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access", "semicolons", "statement-boundaries", "historic-single-line", "syntax-boundaries"})
+		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access", "semicolons", "statement-boundaries", "historic-single-line", "syntax-boundaries", "escaped-bytes"})
 			run(name, [&] { RunExecutableCase(fixtures, artifacts / name, name); });
 		run("validate_only", [&] { RunValidateOnlyCase(fixtures, artifacts / "validate_only"); });
 		run("scalability", [&]() -> void { RunScalabilityCase(artifacts / "scalability"); });

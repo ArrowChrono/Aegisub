@@ -1,4 +1,5 @@
 #include "lua_source_tools.h"
+#include "lua_text_utf8.h"
 
 extern "C" {
 #include <lauxlib.h>
@@ -199,19 +200,22 @@ std::optional<LuaSourceDiagnostic> Tokenize(std::string_view source, std::vector
 
 std::string EscapeString(std::string_view value) {
 	std::string result = "\"";
-	for (unsigned char c : value) {
+	for (size_t index = 0; index < value.size();) {
+		auto const c = static_cast<unsigned char>(value[index]);
+		auto const length = Utf8SequenceLength(value, index);
 		if (c == '"' || c == '\\') {
 			result += '\\';
 			result += static_cast<char>(c);
 		}
-		else if (c < 32 || c == 127) {
+		else if (!length || c < 32 || c == 127) {
 			result += '\\';
 			result += static_cast<char>('0' + c / 100);
 			result += static_cast<char>('0' + c / 10 % 10);
 			result += static_cast<char>('0' + c % 10);
 		}
 		else
-			result += static_cast<char>(c);
+			result.append(value.substr(index, length));
+		index += length ? length : 1;
 	}
 	result += '"';
 	return result;
