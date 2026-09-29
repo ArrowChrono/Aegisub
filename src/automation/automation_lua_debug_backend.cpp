@@ -80,22 +80,87 @@ std::string FormatPointer(void const* pointer)
 	return out.str();
 }
 
-std::string TruncateValue(std::string value, size_t max_length = kMaxStringPreviewLength)
-{
-	if (value.size() <= max_length)
-		return value;
-	if (max_length <= 3)
-		return value.substr(0, max_length);
-	return value.substr(0, max_length - 3) + "...";
+struct ValuePreview {
+	std::string text;
+	size_t shown_bytes = 0;
+	size_t total_bytes = 0;
+};
+
+size_t Utf8SequenceLength(std::string_view value, size_t index) {
+	auto const lead = static_cast<unsigned char>(value[index]);
+	if (lead < 0x80)
+		return 1;
+	size_t length = 0;
+	if (lead >= 0xc2 && lead <= 0xdf)
+		length = 2;
+	else if (lead >= 0xe0 && lead <= 0xef)
+		length = 3;
+	else if (lead >= 0xf0 && lead <= 0xf4)
+		length = 4;
+	if (!length || index + length > value.size())
+		return 0;
+	for (size_t i = 1; i < length; ++i) {
+		auto const next = static_cast<unsigned char>(value[index + i]);
+		if (next < 0x80 || next > 0xbf)
+			return 0;
+	}
+	auto const second = static_cast<unsigned char>(value[index + 1]);
+	if ((lead == 0xe0 && second < 0xa0) ||
+		(lead == 0xed && second > 0x9f) ||
+		(lead == 0xf0 && second < 0x90) ||
+		(lead == 0xf4 && second > 0x8f))
+		return 0;
+	return length;
 }
 
-std::string FormatStringPreview(lua_State *L, int index)
-{
+ValuePreview TruncateValue(std::string_view value, size_t max_length = kMaxStringPreviewLength) {
+	ValuePreview preview;
+	preview.total_bytes = value.size();
+	for (size_t index = 0; index < value.size();) {
+		auto const byte = static_cast<unsigned char>(value[index]);
+		auto const sequence_length = Utf8SequenceLength(value, index);
+		std::array<char, 4> escaped{};
+		std::string_view token;
+		if (byte == '\n')
+			token = "\\n";
+		else if (byte == '\r')
+			token = "\\r";
+		else if (byte == '\t')
+			token = "\\t";
+		else if (byte == '\\')
+			token = "\\\\";
+		else if (byte == '"')
+			token = "\\\"";
+		else if (!sequence_length || byte < 0x20 || byte == 0x7f) {
+			static constexpr char hex[] = "0123456789ABCDEF";
+			escaped = {'\\', 'x', hex[byte >> 4], hex[byte & 0x0f]};
+			token = std::string_view(escaped.data(), escaped.size());
+		}
+		else
+			token = value.substr(index, sequence_length);
+		auto const consumed = sequence_length ? sequence_length : 1;
+		if (preview.text.size() + token.size() + (index + consumed < value.size() ? 3 : 0) > max_length)
+			break;
+		preview.text.append(token);
+		index += consumed;
+		preview.shown_bytes = index;
+	}
+	if (preview.shown_bytes < preview.total_bytes)
+		preview.text += "...";
+	return preview;
+}
+
+std::string PreviewLengthSuffix(ValuePreview const& preview) {
+	if (preview.shown_bytes == preview.total_bytes)
+		return {};
+	return " (" + std::to_string(preview.shown_bytes) + "/" + std::to_string(preview.total_bytes) + " bytes)";
+}
+
+std::string FormatStringPreview(lua_State *L, int index) {
 	size_t length = 0;
-	char const* value = lua_tolstring(L, index, &length);
-	auto preview = value ? std::string(value, length) : std::string();
-	preview = TruncateValue(std::move(preview));
-	return "\"" + preview + "\"";
+	char const *value = lua_tolstring(L, index, &length);
+	auto preview = TruncateValue(value ? std::string_view(value, length) : std::string_view());
+	return "\"" + preview.text + "\"" + PreviewLengthSuffix(preview);
 }
 
 std::string FormatNumberPreview(lua_State *L, int index, std::string& value_type)
@@ -171,9 +236,9 @@ std::optional<bool> TryGetTableBooleanField(lua_State *L, int table_index, char 
 	return lua_toboolean(L, -1) != 0;
 }
 
-std::string FormatInlineString(std::string value, size_t max_length = kMaxLinePreviewLength)
-{
-	return "\"" + TruncateValue(std::move(value), max_length) + "\"";
+std::string FormatInlineString(std::string_view value, size_t max_length = kMaxLinePreviewLength) {
+	auto preview = TruncateValue(value, max_length);
+	return "\"" + preview.text + "\"" + PreviewLengthSuffix(preview);
 }
 
 std::string BuildTimeRangePreview(
@@ -230,8 +295,10 @@ std::string BuildInfoTablePreview(lua_State *L, int table_index)
 	out << "info-line";
 	if (auto key = TryGetTableStringField(L, table_index, "key"); key && !key->empty()) {
 		out << " " << *key;
-		if (auto value = TryGetTableStringField(L, table_index, "value"); value && !value->empty())
-			out << "=" << TruncateValue(*value, kMaxLinePreviewLength);
+		if (auto value = TryGetTableStringField(L, table_index, "value"); value && !value->empty()) {
+			auto preview = TruncateValue(*value, kMaxLinePreviewLength);
+			out << "=" << preview.text << PreviewLengthSuffix(preview);
+		}
 	}
 	return out.str();
 }
@@ -1416,7 +1483,7 @@ void AutomationLuaDebugBackend::UpdateHookState()
 		lua_sethook(L, nullptr, 0, 0);
 }
 
-AutomationDebugLocation AutomationLuaDebugBackend::BuildLocation(lua_Debug const& ar) const
+AutomationDebugLocation AutomationLuaDebugBackend::BuildLocation(lua_State *hook_L, lua_Debug const& ar) const
 {
 	AutomationDebugLocation location;
 	location.line = ar.currentline > 0 ? ar.currentline : ar.linedefined;
@@ -1437,7 +1504,7 @@ AutomationDebugLocation AutomationLuaDebugBackend::BuildLocation(lua_Debug const
 	}
 	location.source_path = NormalizeAutomationDebugSource(source);
 	location.display_name = ar.short_src ? ar.short_src : "";
-	auto runtime_snapshot = LuaGetAutomationRuntimeStateSnapshot(L);
+	auto runtime_snapshot = LuaGetAutomationRuntimeStateSnapshot(hook_L);
 
 	auto const script_source = NormalizeAutomationDebugSource(agi::fs::PathToString(script_file));
 	auto const extension = agi::fs::PathToString(agi::fs::PathFromString(location.source_path).extension());
@@ -1469,54 +1536,52 @@ AutomationDebugLocation AutomationLuaDebugBackend::BuildLocation(lua_Debug const
 	return location;
 }
 
-size_t AutomationLuaDebugBackend::CaptureStackDepth() const
-{
+size_t AutomationLuaDebugBackend::CaptureStackDepth(lua_State *hook_L) const {
 	size_t depth = 0;
 	lua_Debug ar;
-	while (lua_getstack(L, static_cast<int>(depth), &ar))
+	while (lua_getstack(hook_L, static_cast<int>(depth), &ar))
 		++depth;
 	return depth;
 }
 
-std::vector<AutomationDebugFrame> AutomationLuaDebugBackend::CaptureFrames() const
-{
+std::vector<AutomationDebugFrame> AutomationLuaDebugBackend::CaptureFrames(lua_State *hook_L) const {
 	std::vector<AutomationDebugFrame> frames;
 	LuaVariableCaptureState state;
 
 	for (int level = 0;; ++level) {
 		lua_Debug ar;
-		if (!lua_getstack(L, level, &ar))
+		if (!lua_getstack(hook_L, level, &ar))
 			break;
 
-		lua_getinfo(L, "nSlu", &ar);
+		lua_getinfo(hook_L, "nSlu", &ar);
 
 		AutomationDebugFrame frame;
 		frame.level = level;
-		frame.location = BuildLocation(ar);
+		frame.location = BuildLocation(hook_L, ar);
 		frame.kind = FrameKindFor(ar, frame.location);
 		frame.function_name = FunctionNameFor(ar);
 
 		for (int local_index = 1;; ++local_index) {
-			char const* local_name = lua_getlocal(L, &ar, local_index);
+			char const *local_name = lua_getlocal(hook_L, &ar, local_index);
 			if (!local_name)
 				break;
 			if (!ShouldHideDebugLocal(local_name))
-				frame.locals.push_back(CaptureVariable(L, local_name, -1, 0, state));
-			lua_pop(L, 1);
+				frame.locals.push_back(CaptureVariable(hook_L, local_name, -1, 0, state));
+			lua_pop(hook_L, 1);
 		}
 
-		if (lua_getinfo(L, "f", &ar) != 0 && lua_isfunction(L, -1)) {
+		if (lua_getinfo(hook_L, "f", &ar) != 0 && lua_isfunction(hook_L, -1)) {
 			for (int upvalue_index = 1;; ++upvalue_index) {
-				char const* upvalue_name = lua_getupvalue(L, -1, upvalue_index);
+				char const *upvalue_name = lua_getupvalue(hook_L, -1, upvalue_index);
 				if (!upvalue_name)
 					break;
 				if (!ShouldHideDebugLocal(upvalue_name)) {
 					auto upvalue_label = NormalizeDebugName(upvalue_name, "upvalue", upvalue_index);
-					frame.upvalues.push_back(CaptureVariable(L, upvalue_label.c_str(), -1, 0, state));
+					frame.upvalues.push_back(CaptureVariable(hook_L, upvalue_label.c_str(), -1, 0, state));
 				}
-				lua_pop(L, 1);
+				lua_pop(hook_L, 1);
 			}
-			lua_pop(L, 1);
+			lua_pop(hook_L, 1);
 		}
 
 		frame.locals.push_back(BuildFrameInfoVariable(ar, frame));
@@ -1527,35 +1592,33 @@ std::vector<AutomationDebugFrame> AutomationLuaDebugBackend::CaptureFrames() con
 	return frames;
 }
 
-void AutomationLuaDebugBackend::Hook(lua_State *L, lua_Debug *ar)
-{
+void AutomationLuaDebugBackend::Hook(lua_State *L, lua_Debug *ar) {
 	if (auto *backend = LoadBackend(L))
-		backend->OnHook(ar);
+		backend->OnHook(L, ar);
 }
 
-void AutomationLuaDebugBackend::OnHook(lua_Debug *ar)
-{
+void AutomationLuaDebugBackend::OnHook(lua_State *hook_L, lua_Debug *ar) {
 	if (workspace_request && workspace_request->stop_requested->load())
-		LuaRaiseWorkspaceCancellation(L);
+		LuaRaiseWorkspaceCancellation(hook_L);
 	auto *session = GetSession();
 	if (!session || !InvocationActive() || !ar || ar->event != LUA_HOOKLINE)
 		return;
 
 	{
-		lua_getinfo(L, "nSlu", ar);
-		auto location = BuildLocation(*ar);
+		lua_getinfo(hook_L, "nSlu", ar);
+		auto location = BuildLocation(hook_L, *ar);
 		session->HandleHookPause(
 			std::move(location),
-			CaptureStackDepth(),
-			[this] {
+			CaptureStackDepth(hook_L),
+			[this, hook_L] {
 				AutomationDebugCapturedState captured;
-				captured.frames = CaptureFrames();
-				captured.scopes = CaptureLuaScopes(L);
-				captured.runtime_snapshot = LuaGetAutomationRuntimeStateSnapshot(L);
+				captured.frames = CaptureFrames(hook_L);
+				captured.scopes = CaptureLuaScopes(hook_L);
+				captured.runtime_snapshot = LuaGetAutomationRuntimeStateSnapshot(hook_L);
 				return captured;
 			});
 	}
 	if (workspace_request && workspace_request->stop_requested->load())
-		LuaRaiseWorkspaceCancellation(L);
+		LuaRaiseWorkspaceCancellation(hook_L);
 }
 }

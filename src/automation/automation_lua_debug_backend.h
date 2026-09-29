@@ -37,12 +37,12 @@ class AutomationLuaDebugBackend final : public AutomationDebugBackend {
 	int (*original_sethook)(lua_State *) = nullptr;
 
 	void UpdateHookState();
-	void OnHook(lua_Debug *ar);
+	void OnHook(lua_State *hook_L, lua_Debug *ar);
 	void OnDebugStateChanged() override;
 
-	AutomationDebugLocation BuildLocation(lua_Debug const& ar) const;
-	size_t CaptureStackDepth() const;
-	std::vector<AutomationDebugFrame> CaptureFrames() const;
+	AutomationDebugLocation BuildLocation(lua_State *hook_L, lua_Debug const& ar) const;
+	size_t CaptureStackDepth(lua_State *hook_L) const;
+	std::vector<AutomationDebugFrame> CaptureFrames(lua_State *hook_L) const;
 
 	static void Hook(lua_State *L, lua_Debug *ar);
 	static int GuardedSetHook(lua_State *L);

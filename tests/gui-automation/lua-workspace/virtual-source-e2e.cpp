@@ -16,6 +16,7 @@ extern "C" {
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -267,6 +268,173 @@ json::Object RunCase(Case const& test, fs::path const& fixtures, fs::path const&
 	WriteJson(artifacts / "result.json", report);
 	return report;
 }
+
+enum class AdditionalCase : std::uint8_t {
+	Coroutine,
+	CoroutineCancel,
+	Utf8Preview
+};
+
+int RequestStop(lua_State *L) {
+	auto *stop = static_cast<std::atomic<bool> *>(lua_touserdata(L, lua_upvalueindex(1)));
+	stop->store(true);
+	return 0;
+}
+
+void CheckStringPreview(AutomationDebugFrame const& frame, std::string const& name, std::string const& expected) {
+	auto found = std::ranges::find(frame.locals, name, &AutomationDebugVariable::name);
+	Require(found != frame.locals.end(), "Missing UTF-8 preview local " + name);
+	Require(found->value_type == "string", "Incorrect preview type for " + name);
+	Require(found->value == expected, "Incorrect or invalid UTF-8 preview for " + name + ": " + found->value);
+}
+
+json::Object RunAdditionalCase(AdditionalCase kind, fs::path const& fixtures, fs::path const& artifacts) {
+	char const *name = kind == AdditionalCase::Coroutine ? "coroutine-breakpoints" : kind == AdditionalCase::CoroutineCancel ? "coroutine-cancel"
+																															 : "utf8-previews";
+	char const *filename = kind == AdditionalCase::Coroutine ? "virtual-source-coroutine.lua" : kind == AdditionalCase::CoroutineCancel ? "virtual-source-coroutine-cancel.lua"
+																																		: "virtual-source-utf8.lua";
+	int const breakpoint_line = 4;
+	std::uint64_t const invocation_id = kind == AdditionalCase::Coroutine ? 44 : kind == AdditionalCase::CoroutineCancel ? 45
+																														 : 46;
+	CreateDirectory(artifacts);
+	json::Object report;
+	report["case"] = name;
+	report["status"] = "running";
+	report["invocation_id"] = static_cast<json::Integer>(invocation_id);
+	WriteJson(artifacts / "result.json", report);
+	std::ofstream(artifacts / "pauses.ndjson", std::ios::trunc).close();
+	std::shared_ptr<AutomationDebugSession> session;
+
+	try {
+		LuaWorkspaceSource source{
+			.uri = MakeLuaWorkspaceSourceUri(invocation_id, "aegisub://lua/23/104", 0),
+			.source_identity = "aegisub://lua/23/104",
+			.revision = 0,
+			.display_name = filename,
+			.text = ReadSource(fixtures / filename)};
+		json::Object source_manifest;
+		json::Array source_records;
+		source_records.emplace_back(SourceJson(source));
+		source_manifest["sources"] = std::move(source_records);
+		source_manifest["scope"] = "Real Lua engine and production debug backend; not GUI acceptance";
+		WriteJson(artifacts / "sources.json", source_manifest);
+
+		AutomationDebugLaunchRequest launch;
+		launch.enabled = true;
+		launch.nonblocking = true;
+		launch.max_pauses = 16;
+		launch.breakpoints.push_back({.source_path = source.uri, .line = breakpoint_line, .enabled = true});
+		session = std::make_shared<AutomationDebugSession>(std::move(launch));
+		auto request = std::make_shared<LuaWorkspaceRunRequest>();
+		request->invocation_id = invocation_id;
+		request->macro_command = "e12/" + std::string(name);
+		request->sources = std::make_shared<LuaWorkspaceSourceRegistry>();
+		request->sources->Register(source);
+		request->stop_requested = std::make_shared<std::atomic<bool>>(false);
+		request->debug_session = session;
+		session->SetSourceRegistry(request->sources);
+		session->SetTarget({.engine_name = "Lua", .script_file = fixtures / filename, .feature_name = request->macro_command});
+
+		std::unique_ptr<lua_State, decltype(&lua_close)> state(luaL_newstate(), lua_close);
+		Require(state != nullptr, "Could not create Lua state");
+		auto *L = state.get();
+		luaL_openlibs(L);
+		Require(luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_FLUSH) == 1, "Could not flush LuaJIT traces");
+		Require(luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF) == 1, "Could not select interpreted execution");
+		auto invocation = MakeMacroRunInvocation(request->macro_command);
+		LuaSetAutomationRuntimeState(L, {}, invocation, {}, 0);
+		LuaSetWorkspaceRunRequest(L, request);
+		AutomationLuaDebugBackend backend(L, fixtures / filename);
+		backend.SetSession(session.get());
+		backend.CaptureRuntimeBaseline();
+		if (kind == AdditionalCase::CoroutineCancel) {
+			lua_pushlightuserdata(L, request->stop_requested.get());
+			lua_pushcclosure(L, RequestStop, 1);
+			lua_setglobal(L, "request_stop");
+		}
+		CheckLua(L, luaL_loadbufferx(L, source.text.data(), source.text.size(), ("=" + source.uri).c_str(), "t"), "Compile " + std::string(filename));
+		{
+			ScopedAutomationDebugInvocation active(&backend, invocation);
+			backend.SetWorkspaceRunRequest(request);
+			int const result_count = kind == AdditionalCase::Coroutine ? 2 : 1;
+			int status = lua_pcall(L, 0, result_count, 0);
+			CheckLua(L, status, "Execute " + std::string(filename));
+			if (kind == AdditionalCase::Coroutine) {
+				Require(lua_isstring(L, -2) && lua_isstring(L, -1), "Coroutine fixture returned incorrect result types");
+				std::string outputs(lua_tostring(L, -2));
+				std::string completion(lua_tostring(L, -1));
+				report["actual_results"] = outputs;
+				Require(outputs == "13,15,17,60" && completion == "complete", "Coroutine business results are incorrect");
+				lua_pop(L, 2);
+			}
+			else if (kind == AdditionalCase::CoroutineCancel) {
+				Require(lua_isthread(L, -1), "Cancellation fixture did not return a coroutine");
+				auto *thread = lua_tothread(L, -1);
+				status = lua_resume(thread, 0);
+				Require(status != 0 && LuaIsWorkspaceCancellation(thread, -1), "Stop did not raise the cancellation token in the coroutine");
+				lua_settop(thread, 0);
+				request->stop_requested->store(false);
+				lua_pop(L, 1);
+				char const post_cancel[] = "return 6 * 7, coroutine.status(coroutine.create(function() end))";
+				CheckLua(L, luaL_loadbufferx(L, post_cancel, sizeof(post_cancel) - 1, "=post-cancel-main", "t"), "Compile post-cancel main state");
+				CheckLua(L, lua_pcall(L, 0, 2, 0), "Execute post-cancel main state");
+				Require(lua_tointeger(L, -2) == 42 && std::string(lua_tostring(L, -1)) == "suspended", "Main Lua state was corrupted after coroutine cancellation");
+				lua_pop(L, 2);
+				report["main_state_result"] = 42;
+			}
+			else {
+				Require(lua_isnumber(L, -1) && lua_tointeger(L, -1) == 42, "UTF-8 fixture did not complete");
+				lua_pop(L, 1);
+			}
+			backend.SetWorkspaceRunRequest({});
+		}
+		Require(lua_gettop(L) == 0, "Additional fixture left an unexpected value on the Lua stack");
+		session->MarkCompleted(0, "Fixture completed");
+		std::string trace_error;
+		Require(session->WriteTraceFile(artifacts / "pauses.ndjson", trace_error), "Could not write production pause trace: " + trace_error);
+		auto pauses = session->GetPauses();
+		std::size_t const expected_pauses = kind == AdditionalCase::Utf8Preview ? 1 : 3;
+		Require(pauses.size() == expected_pauses && session->BreakpointPauseCount() == expected_pauses, "Coroutine or UTF-8 breakpoint count is incorrect");
+		Require(session->DroppedPauseCount() == 0 && session->EntryPauseCount() == 0 && session->StepPauseCount() == 0, "Unexpected pause classification or loss");
+		for (std::size_t index = 0; index < pauses.size(); ++index) {
+			auto const& pause = pauses[index];
+			Require(pause.sequence == index + 1 && pause.reason == AutomationDebugPauseReason::Breakpoint, "Incorrect pause order or reason");
+			Require(pause.location.source_path == source.uri && pause.location.line == breakpoint_line, "Breakpoint did not resolve to coroutine or UTF-8 fixture source");
+			Require(!pause.frames.empty(), "Breakpoint did not capture the executing frame");
+			CheckFrame(pause.frames[0], 0, source, breakpoint_line,
+					   kind == AdditionalCase::Coroutine ? "transform" : kind == AdditionalCase::Utf8Preview ? "main"
+																											 : "(anonymous)",
+					   *request->sources);
+			Require(pause.runtime_snapshot.has_value() && pause.runtime_snapshot->invocation.feature_name == request->macro_command, "Breakpoint lost the runtime invocation context");
+			if (kind == AdditionalCase::Coroutine) {
+				Require(pauses[index].frames.size() == 2, "Coroutine stack did not contain its own caller frame");
+				Require(pauses[index].frames[1].location.source_path == source.uri, "Coroutine caller frame points to the wrong source");
+				CheckNumber(pause.frames[0].locals, "value", static_cast<int>(index) + 1, "Coroutine transform locals");
+				CheckNumber(pause.frames[0].upvalues, "bias", 11, "Coroutine transform closure");
+			}
+			else if (kind == AdditionalCase::CoroutineCancel)
+				CheckNumber(pause.frames[0].locals, "value", static_cast<int>(index) + 1, "Cancelled coroutine locals");
+			else {
+				CheckStringPreview(pause.frames[0], "ascii_cjk", "\"" + std::string(114, 'A') + "\xE4\xB8\xAD...\" (117/121 bytes)");
+				CheckStringPreview(pause.frames[0], "emoji", "\"" + std::string(113, 'B') + "\xF0\x9F\x99\x82...\" (117/121 bytes)");
+				CheckStringPreview(pause.frames[0], "invalid", "\"" + std::string(109, 'C') + R"(\xFF\x80..." (111/121 bytes))");
+			}
+		}
+		report["checked_pauses"] = static_cast<json::Integer>(pauses.size());
+		report["status"] = "passed";
+	}
+	catch (std::exception const& error) {
+		report["status"] = "failed";
+		report["error"] = error.what();
+		if (session) {
+			std::string trace_error;
+			if (!session->WriteTraceFile(artifacts / "pauses.ndjson", trace_error))
+				report["trace_error"] = trace_error;
+		}
+	}
+	WriteJson(artifacts / "result.json", report);
+	return report;
+}
 }
 
 int main(int argc, char **argv) {
@@ -296,6 +464,13 @@ int main(int argc, char **argv) {
 		bool passed = true;
 		for (auto const& test : cases) {
 			auto result = RunCase(test, fixtures, artifacts / test.name);
+			passed = static_cast<json::String const&>(result["status"]) == "passed" && passed;
+			results.emplace_back(std::move(result));
+			WriteJson(artifacts / "manifest.json", manifest);
+		}
+		for (auto kind : {AdditionalCase::Coroutine, AdditionalCase::CoroutineCancel, AdditionalCase::Utf8Preview}) {
+			auto name = kind == AdditionalCase::Coroutine ? "coroutine-breakpoints" : kind == AdditionalCase::CoroutineCancel ? "coroutine-cancel" : "utf8-previews";
+			auto result = RunAdditionalCase(kind, fixtures, artifacts / name);
 			passed = static_cast<json::String const&>(result["status"]) == "passed" && passed;
 			results.emplace_back(std::move(result));
 			WriteJson(artifacts / "manifest.json", manifest);
