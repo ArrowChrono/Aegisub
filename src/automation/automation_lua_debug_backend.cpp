@@ -17,6 +17,7 @@
 #include "../auto4_lua.h"
 #include "automation_lua_runtime.h"
 #include "lua_workspace_run.h"
+#include "lua_text_utf8.h"
 
 #include <libaegisub/fs.h>
 #include <libaegisub/lua/utils.h>
@@ -86,33 +87,6 @@ struct ValuePreview {
 	size_t total_bytes = 0;
 };
 
-size_t Utf8SequenceLength(std::string_view value, size_t index) {
-	auto const lead = static_cast<unsigned char>(value[index]);
-	if (lead < 0x80)
-		return 1;
-	size_t length = 0;
-	if (lead >= 0xc2 && lead <= 0xdf)
-		length = 2;
-	else if (lead >= 0xe0 && lead <= 0xef)
-		length = 3;
-	else if (lead >= 0xf0 && lead <= 0xf4)
-		length = 4;
-	if (!length || index + length > value.size())
-		return 0;
-	for (size_t i = 1; i < length; ++i) {
-		auto const next = static_cast<unsigned char>(value[index + i]);
-		if (next < 0x80 || next > 0xbf)
-			return 0;
-	}
-	auto const second = static_cast<unsigned char>(value[index + 1]);
-	if ((lead == 0xe0 && second < 0xa0) ||
-		(lead == 0xed && second > 0x9f) ||
-		(lead == 0xf0 && second < 0x90) ||
-		(lead == 0xf4 && second > 0x8f))
-		return 0;
-	return length;
-}
-
 ValuePreview TruncateValue(std::string_view value, size_t max_length = kMaxStringPreviewLength) {
 	ValuePreview preview;
 	preview.total_bytes = value.size();
@@ -154,6 +128,11 @@ std::string PreviewLengthSuffix(ValuePreview const& preview) {
 	if (preview.shown_bytes == preview.total_bytes)
 		return {};
 	return " (" + std::to_string(preview.shown_bytes) + "/" + std::to_string(preview.total_bytes) + " bytes)";
+}
+
+std::string FormatDisplayText(std::string_view value, size_t max_length = kMaxStringPreviewLength) {
+	auto preview = TruncateValue(value, max_length);
+	return preview.text + PreviewLengthSuffix(preview);
 }
 
 std::string FormatStringPreview(lua_State *L, int index) {
@@ -264,7 +243,7 @@ std::string BuildDialogueTablePreview(lua_State *L, int table_index)
 	out << (is_comment ? "comment-line" : "dialogue-line");
 
 	if (auto style = TryGetTableStringField(L, table_index, "style"); style && !style->empty())
-		out << " <" << *style << ">";
+		out << " <" << FormatDisplayText(*style) << ">";
 
 	auto const start_time = TryGetTableIntegerField(L, table_index, "start_time");
 	auto const end_time = TryGetTableIntegerField(L, table_index, "end_time");
@@ -283,9 +262,9 @@ std::string BuildStyleTablePreview(lua_State *L, int table_index)
 	std::ostringstream out;
 	out << "style-line";
 	if (auto name = TryGetTableStringField(L, table_index, "name"); name && !name->empty())
-		out << " <" << *name << ">";
+		out << " <" << FormatDisplayText(*name) << ">";
 	if (auto font = TryGetTableStringField(L, table_index, "fontname"); font && !font->empty())
-		out << " " << *font;
+		out << " " << FormatDisplayText(*font);
 	return out.str();
 }
 
@@ -294,7 +273,7 @@ std::string BuildInfoTablePreview(lua_State *L, int table_index)
 	std::ostringstream out;
 	out << "info-line";
 	if (auto key = TryGetTableStringField(L, table_index, "key"); key && !key->empty()) {
-		out << " " << *key;
+		out << " " << FormatDisplayText(*key);
 		if (auto value = TryGetTableStringField(L, table_index, "value"); value && !value->empty()) {
 			auto preview = TruncateValue(*value, kMaxLinePreviewLength);
 			out << "=" << preview.text << PreviewLengthSuffix(preview);
@@ -348,7 +327,7 @@ std::string BuildKaraskelLinePreview(lua_State *L, int table_index)
 	std::ostringstream out;
 	out << "kara-line";
 	if (auto style = TryGetTableStringField(L, table_index, "style"); style && !style->empty())
-		out << " <" << *style << ">";
+		out << " <" << FormatDisplayText(*style) << ">";
 	if (auto text = TryGetTableStringField(L, table_index, "text_stripped"); text && !text->empty())
 		out << " " << FormatInlineString(*text);
 	else if (auto text = TryGetTableStringField(L, table_index, "text"); text && !text->empty())
@@ -617,14 +596,14 @@ std::string BuildStructuredTablePreview(lua_State *L, int table_index, char cons
 		return FormatTableName(L, table_index);
 	}
 
-	value_type = *table_class;
+	value_type = FormatDisplayText(*table_class);
 	if (*table_class == "dialogue")
 		return BuildDialogueTablePreview(L, table_index);
 	if (*table_class == "style")
 		return BuildStyleTablePreview(L, table_index);
 	if (*table_class == "info")
 		return BuildInfoTablePreview(L, table_index);
-	return *table_class + "-table";
+	return value_type + "-table";
 }
 
 bool ShouldHideDebugLocal(char const* name)
@@ -753,17 +732,16 @@ std::string BuildTemplateDisplayName(AutomationTemplateDebugState const& state)
 	return label;
 }
 
-AutomationDebugVariable CaptureVariable(lua_State *L, char const* name, int value_index, int depth, LuaVariableCaptureState& state);
+AutomationDebugVariable CaptureVariable(lua_State *L, std::string_view name, int value_index, int depth, LuaVariableCaptureState& state);
 
 AutomationDebugVariable MakeScalarVariable(
-	std::string name,
-	std::string value,
-	std::string value_type)
-{
+	std::string_view name,
+	std::string_view value,
+	std::string_view value_type) {
 	AutomationDebugVariable variable;
-	variable.name = std::move(name);
-	variable.value = std::move(value);
-	variable.value_type = std::move(value_type);
+	variable.name = FormatDisplayText(name, std::numeric_limits<size_t>::max());
+	variable.value = FormatDisplayText(value);
+	variable.value_type = FormatDisplayText(value_type);
 	return variable;
 }
 
@@ -866,12 +844,11 @@ void CaptureLuaAssFileChildren(lua_State *L, int value_index, AutomationDebugVar
 void CaptureFunctionChildren(lua_State *L, int value_index, AutomationDebugVariable& variable, int depth, LuaVariableCaptureState& state);
 std::optional<AutomationDebugScope> CaptureRegistryScope(lua_State *L, char const* registry_key, char const* scope_name);
 
-AutomationDebugVariable CaptureVariable(lua_State *L, char const* name, int value_index, int depth, LuaVariableCaptureState& state)
-{
+AutomationDebugVariable CaptureVariable(lua_State *L, std::string_view name, int value_index, int depth, LuaVariableCaptureState& state) {
 	value_index = AbsoluteIndex(L, value_index);
 
 	auto variable = AutomationDebugVariable{};
-	variable.name = name ? name : "(anonymous)";
+	variable.name = std::string(name);
 
 	switch (lua_type(L, value_index)) {
 	case LUA_TNIL:
@@ -927,6 +904,7 @@ AutomationDebugVariable CaptureVariable(lua_State *L, char const* name, int valu
 		break;
 	}
 
+	variable.name = FormatDisplayText(name, std::numeric_limits<size_t>::max());
 	return variable;
 }
 
@@ -1006,7 +984,7 @@ void CaptureTableChildren(lua_State *L, int table_index, AutomationDebugVariable
 			continue;
 		}
 
-		associative_children.push_back(CaptureVariable(L, child_name.c_str(), -1, depth, state));
+		associative_children.push_back(CaptureVariable(L, child_name, -1, depth, state));
 		lua_pop(L, 1);
 		if (!unlimited_children)
 			++captured;
@@ -1144,13 +1122,13 @@ void CaptureFunctionChildren(lua_State *L, int value_index, AutomationDebugVaria
 	std::ostringstream preview;
 	preview << ((ar.what && std::strcmp(ar.what, "C") == 0) ? "cfunction" : "function");
 	if (!function_name_is_anonymous)
-		preview << " " << function_name;
+		preview << " " << FormatDisplayText(function_name);
 	else if (has_binding_name)
-		preview << " " << binding_name;
+		preview << " " << FormatDisplayText(binding_name);
 	if (ar.linedefined > 0 && !location.display_name.empty())
-		preview << " @" << location.display_name << ":" << ar.linedefined;
+		preview << " @" << FormatDisplayText(location.display_name) << ":" << ar.linedefined;
 	else if (!location.display_name.empty())
-		preview << " @" << location.display_name;
+		preview << " @" << FormatDisplayText(location.display_name);
 	else
 		preview << ":" << FormatPointer(lua_topointer(L, value_index));
 	variable.value = preview.str();
@@ -1198,7 +1176,7 @@ AutomationDebugVariable BuildFrameInfoVariable(lua_Debug const& ar, AutomationDe
 	variable.name = "__frame";
 	variable.value = frame.function_name;
 	variable.value_type = "frame";
-	variable.children.push_back(MakeScalarVariable("function_name", frame.function_name, "string"));
+	variable.children.push_back(MakeScalarVariable("function_name", FunctionNameFor(ar), "string"));
 	variable.children.push_back(MakeScalarVariable("kind", frame.kind, "string"));
 	variable.children.push_back(MakeScalarVariable("source_path", frame.location.source_path, "string"));
 	variable.children.push_back(MakeScalarVariable("source_kind", frame.location.source_kind, "string"));
@@ -1295,7 +1273,7 @@ CapturedGlobalScopes CaptureGlobalVariables(lua_State *L, LuaVariableCaptureStat
 	lua_pushnil(L);
 	while (lua_next(L, LUA_GLOBALSINDEX) != 0) {
 		auto global_name = FormatDebugTableKeyName(L, -2);
-		auto variable = CaptureVariable(L, global_name.c_str(), -1, 0, state);
+		auto variable = CaptureVariable(L, global_name, -1, 0, state);
 		lua_pop(L, 1);
 
 		RankedGlobalVariable entry;
@@ -1402,6 +1380,12 @@ AutomationLuaDebugBackend::AutomationLuaDebugBackend(lua_State *L, agi::fs::path
 : L(L)
 , script_file(std::move(script_file))
 {
+	lua_newtable(L);
+	lua_newtable(L);
+	lua_pushliteral(L, "kv");
+	lua_setfield(L, -2, "__mode");
+	lua_setmetatable(L, -2);
+	thread_registry_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	StoreBackend(L, this);
 }
 
@@ -1411,6 +1395,7 @@ AutomationLuaDebugBackend::~AutomationLuaDebugBackend()
 		return;
 	lua_sethook(L, nullptr, 0, 0);
 	StoreBackend(L, nullptr);
+	luaL_unref(L, LUA_REGISTRYINDEX, thread_registry_ref);
 }
 
 void AutomationLuaDebugBackend::CaptureRuntimeBaseline()
@@ -1536,6 +1521,36 @@ AutomationDebugLocation AutomationLuaDebugBackend::BuildLocation(lua_State *hook
 	return location;
 }
 
+size_t AutomationLuaDebugBackend::ThreadId(lua_State *hook_L) {
+	lua_rawgeti(hook_L, LUA_REGISTRYINDEX, thread_registry_ref);
+	lua_pushthread(hook_L);
+	lua_rawget(hook_L, -2);
+	auto id = static_cast<size_t>(lua_tonumber(hook_L, -1));
+	lua_pop(hook_L, 1);
+	if (!id) {
+		id = ++next_thread_id;
+		lua_pushthread(hook_L);
+		lua_pushnumber(hook_L, static_cast<lua_Number>(id));
+		lua_rawset(hook_L, -3);
+		lua_pushnumber(hook_L, static_cast<lua_Number>(id));
+		lua_pushthread(hook_L);
+		lua_rawset(hook_L, -3);
+	}
+	lua_pop(hook_L, 1);
+	return id;
+}
+
+bool AutomationLuaDebugBackend::ThreadIsSuspended(lua_State *hook_L, size_t thread_id) const {
+	lua_rawgeti(hook_L, LUA_REGISTRYINDEX, thread_registry_ref);
+	lua_pushnumber(hook_L, static_cast<lua_Number>(thread_id));
+	lua_rawget(hook_L, -2);
+	auto *thread = lua_tothread(hook_L, -1);
+	lua_Debug frame;
+	bool const suspended = !thread || lua_status(thread) != 0 || !lua_getstack(thread, 0, &frame);
+	lua_pop(hook_L, 2);
+	return suspended;
+}
+
 size_t AutomationLuaDebugBackend::CaptureStackDepth(lua_State *hook_L) const {
 	size_t depth = 0;
 	lua_Debug ar;
@@ -1559,7 +1574,7 @@ std::vector<AutomationDebugFrame> AutomationLuaDebugBackend::CaptureFrames(lua_S
 		frame.level = level;
 		frame.location = BuildLocation(hook_L, ar);
 		frame.kind = FrameKindFor(ar, frame.location);
-		frame.function_name = FunctionNameFor(ar);
+		frame.function_name = FormatDisplayText(FunctionNameFor(ar));
 
 		for (int local_index = 1;; ++local_index) {
 			char const *local_name = lua_getlocal(hook_L, &ar, local_index);
@@ -1616,7 +1631,8 @@ void AutomationLuaDebugBackend::OnHook(lua_State *hook_L, lua_Debug *ar) {
 				captured.scopes = CaptureLuaScopes(hook_L);
 				captured.runtime_snapshot = LuaGetAutomationRuntimeStateSnapshot(hook_L);
 				return captured;
-			});
+			},
+			{.id = ThreadId(hook_L), .is_suspended = [this, hook_L](size_t id) { return ThreadIsSuspended(hook_L, id); }});
 	}
 	if (workspace_request && workspace_request->stop_requested->load())
 		LuaRaiseWorkspaceCancellation(hook_L);

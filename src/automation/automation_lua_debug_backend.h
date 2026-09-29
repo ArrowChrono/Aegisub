@@ -35,6 +35,8 @@ class AutomationLuaDebugBackend final : public AutomationDebugBackend {
 	std::set<std::string> runtime_globals_baseline;
 	std::shared_ptr<LuaWorkspaceRunRequest const> workspace_request;
 	int (*original_sethook)(lua_State *) = nullptr;
+	int thread_registry_ref = 0;
+	size_t next_thread_id = 0;
 
 	void UpdateHookState();
 	void OnHook(lua_State *hook_L, lua_Debug *ar);
@@ -42,6 +44,8 @@ class AutomationLuaDebugBackend final : public AutomationDebugBackend {
 
 	AutomationDebugLocation BuildLocation(lua_State *hook_L, lua_Debug const& ar) const;
 	size_t CaptureStackDepth(lua_State *hook_L) const;
+	size_t ThreadId(lua_State *hook_L);
+	bool ThreadIsSuspended(lua_State *hook_L, size_t thread_id) const;
 	std::vector<AutomationDebugFrame> CaptureFrames(lua_State *hook_L) const;
 
 	static void Hook(lua_State *L, lua_Debug *ar);

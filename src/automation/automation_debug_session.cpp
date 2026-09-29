@@ -24,11 +24,6 @@ namespace Automation4 {
 namespace {
 using namespace Automation4::json;
 
-bool SameLocation(AutomationDebugLocation const& a, AutomationDebugLocation const& b)
-{
-	return a.source_path == b.source_path && a.line == b.line && a.column == b.column;
-}
-
 AutomationDebugVariable MakeScalarVariable(std::string name, std::string value, std::string type = "string")
 {
 	return { std::move(name), std::move(value), std::move(type) };
@@ -552,6 +547,8 @@ std::string SerializePauseRecord(AutomationDebugPauseRecord const& record)
 {
 	JsonObjectBuilder builder;
 	builder.AddRaw("sequence", JsonInteger(record.sequence));
+	builder.AddRaw("thread_id", JsonInteger(record.thread_id));
+	builder.AddRaw("stack_depth", JsonInteger(record.stack_depth));
 	builder.AddRaw("reason", JsonString(ToString(record.reason)));
 	builder.AddRaw("location", SerializeLocation(record.location));
 	builder.AddRaw("frames", SerializeObjectArray(record.frames, SerializeFrame));
@@ -675,8 +672,6 @@ void AutomationDebugSession::BeginInvocation(AutomationInvocation const&)
 	step_depth = 0;
 	pause_requested = false;
 	pause_command_queued = false;
-	resume_skip_location.reset();
-	resume_skip_depth = 0;
 	resume_action = AutomationDebugResumeAction::Continue;
 	UpdateStateLocked(AutomationDebugSessionState::Running);
 }
@@ -691,8 +686,6 @@ void AutomationDebugSession::EndInvocation()
 	step_depth = 0;
 	pause_requested = false;
 	pause_command_queued = false;
-	resume_skip_location.reset();
-	resume_skip_depth = 0;
 	current_pause.reset();
 	if (attached)
 		UpdateStateLocked(AutomationDebugSessionState::Prepared);
@@ -712,8 +705,6 @@ void AutomationDebugSession::MarkCompleted(int exit_code, std::string message)
 	step_depth = 0;
 	pause_requested = false;
 	pause_command_queued = false;
-	resume_skip_location.reset();
-	resume_skip_depth = 0;
 	current_pause.reset();
 	UpdateStateLocked(attached ? AutomationDebugSessionState::Completed : AutomationDebugSessionState::Detached);
 }
@@ -754,17 +745,17 @@ bool AutomationDebugSession::Resume(AutomationDebugResumeAction action)
 		break;
 	case AutomationDebugResumeAction::StepIn:
 		step_mode = StepMode::Into;
-		step_depth = current_pause->frames.size();
+		step_depth = current_pause->stack_depth;
 		attached = true;
 		break;
 	case AutomationDebugResumeAction::Next:
 		step_mode = StepMode::Over;
-		step_depth = current_pause->frames.size();
+		step_depth = current_pause->stack_depth;
 		attached = true;
 		break;
 	case AutomationDebugResumeAction::StepOut:
 		step_mode = StepMode::Out;
-		step_depth = current_pause->frames.size();
+		step_depth = current_pause->stack_depth;
 		attached = true;
 		break;
 	case AutomationDebugResumeAction::Detach:
@@ -775,8 +766,9 @@ bool AutomationDebugSession::Resume(AutomationDebugResumeAction action)
 	}
 
 	pause_requested = false;
-	resume_skip_location = current_pause->location;
-	resume_skip_depth = current_pause->frames.size();
+	step_thread_id = current_pause->thread_id;
+	step_location = current_pause->location;
+	step_over_nested_call = false;
 	pause_command_queued = true;
 	resume_action = action;
 	cv.notify_all();
@@ -818,15 +810,23 @@ AutomationDebugStateSnapshot AutomationDebugSession::WaitForStateChange(size_t a
 	};
 }
 
-bool AutomationDebugSession::PauseMatchesStepMode(size_t stack_depth) const
-{
+bool AutomationDebugSession::PauseMatchesStepMode(AutomationDebugLocation const& location, size_t stack_depth, AutomationDebugThreadContext const& thread) {
+	if ((step_mode == StepMode::Over || step_mode == StepMode::Out) && thread.id != step_thread_id)
+		return thread.is_suspended && thread.is_suspended(step_thread_id);
 	switch (step_mode) {
 	case StepMode::None:
 		return false;
 	case StepMode::Into:
 		return true;
 	case StepMode::Over:
-		return stack_depth <= step_depth;
+		if (stack_depth > step_depth) {
+			step_over_nested_call = true;
+			return false;
+		}
+		if (std::exchange(step_over_nested_call, false) && stack_depth == step_depth &&
+			location.source_path == step_location.source_path && location.line == step_location.line && location.column == step_location.column)
+			return false;
+		return true;
 	case StepMode::Out:
 		return stack_depth < step_depth;
 	}
@@ -836,22 +836,13 @@ bool AutomationDebugSession::PauseMatchesStepMode(size_t stack_depth) const
 bool AutomationDebugSession::HandleHookPause(
 	AutomationDebugLocation location,
 	size_t stack_depth,
-	std::function<AutomationDebugCapturedState()> capture_state)
-{
+	std::function<AutomationDebugCapturedState()> const& capture_state,
+	AutomationDebugThreadContext const& thread) {
 	AutomationDebugPauseReason reason = AutomationDebugPauseReason::Breakpoint;
 	{
 		std::unique_lock<std::mutex> lock(mutex);
 		if (!request.enabled || !attached || !invocation_active || location.line <= 0)
 			return true;
-
-		if (resume_skip_location) {
-			if (SameLocation(*resume_skip_location, location))
-				return true;
-			if (stack_depth <= resume_skip_depth) {
-				resume_skip_location.reset();
-				resume_skip_depth = 0;
-			}
-		}
 
 		if (pause_requested) {
 			pause_requested = false;
@@ -868,7 +859,7 @@ bool AutomationDebugSession::HandleHookPause(
 				pending_step_pauses = request.auto_step_count;
 			reason = AutomationDebugPauseReason::Breakpoint;
 		}
-		else if (PauseMatchesStepMode(stack_depth)) {
+		else if (PauseMatchesStepMode(location, stack_depth, thread)) {
 			step_mode = StepMode::None;
 			step_depth = 0;
 			reason = AutomationDebugPauseReason::Step;
@@ -911,6 +902,8 @@ bool AutomationDebugSession::HandleHookPause(
 
 	AutomationDebugPauseRecord record;
 	record.sequence = pause_count;
+	record.thread_id = thread.id;
+	record.stack_depth = stack_depth;
 	record.reason = reason;
 	record.location = std::move(location);
 	record.frames = std::move(captured.frames);

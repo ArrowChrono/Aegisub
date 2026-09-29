@@ -100,8 +100,15 @@ namespace Automation4 {
 		std::vector<AutomationDebugVariable> upvalues;
 	};
 
+	struct AutomationDebugThreadContext {
+		size_t id = 0;
+		std::function<bool(size_t)> is_suspended;
+	};
+
 	struct AutomationDebugPauseRecord {
 		size_t sequence = 0;
+		size_t thread_id = 0;
+		size_t stack_depth = 0;
 		AutomationDebugPauseReason reason = AutomationDebugPauseReason::Breakpoint;
 		AutomationDebugLocation location;
 		std::vector<AutomationDebugFrame> frames;
@@ -146,8 +153,6 @@ namespace Automation4 {
 		std::shared_ptr<LuaWorkspaceSourceRegistry> source_registry;
 		std::deque<AutomationDebugPauseRecord> pauses;
 		std::optional<AutomationDebugPauseRecord> current_pause;
-		std::optional<AutomationDebugLocation> resume_skip_location;
-		size_t resume_skip_depth = 0;
 		AutomationDebugSessionState state = AutomationDebugSessionState::Created;
 		bool invocation_active = false;
 		bool attached = true;
@@ -157,6 +162,9 @@ namespace Automation4 {
 		int pending_step_pauses = 0;
 		StepMode step_mode = StepMode::None;
 		size_t step_depth = 0;
+		size_t step_thread_id = 0;
+		AutomationDebugLocation step_location;
+		bool step_over_nested_call = false;
 		size_t state_version = 0;
 		size_t pause_count = 0;
 		size_t entry_pause_count = 0;
@@ -168,7 +176,7 @@ namespace Automation4 {
 		std::string completion_message;
 		int completion_exit_code = 0;
 
-		bool PauseMatchesStepMode(size_t stack_depth) const;
+		bool PauseMatchesStepMode(AutomationDebugLocation const& location, size_t stack_depth, AutomationDebugThreadContext const& thread);
 		void BumpStateVersion();
 		void UpdateStateLocked(AutomationDebugSessionState next_state);
 
@@ -193,7 +201,8 @@ namespace Automation4 {
 		bool HandleHookPause(
 			AutomationDebugLocation location,
 			size_t stack_depth,
-			std::function<AutomationDebugCapturedState()> capture_state);
+			std::function<AutomationDebugCapturedState()> const& capture_state,
+			AutomationDebugThreadContext const& thread = {});
 
 		size_t PauseCount() const;
 		size_t EntryPauseCount() const;
