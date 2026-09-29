@@ -60,7 +60,7 @@ static int Supervise(string[] args)
     }
     var hostLeftRunning = false;
     var readyPaths = generatedHistory
-        ? new[] { "branches", "capacity", "mutated-input", "cancel" }.Select(name => Path.Combine(artifacts, name, "ready.json"))
+        ? new[] { "branches", "capacity", "mutated-input", "long-preview", "cancel" }.Select(name => Path.Combine(artifacts, name, "ready.json"))
         : new[] { readyPath };
     foreach (var candidateReadyPath in readyPaths.Where(File.Exists))
     {
@@ -635,7 +635,7 @@ static int RunGeneratedHistory(string exe, string artifacts)
     var includeFiles = Directory.GetFiles(includeRoot, "*", SearchOption.AllDirectories);
     foreach (var file in includeFiles)
         hashes[Path.Combine(includeRoot, Path.GetRelativePath(includeRoot, file)).Replace('\\', '/')] = Hash(file);
-    var steps = new[] { "branches", "capacity", "mutated-input", "cancel" };
+    var steps = new[] { "branches", "capacity", "mutated-input", "long-preview", "cancel" };
     var results = new List<StepResult>();
     var exitStatus = "running";
     try
@@ -743,29 +743,33 @@ static int RunGeneratedHistory(string exe, string artifacts)
                             }
                         }
                     }
-                    else if (name == "mutated-input")
+                    else if (name is "mutated-input" or "long-preview")
                     {
                         var expected = ReadExpected<HistoryMutatedInputExpected>(expectedPath);
                         Ensure(originalEvents.Count == 4 && HistoryItems(historyList).Length == expected.GeneratedCount,
                             "Mutated-input fixture or generated history count differs from independent expectation");
                         var latestContext = ReadPanelValue(contextControl);
                         Ensure(HasExactLine(latestContext, $"Orgline index: {expected.InputSourceLineIndex}")
-                            && HasExactLine(latestContext, $"Orgline text: {expected.InputText}")
+                            && HasExactLine(latestContext, $"Orgline text: {expected.InputPreview ?? expected.InputText}")
                             && HasExactLine(latestContext, $"Orgline start (ms): {expected.InputStartMs}")
                             && HasExactLine(latestContext, $"Orgline end (ms): {expected.InputEndMs}"),
                             "Context attributed generated output to the code-mutated input instead of its captured source");
+                        if (name == "long-preview")
+                            Ensure(HasExactLine(latestContext, $"Current line text: {expected.OutputPreview}")
+                                && HasExactLine(latestContext, "Line text change: changed"),
+                                "Identical truncated previews concealed a changed full text");
                         for (var index = 1; index <= expected.GeneratedCount; ++index)
                         {
                             var detail = SelectGeneratedHistory(workspace, historyList, generatedControl, index);
                             Ensure(HasExactLine(detail, $"Output index: {index}")
-                                && HasExactLine(detail, $"Output text: {expected.OutputTextPrefix}{index}")
+                                && HasExactLine(detail, $"Output text: {expected.OutputPreview ?? expected.OutputTextPrefix + index}")
                                 && HasExactLine(detail, $"Output layer: {expected.OutputLayer}")
                                 && HasExactLine(detail, $"Output style: {expected.OutputStyle}")
                                 && HasExactLine(detail, $"Output start (ms): {expected.OutputStartMs}")
                                 && HasExactLine(detail, $"Output end (ms): {expected.OutputEndMs}")
                                 && HasExactLine(detail, $"Input source line index: {expected.InputSourceLineIndex}")
                                 && HasExactLine(detail, $"Input snapshot index: {expected.InputSourceLineIndex}")
-                                && HasExactLine(detail, $"Input text: {expected.InputText}")
+                                && HasExactLine(detail, $"Input text: {expected.InputPreview ?? expected.InputText}")
                                 && HasExactLine(detail, $"Input start (ms): {expected.InputStartMs}")
                                 && HasExactLine(detail, $"Input end (ms): {expected.InputEndMs}")
                                 && HasExactLine(detail, $"Template source line: {expected.TemplateSourceLine}")
@@ -825,7 +829,7 @@ static int RunGeneratedHistory(string exe, string artifacts)
                     {
                         var original = originalEvents[index];
                         var actual = events[index];
-                        if (name == "mutated-input" && index == originalEvents.Count - 1)
+                        if ((name is "mutated-input" or "long-preview") && index == originalEvents.Count - 1)
                         {
                             var expected = ReadExpected<HistoryMutatedInputExpected>(expectedPath);
                             Ensure(actual.Kind == "Comment" && actual.Effect == "karaoke"
@@ -1085,7 +1089,10 @@ static AutomationElement? FindProgressPane(Process process, string exactTitle)
     var candidates = new List<AutomationElement>();
     foreach (AutomationElement root in roots)
     {
-        foreach (var item in new[] { root }.Concat(root.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Pane)).Cast<AutomationElement>()))
+        foreach (var item in new[] { root }.Concat(root.FindAll(TreeScope.Children, new AndCondition(
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Pane),
+            new PropertyCondition(AutomationElement.ClassNameProperty, "#32770"),
+            new PropertyCondition(AutomationElement.NameProperty, exactTitle))).Cast<AutomationElement>()))
         {
             try
             {
@@ -1541,7 +1548,7 @@ sealed record HistoryCapacityExpected(int GeneratedCount, int RetainedCount, int
 sealed record HistoryMutatedInputExpected(int GeneratedCount, int InputSourceLineIndex, string InputText,
     int InputStartMs, int InputEndMs, int TemplateSourceLine, int TemplateDebugId, string TemplateSourceText,
     string MutatedLiveInputText, int MutatedLiveInputStartMs, int MutatedLiveInputEndMs,
-    string OutputTextPrefix, int OutputLayer, string OutputStyle, int OutputStartMs, int OutputEndMs);
+    string OutputTextPrefix, int OutputLayer, string OutputStyle, int OutputStartMs, int OutputEndMs, string? InputPreview = null, string? OutputPreview = null);
 sealed record HistoryCancelExpected(int OriginalEventCount, int MinimumProvisionalGenerated,
     int MaximumProvisionalGenerated, int InputSourceLineIndex, int TemplateSourceLine, string TextPrefix);
 sealed record HostIdentity(int ProcessId, string StartTimeUtc);

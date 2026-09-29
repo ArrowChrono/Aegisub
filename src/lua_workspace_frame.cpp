@@ -114,6 +114,9 @@ struct RuntimeTemplateView {
 	std::optional<std::string> target_text;
 	std::optional<AutomationTemplateLineSnapshot> original_line;
 	std::optional<AutomationTemplateLineSnapshot> current_line;
+	std::optional<bool> text_changed;
+	std::optional<bool> style_changed;
+	std::optional<bool> effect_changed;
 	std::optional<AutomationTemplateSyllableSnapshot> syllable;
 	std::optional<AutomationTemplateSyllableSnapshot> base_syllable;
 	std::optional<int> syllable_index;
@@ -204,6 +207,14 @@ RuntimeTemplateView project_template(AutomationTemplateDebugState const& source)
 	}
 	if (source.target) {
 		auto const& target = *source.target;
+		if (target.original_line && target.line) {
+			auto changed = [](std::optional<std::string> const& original, std::optional<std::string> const& current) -> std::optional<bool> {
+				return original && current ? std::optional<bool>(*original != *current) : std::nullopt;
+			};
+			result.text_changed = changed(target.original_line->text, target.line->text);
+			result.style_changed = changed(target.original_line->style, target.line->style);
+			result.effect_changed = changed(target.original_line->effect, target.line->effect);
+		}
 		result.original_line = target.original_line;
 		result.current_line = target.line;
 		result.syllable = target.syllable;
@@ -390,9 +401,8 @@ void add_syllable_snapshot(wxString& output, wxString const& prefix, std::option
 	add_snapshot_field(output, prefix + wxS(" height"), syllable->height);
 }
 
-template <typename T>
-void add_change_field(wxString& output, wxString const& label, std::optional<T> const& original, std::optional<T> const& current) {
-	output += label + wxS(": ") + (original && current ? (*original == *current ? wxS("unchanged") : wxS("changed")) : wxS("[not captured]")) + wxS("\n");
+void add_change_field(wxString& output, wxString const& label, std::optional<bool> changed) {
+	output += label + wxS(": ") + (changed ? (*changed ? wxS("changed") : wxS("unchanged")) : wxS("[not captured]")) + wxS("\n");
 }
 
 wxString run_status(std::optional<AutomationInvocationOutcome> outcome) {
@@ -1648,10 +1658,10 @@ void LuaWorkspaceFrame::RenderRuntimeObservation(std::uint64_t sequence, std::we
 		if (value.original_line && value.current_line) {
 			auto const& original = *value.original_line;
 			auto const& current = *value.current_line;
-			add_change_field(context_text, wxS("Line text change"), original.text, current.text);
-			add_change_field(context_text, wxS("Line layer change"), original.layer, current.layer);
-			add_change_field(context_text, wxS("Line style change"), original.style, current.style);
-			add_change_field(context_text, wxS("Line effect change"), original.effect, current.effect);
+			add_change_field(context_text, wxS("Line text change"), value.text_changed);
+			add_change_field(context_text, wxS("Line layer change"), original.layer && current.layer ? std::optional<bool>(*original.layer != *current.layer) : std::nullopt);
+			add_change_field(context_text, wxS("Line style change"), value.style_changed);
+			add_change_field(context_text, wxS("Line effect change"), value.effect_changed);
 			context_text += wxS("Line timing change: ");
 			context_text += original.start_time && original.end_time && current.start_time && current.end_time
 								? (*original.start_time == *current.start_time && *original.end_time == *current.end_time ? wxS("unchanged") : wxS("changed"))

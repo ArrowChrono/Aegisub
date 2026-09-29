@@ -1,6 +1,7 @@
 *.App
 *.[oadi]
 *.ass
+!tests/gui-automation/lua-workspace/fixtures/generated-history-long-preview.ass
 *.avi
 *.bz2
 *.cache
