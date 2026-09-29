@@ -26,6 +26,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -90,6 +92,9 @@ struct ValuePreview {
 ValuePreview TruncateValue(std::string_view value, size_t max_length = kMaxStringPreviewLength) {
 	ValuePreview preview;
 	preview.total_bytes = value.size();
+	size_t const ellipsis_length = std::min<size_t>(3, max_length);
+	size_t truncated_length = 0;
+	size_t truncated_bytes = 0;
 	for (size_t index = 0; index < value.size();) {
 		auto const byte = static_cast<unsigned char>(value[index]);
 		auto const sequence_length = Utf8SequenceLength(value, index);
@@ -113,14 +118,20 @@ ValuePreview TruncateValue(std::string_view value, size_t max_length = kMaxStrin
 		else
 			token = value.substr(index, sequence_length);
 		auto const consumed = sequence_length ? sequence_length : 1;
-		if (preview.text.size() + token.size() + (index + consumed < value.size() ? 3 : 0) > max_length)
-			break;
+		if (token.size() > max_length - preview.text.size()) {
+			preview.text.resize(truncated_length);
+			preview.text.append(ellipsis_length, '.');
+			preview.shown_bytes = truncated_bytes;
+			return preview;
+		}
 		preview.text.append(token);
 		index += consumed;
 		preview.shown_bytes = index;
+		if (preview.text.size() <= max_length - ellipsis_length) {
+			truncated_length = preview.text.size();
+			truncated_bytes = index;
+		}
 	}
-	if (preview.shown_bytes < preview.total_bytes)
-		preview.text += "...";
 	return preview;
 }
 
@@ -732,7 +743,7 @@ std::string BuildTemplateDisplayName(AutomationTemplateDebugState const& state)
 	return label;
 }
 
-AutomationDebugVariable CaptureVariable(lua_State *L, std::string_view name, int value_index, int depth, LuaVariableCaptureState& state);
+AutomationDebugVariable CaptureVariable(lua_State *L, std::string_view name, int value_index, int depth, LuaVariableCaptureState& state, bool formatted_name = false);
 
 AutomationDebugVariable MakeScalarVariable(
 	std::string_view name,
@@ -747,13 +758,28 @@ AutomationDebugVariable MakeScalarVariable(
 
 std::string FormatDebugTableKeyName(lua_State *L, int key_index)
 {
-	switch (lua_type(L, key_index)) {
-	case LUA_TSTRING:
-		return get_string_or_default(L, key_index);
-	case LUA_TNUMBER:
-		return "[" + std::to_string(lua_tointeger(L, key_index)) + "]";
-	default:
-		return "[" + std::string(lua_typename(L, lua_type(L, key_index))) + "]";
+	auto const key_type = lua_type(L, key_index);
+	switch (key_type) {
+		case LUA_TSTRING: {
+			auto key = get_string_or_default(L, key_index);
+			auto const identifier_start = [](unsigned char ch) {
+				return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+			};
+			bool const identifier = !key.empty() && identifier_start(key.front()) && std::ranges::all_of(key, [&](unsigned char ch) { return identifier_start(ch) || (ch >= '0' && ch <= '9'); });
+			if (identifier)
+				return key;
+			return "[\"" + FormatDisplayText(key, std::numeric_limits<size_t>::max()) + "\"]";
+		}
+		case LUA_TNUMBER: {
+			std::array<char, 64> buffer{};
+			auto const result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), lua_tonumber(L, key_index));
+			return "[" + std::string(buffer.data(), result.ptr) + "]";
+		}
+		case LUA_TBOOLEAN:
+			return lua_toboolean(L, key_index) ? "[true]" : "[false]";
+		default:
+			auto const *type_name = key_type == LUA_TLIGHTUSERDATA ? "lightuserdata" : lua_typename(L, key_type);
+			return "[" + std::string(type_name) + ":" + FormatPointer(lua_topointer(L, key_index)) + "]";
 	}
 }
 
@@ -844,7 +870,7 @@ void CaptureLuaAssFileChildren(lua_State *L, int value_index, AutomationDebugVar
 void CaptureFunctionChildren(lua_State *L, int value_index, AutomationDebugVariable& variable, int depth, LuaVariableCaptureState& state);
 std::optional<AutomationDebugScope> CaptureRegistryScope(lua_State *L, char const* registry_key, char const* scope_name);
 
-AutomationDebugVariable CaptureVariable(lua_State *L, std::string_view name, int value_index, int depth, LuaVariableCaptureState& state) {
+AutomationDebugVariable CaptureVariable(lua_State *L, std::string_view name, int value_index, int depth, LuaVariableCaptureState& state, bool formatted_name) {
 	value_index = AbsoluteIndex(L, value_index);
 
 	auto variable = AutomationDebugVariable{};
@@ -904,7 +930,8 @@ AutomationDebugVariable CaptureVariable(lua_State *L, std::string_view name, int
 		break;
 	}
 
-	variable.name = FormatDisplayText(name, std::numeric_limits<size_t>::max());
+	if (!formatted_name)
+		variable.name = FormatDisplayText(name, std::numeric_limits<size_t>::max());
 	return variable;
 }
 
@@ -948,32 +975,16 @@ void CaptureTableChildren(lua_State *L, int table_index, AutomationDebugVariable
 
 	lua_pushnil(L);
 	while (lua_next(L, table_index) != 0) {
-		bool skip = false;
-		std::string child_name;
-		switch (lua_type(L, -2)) {
-		case LUA_TSTRING:
-			child_name = get_string_or_default(L, -2);
-			break;
-		case LUA_TNUMBER: {
+		if (lua_type(L, -2) == LUA_TNUMBER) {
 			auto const key = lua_tonumber(L, -2);
-			auto const integer = lua_tointeger(L, -2);
-			if (static_cast<lua_Number>(integer) == key && integer >= 1 && static_cast<size_t>(integer) <= array_length)
-				skip = true;
-			else
-				child_name = "[" + std::to_string(integer) + "]";
-			break;
+			if (key >= 1 && key <= static_cast<lua_Number>(array_length) && std::floor(key) == key) {
+				lua_pop(L, 1);
+				continue;
+			}
 		}
-		default:
-			child_name = "[" + std::string(lua_typename(L, lua_type(L, -2))) + "]";
-			break;
-		}
+		auto child_name = FormatDebugTableKeyName(L, -2);
 
 		if (runtime_global_table && !ShouldIncludeRuntimeGlobalTableChild(L, child_name)) {
-			lua_pop(L, 1);
-			continue;
-		}
-
-		if (skip) {
 			lua_pop(L, 1);
 			continue;
 		}
@@ -984,7 +995,7 @@ void CaptureTableChildren(lua_State *L, int table_index, AutomationDebugVariable
 			continue;
 		}
 
-		associative_children.push_back(CaptureVariable(L, child_name, -1, depth, state));
+		associative_children.push_back(CaptureVariable(L, child_name, -1, depth, state, true));
 		lua_pop(L, 1);
 		if (!unlimited_children)
 			++captured;
@@ -1273,7 +1284,7 @@ CapturedGlobalScopes CaptureGlobalVariables(lua_State *L, LuaVariableCaptureStat
 	lua_pushnil(L);
 	while (lua_next(L, LUA_GLOBALSINDEX) != 0) {
 		auto global_name = FormatDebugTableKeyName(L, -2);
-		auto variable = CaptureVariable(L, global_name, -1, 0, state);
+		auto variable = CaptureVariable(L, global_name, -1, 0, state, true);
 		lua_pop(L, 1);
 
 		RankedGlobalVariable entry;

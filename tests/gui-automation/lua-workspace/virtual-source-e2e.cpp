@@ -27,6 +27,7 @@ extern "C" {
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -295,7 +296,7 @@ json::Object RunAdditionalCase(AdditionalCase kind, fs::path const& fixtures, fs
 																															 : "utf8-previews";
 	char const *filename = kind == AdditionalCase::Coroutine ? "virtual-source-coroutine.lua" : kind == AdditionalCase::CoroutineCancel ? "virtual-source-coroutine-cancel.lua"
 																																		: "virtual-source-utf8.lua";
-	int const breakpoint_line = 4;
+	int breakpoint_line = 4;
 	std::uint64_t const invocation_id = kind == AdditionalCase::Coroutine ? 44 : kind == AdditionalCase::CoroutineCancel ? 45
 																														 : 46;
 	CreateDirectory(artifacts);
@@ -314,6 +315,11 @@ json::Object RunAdditionalCase(AdditionalCase kind, fs::path const& fixtures, fs
 			.revision = 0,
 			.display_name = filename,
 			.text = ReadSource(fixtures / filename)};
+		if (kind == AdditionalCase::Utf8Preview) {
+			auto const marker = source.text.find("local marker = 42");
+			Require(marker != std::string::npos, "UTF-8 fixture is missing its breakpoint statement");
+			breakpoint_line = 1 + static_cast<int>(std::count(source.text.begin(), source.text.begin() + marker, '\n'));
+		}
 		json::Object source_manifest;
 		json::Array source_records;
 		source_records.emplace_back(SourceJson(source));
@@ -420,6 +426,14 @@ json::Object RunAdditionalCase(AdditionalCase kind, fs::path const& fixtures, fs
 				CheckStringPreview(pause.frames[0], "ascii_cjk", "\"" + std::string(114, 'A') + "\xE4\xB8\xAD...\" (117/121 bytes)");
 				CheckStringPreview(pause.frames[0], "emoji", "\"" + std::string(113, 'B') + "\xF0\x9F\x99\x82...\" (117/121 bytes)");
 				CheckStringPreview(pause.frames[0], "invalid", "\"" + std::string(109, 'C') + R"(\xFF\x80..." (111/121 bytes))");
+				CheckStringPreview(pause.frames[0], "ascii118", "\"" + std::string(118, 'A') + "\"");
+				CheckStringPreview(pause.frames[0], "ascii119", "\"" + std::string(119, 'A') + "\"");
+				CheckStringPreview(pause.frames[0], "ascii120", "\"" + std::string(120, 'A') + "\"");
+				CheckStringPreview(pause.frames[0], "ascii121", "\"" + std::string(117, 'A') + "...\" (117/121 bytes)");
+				CheckStringPreview(pause.frames[0], "utf8_exact", "\"" + std::string(117, 'U') + "中\"");
+				CheckStringPreview(pause.frames[0], "utf8_over", "\"" + std::string(117, 'U') + "...\" (117/121 bytes)");
+				CheckStringPreview(pause.frames[0], "escape_exact", "\"" + std::string(116, 'V') + R"(\xFF")");
+				CheckStringPreview(pause.frames[0], "escape_over", "\"" + std::string(117, 'V') + "...\" (117/118 bytes)");
 			}
 		}
 		report["checked_pauses"] = static_cast<json::Integer>(pauses.size());
@@ -454,6 +468,26 @@ AutomationDebugVariable const& FindVariable(std::vector<AutomationDebugVariable>
 	auto found = std::ranges::find(variables, name, &AutomationDebugVariable::name);
 	Require(found != variables.end(), "Missing display variable " + std::string(name));
 	return *found;
+}
+
+std::string CheckObjectKey(std::vector<AutomationDebugVariable> const& children, std::string_view type, int expected) {
+	auto const value = std::to_string(expected);
+	auto found = std::ranges::find_if(children, [&](auto const& child) { return child.value_type == "integer" && child.value == value; });
+	Require(found != children.end(), "Missing object-key value " + value);
+	Require(std::ranges::count_if(children, [&](auto const& child) { return child.value_type == "integer" && child.value == value; }) == 1,
+			"Object-key value is ambiguous: " + value);
+	auto const& name = found->name;
+	auto const prefix = "[" + std::string(type) + ":0x";
+	Require(name.starts_with(prefix) && name.size() > prefix.size() + 1 && name.back() == ']', "Incorrect object-key label " + name);
+	Require(std::ranges::all_of(std::string_view(name).substr(prefix.size(), name.size() - prefix.size() - 1),
+								[](char ch) { return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); }),
+			"Object-key label has a nonhexadecimal identity " + name);
+	return name;
+}
+
+void CheckSummary(std::vector<AutomationDebugVariable> const& locals, std::string_view name, std::string const& expected) {
+	auto const& variable = FindVariable(locals, name);
+	Require(variable.value_type == "info" && variable.value == expected, "Incorrect 48-byte structured summary for " + std::string(name) + ": " + variable.value);
 }
 
 json::Object RunControlledCase(ControlledCase kind, fs::path const& fixtures, fs::path const& artifacts) {
@@ -577,10 +611,10 @@ json::Object RunControlledCase(ControlledCase kind, fs::path const& fixtures, fs
 			else if (display) {
 				auto const& locals = initial.frames[0].locals;
 				auto const& values = FindVariable(locals, "values");
-				CheckNumber(values.children, R"(k\x00a)", 1, "NUL table key a");
-				CheckNumber(values.children, R"(k\x00b)", 2, "NUL table key b");
-				CheckNumber(values.children, R"(\xFF)", 3, "Invalid UTF-8 table key");
-				CheckNumber(values.children, R"(k\\x00a)", 4, "Literal escape table key");
+				CheckNumber(values.children, R"(["k\x00a"])", 1, "NUL table key a");
+				CheckNumber(values.children, R"(["k\x00b"])", 2, "NUL table key b");
+				CheckNumber(values.children, R"(["\xFF"])", 3, "Invalid UTF-8 table key");
+				CheckNumber(values.children, R"(["k\\x00a"])", 4, "Literal escape table key");
 				Require(FindVariable(locals, "line").value == "dialogue-line <样式\\xFF\\x00尾> \"OK\"", "Dialogue summary lost safe display encoding");
 				Require(FindVariable(locals, "style").value == "style-line <名\\x80> 字\\xFF", "Style summary lost safe display encoding");
 				Require(FindVariable(locals, "info").value == "info-line k\\x00ey=值\\xFF", "Info summary lost safe display encoding");
@@ -589,6 +623,41 @@ json::Object RunControlledCase(ControlledCase kind, fs::path const& fixtures, fs
 				CheckNumber(long_keys.children, std::string(160, 'k') + "b", 6, "Long table key b");
 				auto const& custom = FindVariable(locals, "custom");
 				Require(custom.value_type == R"(tag\xFF\x00end)" && custom.value == R"(tag\xFF\x00end-table)", "Custom type label lost safe display encoding");
+				auto const& numeric_keys = FindVariable(locals, "numeric_keys");
+				for (auto const& [name, number] : std::array<std::pair<std::string_view, int>, 11>{{{"[1.25]", 11}, {"[1.75]", 12}, {"[-0.25]", 13}, {"[-0.75]", 14}, {"[1]", 15}, {"[1.0000000000000002]", 16}, {"[1e+20]", 17}, {"[\"1.25\"]", 18}, {"[\"[1.25]\"]", 19}, {"[true]", 20}, {"[false]", 21}}})
+					CheckNumber(numeric_keys.children, std::string(name), number, "Mixed Lua table key");
+				Require(numeric_keys.children.size() == 11, "Mixed-key table lost or duplicated a child");
+				auto const& object_keys = FindVariable(locals, "object_keys");
+				auto const& shared_keys = FindVariable(locals, "shared_keys");
+				Require(object_keys.children.size() == 8 && shared_keys.children.size() == 4, "Object-key table lost or duplicated children");
+				std::vector<std::string> object_names;
+				for (auto const& [type, first, second, shared] : std::array<std::tuple<std::string_view, int, int, int>, 4>{{{"table", 31, 32, 41},
+																															 {"function", 33, 34, 43},
+																															 {"thread", 35, 36, 45},
+																															 {"userdata", 37, 38, 47}}}) {
+					auto first_name = CheckObjectKey(object_keys.children, type, first);
+					auto second_name = CheckObjectKey(object_keys.children, type, second);
+					Require(first_name != second_name, "Distinct " + std::string(type) + " keys have the same display identity");
+					Require(CheckObjectKey(shared_keys.children, type, shared) == first_name, "Shared " + std::string(type) + " key changed identity between tables");
+					object_names.push_back(std::move(first_name));
+					object_names.push_back(std::move(second_name));
+				}
+				std::ranges::sort(object_names);
+				Require(std::ranges::adjacent_find(object_names) == object_names.end(), "Object-key labels are not unique");
+				auto globals = std::ranges::find(initial.scopes, "Globals", &AutomationDebugScope::name);
+				Require(globals != initial.scopes.end(), "Missing script Globals scope");
+				CheckNumber(globals->variables, "[1.25]", 51, "Numeric global key");
+				CheckNumber(globals->variables, "[\"[1.25]\"]", 52, "String global key");
+				CheckNumber(globals->variables, CheckObjectKey(object_keys.children, "table", 31), 53, "Object global key");
+				CheckNumber(locals, "tostring_calls", 0, "Object-key metamethod side effect");
+				CheckSummary(locals, "summary48", "info-line limit=" + std::string(48, 'Q'));
+				CheckSummary(locals, "summary49", "info-line limit=" + std::string(45, 'Q') + "... (45/49 bytes)");
+				CheckSummary(locals, "summary_utf8_exact", "info-line limit=" + std::string(45, 'Q') + "中");
+				CheckSummary(locals, "summary_utf8_over", "info-line limit=" + std::string(45, 'Q') + "... (45/49 bytes)");
+				CheckSummary(locals, "summary_escape_exact", "info-line limit=" + std::string(44, 'Q') + R"(\xFF)");
+				CheckSummary(locals, "summary_escape_over", "info-line limit=" + std::string(45, 'Q') + "... (45/46 bytes)");
+				report["key_assertions"] = "numeric, string, boolean, object-identity, globals, no-__tostring";
+				report["summary_preview_assertions"] = "48-display-byte full and overflow, UTF-8 and escaped-token boundaries";
 				session->SetBreakpoints({});
 				resume(AutomationDebugResumeAction::Continue);
 			}
