@@ -228,6 +228,10 @@ void RunExecutableCase(fs::path const& fixtures, fs::path const& artifacts, std:
 		CheckStatementFormat(formatted.source, "Formatting");
 	if (name == "historic-single-line")
 		CheckHistoricSingleLineFormat(formatted.source, "Formatting");
+	if (name == "syntax-boundaries") {
+		Require(formatted.source.find("\n---@type string\n") != std::string::npos, "Formatting changed the standalone annotation's line ownership");
+		Require(formatted.source.find("...\n\treturn first, second") != std::string::npos, "Formatting lost the vararg statement boundary");
+	}
 	ExpectResult(formatted.source, expected, artifacts / "formatted.actual");
 
 	auto const serialized = Automation4::SerializeLuaSource(formatted.source);
@@ -298,6 +302,8 @@ void RunScalabilityCase(fs::path const& artifacts) {
 		original += "add(1)\n";
 	for (int i = 0; i < 512; ++i)
 		original += "total=total+1;";
+	for (int i = 0; i < 8000; ++i)
+		original += "while total < 0 do total=total+1 end\n";
 	original += "\nlocal held=1 (function() total=total+1 end)()\nreturn tostring(total)..':'..tostring(held)\n";
 	constexpr std::string_view expected = "1025:1";
 	WriteFile(artifacts / "original.lua", original);
@@ -528,7 +534,7 @@ int main(int argc, char **argv) {
 		};
 		run("classifier", [&] { fs::create_directories(artifacts / "classifier"); CheckClassifier(artifacts / "classifier"); });
 		run("punctuation", [&] { RunPunctuationCase(artifacts / "punctuation"); });
-		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access", "semicolons", "statement-boundaries", "historic-single-line"})
+		for (auto const& name : {"lexical", "strings", "crlf", "bom_shebang", "scope", "control", "empty", "member-access", "semicolons", "statement-boundaries", "historic-single-line", "syntax-boundaries"})
 			run(name, [&] { RunExecutableCase(fixtures, artifacts / name, name); });
 		run("validate_only", [&] { RunValidateOnlyCase(fixtures, artifacts / "validate_only"); });
 		run("scalability", [&]() -> void { RunScalabilityCase(artifacts / "scalability"); });

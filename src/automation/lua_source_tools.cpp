@@ -32,6 +32,7 @@ struct Token {
 	std::string_view comment_body;
 	size_t offset = 0;
 	bool line_comment = false;
+	bool newline_before = false;
 };
 
 bool NeedsSpace(Token const *previous, Token const& current) {
@@ -104,12 +105,16 @@ std::optional<LuaSourceDiagnostic> Tokenize(std::string_view source, std::vector
 		tokens.push_back({.kind = TokenKind::Header, .text = text, .comment_body = text, .offset = start, .line_comment = true});
 	}
 	while (pos < source.size()) {
-		while (pos < source.size() && IsSpace(source[pos]))
+		bool newline_before = false;
+		while (pos < source.size() && IsSpace(source[pos])) {
+			newline_before |= IsNewline(source[pos]);
 			++pos;
+		}
 		if (pos == source.size())
 			break;
 		size_t start = pos;
 		Token token{.kind = TokenKind::Symbol, .text = {}, .comment_body = {}, .offset = start};
+		token.newline_before = newline_before;
 		bool comment = source.substr(pos).starts_with("--");
 		if (comment)
 			pos += 2;
@@ -279,24 +284,209 @@ std::optional<std::string> DumpBytecode(lua_State *state, std::string_view sourc
 	return output;
 }
 
-bool CanEndStatement(Token const& token) {
-	if (token.kind == TokenKind::Identifier || token.kind == TokenKind::Number || token.kind == TokenKind::String || token.kind == TokenKind::Comment || token.kind == TokenKind::Header)
-		return true;
-	if (token.kind == TokenKind::Symbol)
-		return token.text == ")" || token.text == "]" || token.text == "}" || token.text == "::";
-	return token.text == "break" || token.text == "end" || token.text == "false" || token.text == "nil" || token.text == "true";
-}
+class StatementBoundaries {
+	std::vector<Token const *> tokens;
+	size_t position = 0;
+	std::vector<size_t>& boundaries;
+	std::vector<size_t>& semicolons;
 
-bool CanStartStatement(Token const& token) {
-	if (token.kind == TokenKind::Identifier)
+	[[nodiscard]] std::string_view Peek(size_t ahead = 0) const {
+		return position + ahead < tokens.size() ? tokens[position + ahead]->text : std::string_view{};
+	}
+	[[nodiscard]] bool Kind(TokenKind kind) const { return position < tokens.size() && tokens[position]->kind == kind; }
+	bool Take(std::string_view text) {
+		if (Peek() != text)
+			return false;
+		++position;
 		return true;
-	if (token.kind == TokenKind::Symbol)
-		return token.text == "(" || token.text == "::";
-	if (token.kind != TokenKind::Keyword)
-		return false;
-	constexpr std::array words = {"break", "do", "for", "function", "goto", "if", "local", "repeat", "return", "while"};
-	return std::ranges::find(words, token.text) != words.end();
-}
+	}
+	bool Name() {
+		if (!Kind(TokenKind::Identifier))
+			return false;
+		++position;
+		return true;
+	}
+	[[nodiscard]] bool BlockEnd() const {
+		auto text = Peek();
+		return text.empty() || text == "end" || text == "else" || text == "elseif" || text == "until";
+	}
+	bool ExpressionList() {
+		do {
+			if (!Expression())
+				return false;
+		} while (Take(","));
+		return true;
+	}
+	bool FunctionBody() {
+		if (!Take("("))
+			return false;
+		if (!Take(")")) {
+			do {
+				if (!Name() && !Take("..."))
+					return false;
+			} while (Take(","));
+			if (!Take(")"))
+				return false;
+		}
+		return Block() && Take("end");
+	}
+	bool Table() {
+		if (!Take("{"))
+			return false;
+		while (!Take("}")) {
+			if (Take("[")) {
+				if (!Expression() || !Take("]") || !Take("="))
+					return false;
+			}
+			else if (Kind(TokenKind::Identifier) && Peek(1) == "=")
+				position += 2;
+			if (!Expression())
+				return false;
+			if (!Take(",") && !Take(";"))
+				return Take("}");
+		}
+		return true;
+	}
+	bool Arguments() {
+		if (Take("("))
+			return Take(")") || (ExpressionList() && Take(")"));
+		if (Kind(TokenKind::String)) {
+			++position;
+			return true;
+		}
+		return Table();
+	}
+	bool Prefix() {
+		if (Take("(")) {
+			if (!Expression() || !Take(")"))
+				return false;
+		}
+		else if (!Name())
+			return false;
+		for (;;) {
+			if (Take(".")) {
+				if (!Name())
+					return false;
+			}
+			else if (Take("[")) {
+				if (!Expression() || !Take("]"))
+					return false;
+			}
+			else if (Take(":")) {
+				if (!Name() || !Arguments())
+					return false;
+			}
+			else if (Peek() == "(" || Peek() == "{" || Kind(TokenKind::String)) {
+				if (!Arguments())
+					return false;
+			}
+			else
+				return true;
+		}
+	}
+	bool Operand() {
+		while (Take("not") || Take("-") || Take("#")) {
+		}
+		if (Take("function"))
+			return FunctionBody();
+		if (Peek() == "{")
+			return Table();
+		if (Kind(TokenKind::Number) || Kind(TokenKind::String)) {
+			++position;
+			return true;
+		}
+		return Take("nil") || Take("true") || Take("false") || Take("...") || Prefix();
+	}
+	bool Expression() {
+		constexpr std::array operators = {"or", "and", "<", ">", "<=", ">=", "~=", "==", "..", "+", "-", "*", "/", "%", "^"};
+		if (!Operand())
+			return false;
+		while (std::ranges::find(operators, Peek()) != operators.end()) {
+			++position;
+			if (!Operand())
+				return false;
+		}
+		return true;
+	}
+	bool Statement() {
+		if (Take("if")) {
+			do {
+				if (!Expression() || !Take("then") || !Block())
+					return false;
+			} while (Take("elseif"));
+			return (!Take("else") || Block()) && Take("end");
+		}
+		if (Take("while"))
+			return Expression() && Take("do") && Block() && Take("end");
+		if (Take("do"))
+			return Block() && Take("end");
+		if (Take("repeat"))
+			return Block() && Take("until") && Expression();
+		if (Take("for")) {
+			do {
+				if (!Name())
+					return false;
+			} while (Take(","));
+			return (Take("=") || Take("in")) && ExpressionList() && Take("do") && Block() && Take("end");
+		}
+		if (Take("function")) {
+			if (!Name())
+				return false;
+			while (Take(".") || Take(":")) {
+				if (!Name())
+					return false;
+			}
+			return FunctionBody();
+		}
+		if (Take("local")) {
+			if (Take("function"))
+				return Name() && FunctionBody();
+			do {
+				if (!Name())
+					return false;
+			} while (Take(","));
+			return !Take("=") || ExpressionList();
+		}
+		if (Take("return"))
+			return BlockEnd() || Peek() == ";" || ExpressionList();
+		if (Take("break"))
+			return true;
+		if (Take("goto"))
+			return Name();
+		if (Take("::"))
+			return Name() && Take("::");
+		do {
+			if (!Prefix())
+				return false;
+		} while (Take(","));
+		return !Take("=") || ExpressionList();
+	}
+	bool Block() {
+		bool previous_statement = false;
+		while (!BlockEnd()) {
+			if (Peek() == ";") {
+				semicolons.push_back(tokens[position++]->offset);
+				previous_statement = false;
+				continue;
+			}
+			if (previous_statement && tokens[position - 1]->text != "end")
+				boundaries.push_back(tokens[position]->offset);
+			if (!Statement())
+				return false;
+			previous_statement = true;
+		}
+		return true;
+	}
+
+	public:
+	StatementBoundaries(std::vector<Token> const& source, std::vector<size_t>& boundaries, std::vector<size_t>& semicolons)
+		: boundaries(boundaries), semicolons(semicolons) {
+		for (auto const& token : source)
+			if (token.kind != TokenKind::Comment && token.kind != TokenKind::Header)
+				tokens.push_back(&token);
+	}
+	bool Read() { return Block() && position == tokens.size(); }
+};
 
 std::string InsertSeparators(std::string_view source, std::vector<size_t> const& offsets) {
 	std::string output;
@@ -311,14 +501,9 @@ std::string InsertSeparators(std::string_view source, std::vector<size_t> const&
 	return output;
 }
 
-std::string ReplaceSeparators(std::string_view source, std::vector<size_t> const& offsets) {
-	std::string output(source);
-	for (auto offset : offsets)
-		output[offset] = ',';
-	return output;
-}
-
 std::optional<LuaSourceDiagnostic> FindStatementBoundaries(std::string_view source, std::vector<Token> const& tokens, std::vector<size_t>& boundaries, std::vector<size_t>& statement_semicolons) {
+	if (!StatementBoundaries(tokens, boundaries, statement_semicolons).Read())
+		return LuaSourceDiagnostic{.message = "Unable to read Lua statement structure"};
 	LuaState state(luaL_newstate(), lua_close);
 	if (!state)
 		return LuaSourceDiagnostic{.message = "Unable to allocate a Lua compiler state"};
@@ -326,90 +511,8 @@ std::optional<LuaSourceDiagnostic> FindStatementBoundaries(std::string_view sour
 	if (!original)
 		return LuaError(state.get());
 
-	std::vector<size_t> candidates;
-	std::vector<size_t> structural_boundaries;
-	bool function_parameters = false;
-	for (size_t i = 0; i < tokens.size(); ++i) {
-		if (tokens[i].kind == TokenKind::Keyword && tokens[i].text == "function")
-			function_parameters = true;
-		else if (function_parameters && tokens[i].text == ")") {
-			function_parameters = false;
-			if (i + 1 < tokens.size())
-				structural_boundaries.push_back(tokens[i + 1].offset);
-		}
-	}
-	for (size_t i = 1; i < tokens.size(); ++i) {
-		if (tokens[i - 1].text == ";" || tokens[i - 1].text == "end" || std::ranges::binary_search(structural_boundaries, tokens[i].offset) || !CanEndStatement(tokens[i - 1]) || !CanStartStatement(tokens[i]))
-			continue;
-		if (tokens[i].text == "(") {
-			size_t previous = i;
-			while (previous && (tokens[previous - 1].kind == TokenKind::Comment || tokens[previous - 1].kind == TokenKind::Header))
-				--previous;
-			if (previous && (tokens[previous - 1].kind == TokenKind::Identifier || tokens[previous - 1].text == ")" || tokens[previous - 1].text == "]"))
-				continue;
-		}
-		candidates.push_back(tokens[i].offset);
-	}
-
-	auto find = [&](auto&& self, size_t first, size_t last) -> void {
-		if (first == last)
-			return;
-		std::vector<size_t> probe_offsets(candidates.begin() + static_cast<std::ptrdiff_t>(first), candidates.begin() + static_cast<std::ptrdiff_t>(last));
-		auto const probe = DumpBytecode(state.get(), InsertSeparators(source, probe_offsets));
-		if (probe && *probe == *original) {
-			boundaries.insert(boundaries.end(), probe_offsets.begin(), probe_offsets.end());
-			return;
-		}
-		if (last - first == 1)
-			return;
-		auto const middle = first + (last - first) / 2;
-		self(self, first, middle);
-		self(self, middle, last);
-	};
-	find(find, 0, candidates.size());
-	std::ranges::sort(boundaries);
 	if (auto const separated = DumpBytecode(state.get(), InsertSeparators(source, boundaries)); !separated || *separated != *original)
 		return LuaSourceDiagnostic{.message = "Unable to preserve Lua statement structure while formatting"};
-
-	std::vector<size_t> semicolons;
-	size_t table_depth = 0;
-	for (auto const& token : tokens) {
-		if (token.text == "{")
-			++table_depth;
-		else if (token.text == "}")
-			--table_depth;
-		else if (token.text == ";") {
-			if (table_depth)
-				semicolons.push_back(token.offset);
-			else
-				statement_semicolons.push_back(token.offset);
-		}
-	}
-	std::vector<size_t> table_semicolons;
-	auto find_table_semicolons = [&](auto&& self, size_t first, size_t last) -> void {
-		if (first == last)
-			return;
-		std::vector<size_t> probe_offsets(semicolons.begin() + static_cast<std::ptrdiff_t>(first), semicolons.begin() + static_cast<std::ptrdiff_t>(last));
-		auto const probe = DumpBytecode(state.get(), ReplaceSeparators(source, probe_offsets));
-		if (probe && *probe == *original) {
-			table_semicolons.insert(table_semicolons.end(), probe_offsets.begin(), probe_offsets.end());
-			return;
-		}
-		if (last - first == 1)
-			return;
-		auto const middle = first + (last - first) / 2;
-		self(self, first, middle);
-		self(self, middle, last);
-	};
-	find_table_semicolons(find_table_semicolons, 0, semicolons.size());
-	std::ranges::sort(table_semicolons);
-	if (auto const replaced = DumpBytecode(state.get(), ReplaceSeparators(source, table_semicolons)); !replaced || *replaced != *original)
-		return LuaSourceDiagnostic{.message = "Unable to preserve Lua separator structure while formatting"};
-	for (auto offset : semicolons) {
-		if (!std::ranges::binary_search(table_semicolons, offset))
-			statement_semicolons.push_back(offset);
-	}
-	std::ranges::sort(statement_semicolons);
 	return std::nullopt;
 }
 }
@@ -486,7 +589,7 @@ LuaSourceResult FormatLuaSource(std::string_view source) {
 			indent = std::max(0, indent - 1);
 			newline();
 		}
-		if (std::ranges::binary_search(boundaries, token.offset))
+		if (std::ranges::binary_search(boundaries, token.offset) || (token.kind == TokenKind::Comment && token.newline_before))
 			newline();
 		if (output.empty() || output.back() == '\n')
 			output.append(static_cast<size_t>(indent), '\t');
