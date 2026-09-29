@@ -48,7 +48,7 @@ class LuaWorkspaceLanguage final : public wxEvtHandler {
 	std::string directory_option;
 	std::string includes_option;
 
-	void Synchronize();
+	void Synchronize(bool document_changed = false);
 	void Invalidate();
 	void ClearDiagnostics();
 	void ClearTip();

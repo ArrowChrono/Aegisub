@@ -1575,9 +1575,27 @@ static int RunLanguageSettings(string exe, string artifacts)
         GuardedKeyboard.FocusEditor(editor!, host!);
         GuardedKeyboard.SendChord(editor!, host!, 'Z');
         WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == prefix, TimeSpan.FromSeconds(5), $"{stage} one Undo did not remove the local completion");
+        WriteEditor(editor!, "return aegisub", host!);
+        GuardedKeyboard.FocusEditor(editor!, host!);
+        GuardedKeyboard.SendChord(editor!, host!, (ushort)0x23);
+        GuardedKeyboard.TypeText(editor!, host!, ".");
+        WaitUntil(() => FindVisibleLanguagePopup(workspace!, host!, "AutoCompListBox") is not null,
+            TimeSpan.FromSeconds(5), $"{stage} automatic local completion did not open after dot");
+        GuardedKeyboard.TypeText(editor!, host!, "text_ex");
+        _ = host!.WaitForInputIdle(TimeSpan.FromMilliseconds(500));
+        WaitUntil(() => FindVisibleLanguagePopup(workspace!, host!, "AutoCompListBox") is not null,
+            TimeSpan.FromSeconds(5), $"{stage} local completion did not survive typed filtering");
+        GuardedKeyboard.SendKey(editor!, host!, 0x0D);
+        WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == "return aegisub.text_extents", TimeSpan.FromSeconds(5),
+            $"{stage} filtered local completion did not replace the current prefix");
+        File.WriteAllText(Path.Combine(artifacts, $"settings-{stage}-filtered-completion.lua"), NormalizeSource(ReadEditor(editor!)), new UTF8Encoding(false));
+        GuardedKeyboard.FocusEditor(editor!, host!);
+        GuardedKeyboard.SendChord(editor!, host!, 'Z');
+        WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == prefix, TimeSpan.FromSeconds(5),
+            $"{stage} filtered completion Undo did not restore the exact typed prefix");
         if (signature)
         {
-            WriteEditor(editor!, "return aegisub.text_extents(", host!);
+            WriteEditor(editor!, "return aegisub . text_extents (", host!);
             GuardedKeyboard.FocusEditor(editor!, host!);
             GuardedKeyboard.SendChord(editor!, host!, (ushort)0x23);
             GuardedKeyboard.SendChord(editor!, host!, (ushort)0x20, shift: true);
@@ -1591,11 +1609,11 @@ static int RunLanguageSettings(string exe, string artifacts)
             localVisualEvidence.Add(signatureEvidence);
             GuardedKeyboard.FocusEditor(editor!, host!);
             GuardedKeyboard.SendKey(editor!, host!, 0x1B);
-            WriteEditor(editor!, "return aegisub.text_extents(style", host!);
+            WriteEditor(editor!, "return aegisub . text_extents (style", host!);
             GuardedKeyboard.FocusEditor(editor!, host!);
             GuardedKeyboard.SendChord(editor!, host!, (ushort)0x23);
             GuardedKeyboard.TypeText(editor!, host!, ",");
-            WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == "return aegisub.text_extents(style,", TimeSpan.FromSeconds(5),
+            WaitUntil(() => NormalizeSource(ReadEditor(editor!)) == "return aegisub . text_extents (style,", TimeSpan.FromSeconds(5),
                 "Typing the second argument separator changed the host call source");
             popup = null;
             WaitUntil(() => (popup = FindVisibleLanguagePopup(workspace!, host!, "wxSTCCallTip")) is not null,

@@ -36,6 +36,16 @@ bool HostNamePart(int character) {
 	return HostNameStart(character) || (character >= '0' && character <= '9');
 }
 
+int SkipHostSpace(wxStyledTextCtrl *editor, int end) {
+	while (end > 0) {
+		auto character = editor->GetCharAt(end - 1);
+		if (character != ' ' && character != '\t' && character != '\r' && character != '\n' && character != '\v' && character != '\f')
+			break;
+		--end;
+	}
+	return end;
+}
+
 bool IsLuaStringStyle(int style) {
 	switch (style) {
 		case wxSTC_LUA_STRING:
@@ -140,6 +150,8 @@ void LuaWorkspaceLanguage::Invalidate() {
 }
 
 void LuaWorkspaceLanguage::Update(LuaWorkspaceDocument const *value, unsigned code_scopes) {
+	bool changed = value ? !document || document->identity != value->GetSourceIdentity() || document->revision != value->GetRevision() || document->source != value->GetSource() || document->filename != value->GetFilename() || scopes != code_scopes
+						 : document.has_value();
 	if (!value) {
 		document.reset();
 		scopes.reset();
@@ -159,15 +171,16 @@ void LuaWorkspaceLanguage::Update(LuaWorkspaceDocument const *value, unsigned co
 			scopes = code_scopes;
 		}
 	}
-	Synchronize();
+	Synchronize(changed);
 }
 
 void LuaWorkspaceLanguage::SetActive(bool value) {
+	bool changed = active != value;
 	active = value;
-	Synchronize();
+	Synchronize(changed);
 }
 
-void LuaWorkspaceLanguage::Synchronize() {
+void LuaWorkspaceLanguage::Synchronize(bool document_changed) {
 	try {
 		bool previous_enabled = enabled;
 		auto previous_directory = directory_option;
@@ -188,7 +201,7 @@ void LuaWorkspaceLanguage::Synchronize() {
 		}
 		auto next = server.Update(configuration, active && enabled ? document : std::nullopt);
 		configuration_error = false;
-		if (next != generation) {
+		if (document_changed || next != generation) {
 			generation = next;
 			Invalidate();
 			status->SetLabel(!enabled ? _("LuaLS: disabled; local host hints (limited)") : !active || !document ? _("LuaLS: inactive")
@@ -211,13 +224,14 @@ void LuaWorkspaceLanguage::Synchronize() {
 
 std::string LuaWorkspaceLanguage::HostReceiver(int end) const {
 	std::string path;
-	int cursor = end - 1;
+	int cursor = SkipHostSpace(editor, end) - 1;
 	while (cursor >= 0 && editor->GetCharAt(cursor) == '.') {
-		int segment_end = cursor--;
+		int segment_end = SkipHostSpace(editor, cursor);
+		cursor = segment_end - 1;
 		while (cursor >= 0 && HostNamePart(editor->GetCharAt(cursor)))
 			--cursor;
 		int start = cursor + 1;
-		if (start == segment_end || !HostNameStart(editor->GetCharAt(start)))
+		if (start == segment_end || !HostNameStart(editor->GetCharAt(start)) || IsLuaTextStyle(editor->GetStyleAt(start)))
 			return {};
 		auto segment = from_wx(editor->GetTextRange(start, segment_end));
 		if (path.empty())
@@ -226,6 +240,7 @@ std::string LuaWorkspaceLanguage::HostReceiver(int end) const {
 			path.insert(0, ".");
 			path.insert(0, segment);
 		}
+		cursor = SkipHostSpace(editor, start) - 1;
 	}
 	return path;
 }
@@ -360,6 +375,7 @@ void LuaWorkspaceLanguage::Request(LuaLanguageRequest kind, int position) {
 			reject();
 			return;
 		}
+		word_end = SkipHostSpace(editor, word_end);
 	}
 	else
 		while (word_end < editor->GetTextLength() && HostNamePart(editor->GetCharAt(word_end)))
