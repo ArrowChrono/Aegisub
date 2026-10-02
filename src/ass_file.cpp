@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <cassert>
+#include <libaegisub/character_count.h>
 #include <libaegisub/format.h>
 #include <libaegisub/fs.h>
 #include <libaegisub/log.h>
@@ -348,6 +349,12 @@ bool AssFile::CompText(AssDialogue const& lft, AssDialogue const& rgt) {
 }
 bool AssFile::CompTextStripped(AssDialogue const& lft, AssDialogue const& rgt) {
 	return lft.GetStrippedText() < rgt.GetStrippedText();
+}
+bool AssFile::CompTextLength(AssDialogue const& lft, AssDialogue const& rgt) {
+	return agi::CharacterCount(lft.Text.get(), agi::IGNORE_NONE) < agi::CharacterCount(rgt.Text.get(), agi::IGNORE_NONE);
+}
+bool AssFile::CompTextStrippedLength(AssDialogue const& lft, AssDialogue const& rgt) {
+	return agi::RenderedTextCharacterCount(lft.Text.get(), agi::IGNORE_BLOCKS) < agi::RenderedTextCharacterCount(rgt.Text.get(), agi::IGNORE_BLOCKS);
 }
 
 void AssFile::Sort(CompFunc comp, std::set<AssDialogue*> const& limit) {

@@ -127,6 +127,8 @@
         { "command" : "grid/sort/effect" },
         { "command" : "grid/sort/text" },
         { "command" : "grid/sort/text_stripped" },
+        { "command" : "grid/sort/text_length" },
+        { "command" : "grid/sort/text_stripped_length" },
         { "command" : "grid/sort/layer" }
     ],
     "main/subtitle/sort selected lines" : [
@@ -137,6 +139,8 @@
         { "command" : "grid/sort/effect/selected" },
         { "command" : "grid/sort/text/selected" },
         { "command" : "grid/sort/text_stripped/selected" },
+        { "command" : "grid/sort/text_length/selected" },
+        { "command" : "grid/sort/text_stripped_length/selected" },
         { "command" : "grid/sort/layer/selected" }
     ],
     "main/timing" : [

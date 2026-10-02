@@ -28,6 +28,16 @@ std::vector<int> StartOrder(AssFile const& file) {
 	return order;
 }
 
+// Shared text for comparator tests: "{\i1}ab" is raw 7 characters / rendered 2,
+// "abc" is 3 / 3, and "a\Nb" is 4 / 2 (a line break renders as no character).
+void AddTextSortLines(AssFile& file, std::vector<AssDialogue *>& lines) {
+	for (int start : {10, 20, 30})
+		lines.push_back(AddLine(file, start));
+	lines[0]->Text = "{\\i1}ab";
+	lines[1]->Text = "abc";
+	lines[2]->Text = "a\\Nb";
+}
+
 } // namespace
 
 TEST(ass_file_sort, whole_file_sorts_every_line_by_start_time) {
@@ -169,4 +179,39 @@ TEST(ass_file_sort, other_comparators_sort_selected_blocks_too) {
 	for (auto const& line : file.Events)
 		layers.push_back(line.Layer);
 	EXPECT_EQ(std::vector<int>({1, 3, 5}), layers);
+}
+
+TEST(ass_file_sort, text_comparators_use_raw_and_stripped_text) {
+	AssFile file;
+	std::vector<AssDialogue *> lines;
+	AddTextSortLines(file, lines);
+
+	// Raw byte order: '{' (0x7B) sorts after 'a', '\' (0x5C) before 'b'.
+	file.Sort(AssFile::CompText);
+	EXPECT_EQ(std::vector<int>({30, 20, 10}), StartOrder(file));
+
+	// Override blocks are dropped, but \N inside plain text is kept.
+	file.Sort(AssFile::CompTextStripped);
+	EXPECT_EQ(std::vector<int>({30, 10, 20}), StartOrder(file));
+}
+
+TEST(ass_file_sort, text_length_counts_raw_text_including_tags) {
+	AssFile file;
+	std::vector<AssDialogue *> lines;
+	AddTextSortLines(file, lines);
+
+	// 3 ("abc") < 4 ("a\Nb") < 7 ("{\i1}ab")
+	file.Sort(AssFile::CompTextLength);
+	EXPECT_EQ(std::vector<int>({20, 30, 10}), StartOrder(file));
+}
+
+TEST(ass_file_sort, stripped_length_counts_rendered_characters) {
+	AssFile file;
+	std::vector<AssDialogue *> lines;
+	AddTextSortLines(file, lines);
+
+	// "{\i1}ab" and "a\Nb" both render as two characters and keep their
+	// relative order (stable sort); "abc" renders as three.
+	file.Sort(AssFile::CompTextStrippedLength);
+	EXPECT_EQ(std::vector<int>({10, 30, 20}), StartOrder(file));
 }

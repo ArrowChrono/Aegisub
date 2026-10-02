@@ -595,6 +595,58 @@ struct grid_sort_text_stripped_selected final : public validate_sel_multiple {
 	}
 };
 
+struct grid_sort_text_length final : public Command {
+	CMD_NAME("grid/sort/text_length")
+	STR_MENU("Text by &Length")
+	STR_DISP("Text by Length")
+	STR_HELP("Sort all subtitles by the length of their text, including styling tags")
+
+	void operator()(agi::Context *c) override {
+		auto *ass = c->GetCore().ass.get();
+		ass->Sort(AssFile::CompTextLength);
+		ass->Commit(from_wx(_("sort")), AssFile::COMMIT_ORDER);
+	}
+};
+
+struct grid_sort_text_length_selected final : public validate_sel_multiple {
+	CMD_NAME("grid/sort/text_length/selected")
+	STR_MENU("Text by &Length")
+	STR_DISP("Text by Length")
+	STR_HELP("Sort selected subtitles by the length of their text, including styling tags")
+
+	void operator()(agi::Context *c) override {
+		auto core = c->GetCore();
+		core.ass->Sort(AssFile::CompTextLength, core.selectionController->GetSelectedSet());
+		core.ass->Commit(from_wx(_("sort")), AssFile::COMMIT_ORDER);
+	}
+};
+
+struct grid_sort_text_stripped_length final : public Command {
+	CMD_NAME("grid/sort/text_stripped_length")
+	STR_MENU("Stripped Text by Lengt&h")
+	STR_DISP("Stripped Text by Length")
+	STR_HELP("Sort all subtitles by the length of their rendered text")
+
+	void operator()(agi::Context *c) override {
+		auto *ass = c->GetCore().ass.get();
+		ass->Sort(AssFile::CompTextStrippedLength);
+		ass->Commit(from_wx(_("sort")), AssFile::COMMIT_ORDER);
+	}
+};
+
+struct grid_sort_text_stripped_length_selected final : public validate_sel_multiple {
+	CMD_NAME("grid/sort/text_stripped_length/selected")
+	STR_MENU("Stripped Text by Lengt&h")
+	STR_DISP("Stripped Text by Length")
+	STR_HELP("Sort selected subtitles by the length of their rendered text")
+
+	void operator()(agi::Context *c) override {
+		auto core = c->GetCore();
+		core.ass->Sort(AssFile::CompTextStrippedLength, core.selectionController->GetSelectedSet());
+		core.ass->Commit(from_wx(_("sort")), AssFile::COMMIT_ORDER);
+	}
+};
+
 struct grid_tag_cycle_hiding final : public Command {
 	CMD_NAME("grid/tag/cycle_hiding")
 	CMD_ICON(toggle_tag_hiding)
@@ -749,6 +801,8 @@ namespace cmd {
 		reg(agi::make_unique<grid_sort_style>());
 		reg(agi::make_unique<grid_sort_text>());
 		reg(agi::make_unique<grid_sort_text_stripped>());
+		reg(agi::make_unique<grid_sort_text_length>());
+		reg(agi::make_unique<grid_sort_text_stripped_length>());
 		reg(agi::make_unique<grid_sort_actor_selected>());
 		reg(agi::make_unique<grid_sort_effect_selected>());
 		reg(agi::make_unique<grid_sort_end_selected>());
@@ -757,6 +811,8 @@ namespace cmd {
 		reg(agi::make_unique<grid_sort_style_selected>());
 		reg(agi::make_unique<grid_sort_text_selected>());
 		reg(agi::make_unique<grid_sort_text_stripped_selected>());
+		reg(agi::make_unique<grid_sort_text_length_selected>());
+		reg(agi::make_unique<grid_sort_text_stripped_length_selected>());
 		reg(agi::make_unique<grid_move_down>());
 		reg(agi::make_unique<grid_move_up>());
 		reg(agi::make_unique<grid_swap>());
