@@ -18,3 +18,8 @@ endif()
 
 set(VCPKG_BUILD_TYPE release)
 
+# MSVC 14.x maintains binary compatibility across servicing/toolset
+# updates. Avoid invalidating the entire vcpkg binary cache whenever
+# the hosted runner updates its compiler build.
+set(VCPKG_DISABLE_COMPILER_TRACKING ON)
+
