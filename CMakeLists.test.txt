@@ -262,6 +262,7 @@ if(GTEST_FOUND)
         tests/tests/keyframe.cpp
         tests/tests/line_iterator.cpp
         tests/tests/line_wrap.cpp
+        tests/tests/log.cpp
         tests/tests/locale_choice.cpp
         tests/tests/locale_pick.cpp
         tests/tests/lsmas_native_api_version.cpp
