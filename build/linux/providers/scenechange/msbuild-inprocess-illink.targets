@@ -1,0 +1,16 @@
+<Project>
+  <!-- Opt-in, build-local workaround for hosts that cannot create named-pipe
+       IPC task hosts. The official tasks run unchanged in this process;
+       trimming, validation and NativeAOT remain enabled. -->
+  <PropertyGroup Condition="'$(SceneChangeInProcessILLink)' == 'true'">
+    <SceneChangeILLinkTasks Condition="'$(SceneChangeILLinkTasks)' == ''">$(NuGetPackageRoot)microsoft.net.illink.tasks/10.0.12/tools/net/ILLink.Tasks.dll</SceneChangeILLinkTasks>
+  </PropertyGroup>
+  <UsingTask TaskName="ComputeManagedAssemblies"
+             AssemblyFile="$(SceneChangeILLinkTasks)"
+             Override="true"
+             Condition="'$(SceneChangeInProcessILLink)' == 'true'" />
+  <UsingTask TaskName="ILLink"
+             AssemblyFile="$(SceneChangeILLinkTasks)"
+             Override="true"
+             Condition="'$(SceneChangeInProcessILLink)' == 'true'" />
+</Project>

@@ -1,0 +1,1 @@
+{ global: scenechange_provider_get_api; local: *; };

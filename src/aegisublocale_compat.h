@@ -22,7 +22,25 @@ inline wxString FindPreferredTranslation(wxArrayString const& supported, wxVecto
 	auto try_match = [&](wxString const& candidate) -> wxString {
 		if (candidate.empty())
 			return {};
+		#if wxCHECK_VERSION(3, 3, 0)
 		return wxLocaleIdent::GetBestMatch(candidate, supported_vec);
+#else
+		// wxWidgets 3.2 has locale parsing but no GetBestMatch helper.
+		for (auto const& available : supported_vec)
+			if (available.CmpNoCase(candidate) == 0)
+				return available;
+		auto requested = wxLocaleIdent::FromTag(candidate);
+		if (requested.IsEmpty()) return {};
+		for (auto const& available : supported_vec) {
+			auto locale = wxLocaleIdent::FromTag(available);
+			if (!locale.IsEmpty() && locale.GetLanguage() == requested.GetLanguage()
+				&& locale.GetRegion() == requested.GetRegion()
+				&& locale.GetModifier() == requested.GetModifier()
+				&& locale.GetScript() == requested.GetScript())
+				return available;
+		}
+		return {};
+#endif
 	};
 
 	for (auto const& preferred : preferred_languages) {

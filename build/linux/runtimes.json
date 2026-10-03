@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "runtimes": [
+    {
+      "source": "provider-libass/prefix/lib/libass.so.9.4.2",
+      "destination": "bin/runtimes/libass.so.9",
+      "aliases": [
+        "bin/runtimes/libass.so"
+      ]
+    },
+    {
+      "source": "provider-media/artifacts/lib/libffms2.so.5.0.0",
+      "destination": "bin/runtimes/libffms2.so"
+    },
+    {
+      "source": "provider-media/artifacts/lib/libragbag-subtitle-ffmpeg.so",
+      "destination": "bin/runtimes/libragbag-subtitle-ffmpeg.so"
+    },
+    {
+      "source": "provider-placebo/prefix/lib/libplacebo.so.360",
+      "destination": "bin/runtimes/libplacebo.so"
+    },
+    {
+      "source": "provider-avisynth/prefix/lib/libavisynth.so.3.7.5",
+      "destination": "bin/runtimes/libavisynth.so"
+    },
+    {
+      "source": "provider-scenechange/output/libscenechange_wwxd.so",
+      "destination": "bin/runtimes/libscenechange_wwxd.so"
+    },
+    {
+      "source": "provider-scenechange/output/libscenechange_xvid.so",
+      "destination": "bin/runtimes/libscenechange_xvid.so"
+    },
+    {
+      "source": "provider-lsmasnative/artifacts/lib/liblsmasnative.so",
+      "destination": "bin/runtimes/liblsmasnative.so"
+    }
+  ]
+}

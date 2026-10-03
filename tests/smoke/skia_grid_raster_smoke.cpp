@@ -3,6 +3,7 @@
 
 #include <libaegisub/color.h>
 
+#include <wx/app.h>
 #include <wx/bitmap.h>
 #include <wx/dcmemory.h>
 #include <wx/font.h>
@@ -16,6 +17,11 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#endif
+
+// GTK font/bitmap APIs need a real GUI app, not wxInitializer's console fallback.
+#ifdef __WXGTK__
+wxIMPLEMENT_APP_NO_MAIN(wxApp);
 #endif
 
 namespace {

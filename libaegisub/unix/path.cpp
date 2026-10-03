@@ -20,6 +20,7 @@
 #include <libaegisub/fs.h>
 #include <libaegisub/util_osx.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <pwd.h>
 
@@ -45,7 +46,8 @@ void Path::FillPlatformSpecificPaths() {
 	agi::fs::path home = agi::fs::PathFromString(home_dir());
 	SetToken("?user", home/".aegisub");
 	SetToken("?local", home/".aegisub");
-	SetToken("?data", P_DATA);
+	const char *data_dir = std::getenv("AEGISUB_DATA_DIR");
+	SetToken("?data", data_dir && *data_dir ? data_dir : P_DATA);
 	SetToken("?dictionary", "/usr/share/hunspell");
 #else
 	agi::fs::path app_support = agi::util::GetApplicationSupportDirectory();

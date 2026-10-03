@@ -6,6 +6,10 @@
 #include <windows.h>
 #elif !defined(__APPLE__)
 #include <GL/glx.h>
+// Xlib's None macro conflicts with scoped enum values in application headers.
+#ifdef None
+#undef None
+#endif
 #else
 #include <dlfcn.h>
 #endif

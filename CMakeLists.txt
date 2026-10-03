@@ -407,7 +407,8 @@ if(ass_RUNTIME_LIBRARY)
 else()
     message(STATUS "libass runtime not provided; the provider will be unavailable unless a runtime is installed at deployment time")
 endif()
-find_package(Boost CONFIG REQUIRED COMPONENTS container locale regex spirit)
+# Spirit is header-only and some Linux distributions do not ship its component config.
+find_package(Boost CONFIG REQUIRED COMPONENTS container locale regex)
 find_package(hwy REQUIRED CONFIG)
 # Boost::regex needs ICU on Boost < 1.76.0 without the dedicated regex_icu target.
 if(TARGET Boost::regex_icu)
@@ -422,6 +423,28 @@ find_package(ZLIB REQUIRED)
 find_package(Iconv REQUIRED)
 find_package(pugixml CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
+option(AEGISUB_PREFER_STATIC_DEPS "Prefer available static dependency targets" OFF)
+if(AEGISUB_PREFER_STATIC_DEPS)
+    if(TARGET ICU::in AND TARGET ICU::dt)
+        set_property(TARGET ICU::in APPEND PROPERTY INTERFACE_LINK_LIBRARIES ICU::uc ICU::dt)
+        set_property(TARGET ICU::uc APPEND PROPERTY INTERFACE_LINK_LIBRARIES ICU::dt)
+    endif()
+    if(TARGET pugixml::static)
+        set_property(TARGET pugixml::pugixml PROPERTY
+            INTERFACE_LINK_LIBRARIES pugixml::static)
+    endif()
+    # Debian Boost exports bare ICU names; use the selected ICU targets.
+    foreach(_boost_icu_target Boost::locale Boost::regex)
+        get_target_property(_boost_locale_deps ${_boost_icu_target} INTERFACE_LINK_LIBRARIES)
+        if(_boost_locale_deps)
+            list(TRANSFORM _boost_locale_deps REPLACE "^icudata$" "ICU::dt")
+            list(TRANSFORM _boost_locale_deps REPLACE "^icui18n$" "ICU::in")
+            list(TRANSFORM _boost_locale_deps REPLACE "^icuuc$" "ICU::uc")
+            set_property(TARGET ${_boost_icu_target} PROPERTY
+                INTERFACE_LINK_LIBRARIES "${_boost_locale_deps}")
+        endif()
+    endforeach()
+endif()
 option(WITH_LIBPLACEBO "Enable optional runtime-loaded libplacebo renderer support" ON)
 set(HAVE_LIBPLACEBO OFF)
 if(WITH_LIBPLACEBO)
@@ -632,7 +655,8 @@ add_custom_target(aegisub_generated_resources
 )
 
 add_subdirectory("vendor/csri")
-target_sources(csri PRIVATE src/csri_native_library_bridge.cpp)
+target_sources(csri PRIVATE src/csri_native_library_bridge.cpp src/csri_renderer_discovery.cpp)
+target_link_libraries(csri PRIVATE libaegisub)
 target_include_directories(csri PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/libaegisub/include")
 target_compile_features(csri PRIVATE cxx_std_20)
 if(WITH_CSRI)
@@ -965,8 +989,6 @@ set(AEGISUB_CORE_SOURCES
     src/automation/lua_language_server.cpp
     src/automation/lua_language_server_process.cpp
     src/automation/engine/automation_engine_registry.cpp
-    # CSRI bridge (renderer discovery + native library bridge)
-    src/csri_renderer_discovery.cpp
     # Fonts (cross-platform core)
     src/font_collector_core.cpp
     src/font_collector_unicode.cpp
@@ -1602,7 +1624,8 @@ endif()
 find_package(wxWidgets REQUIRED adv base core gl propgrid stc)
 option(WITH_WXSTC "Enable wxStyledTextCtrl support" ON)
 function(aegisub_enable_wx_utf8_guard target_name)
-    if(TARGET ${target_name})
+    # wxStyledTextCtrl 3.2 uses narrow default names in its public header.
+    if(TARGET ${target_name} AND NOT wxWidgets_VERSION_STRING VERSION_LESS "3.3")
         target_compile_definitions(${target_name} PRIVATE "wxNO_IMPLICIT_WXSTRING_ENCODING")
     endif()
 endfunction()
