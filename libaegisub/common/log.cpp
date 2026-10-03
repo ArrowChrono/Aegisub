@@ -21,6 +21,7 @@
 #include "libaegisub/io.h"
 #include "libaegisub/util.h"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <mutex>
@@ -166,7 +167,14 @@ Message::Message(const char* section, Severity severity, const char* func, int l
 }
 
 Message::~Message() {
-	sm.message = std::string(buffer, (std::string::size_type)msg.tellp());
+	// tellp() reports -1 after a fixed-buffer overflow; never turn that into
+	// an enormous size_t from this noexcept destructor. The streambuf keeps
+	// its actual write position even when the ostream failbit is set.
+	auto written = static_cast<std::streamoff>(msg.rdbuf()->pubseekoff(
+		0, std::ios_base::cur, std::ios_base::out));
+	auto length = static_cast<std::string::size_type>(
+		std::clamp<std::streamoff>(written, 0, sizeof buffer));
+	sm.message.assign(buffer, length);
 	if (agi::log::log)
 		agi::log::log->Log(sm);
 }
