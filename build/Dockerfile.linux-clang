@@ -1,0 +1,17 @@
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates clang g++ cmake ninja-build git pkg-config gettext python3 \
+    libass-dev libboost-container-dev libboost-locale-dev libboost-regex-dev \
+    libicu-dev zlib1g-dev libfontconfig1-dev \
+    libwxgtk3.2-dev libgl1-mesa-dev libhwy-dev libcli11-dev libpugixml-dev \
+    libebml-dev libmatroska-dev libgtest-dev libasound2-dev \
+    libhunspell-dev libuchardet-dev libffms2-dev libfftw3-dev libplacebo-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+WORKDIR /work
+CMD ["bash", "/source/build/build-linux-clang-container.sh"]

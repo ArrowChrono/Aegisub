@@ -1,0 +1,9 @@
+if(NOT DEFINED ENV{AEGISUB_CLANG_CL} OR NOT DEFINED ENV{VCPKG_ROOT})
+    message(FATAL_ERROR "Use build/build-win-clang.ps1 to initialize the clang-cl environment")
+endif()
+
+set(CMAKE_C_COMPILER "$ENV{AEGISUB_CLANG_CL}" CACHE FILEPATH "")
+set(CMAKE_CXX_COMPILER "$ENV{AEGISUB_CLANG_CL}" CACHE FILEPATH "")
+set(CMAKE_NINJA_CMCLDEPS_RC 0)
+set(CMAKE_RC_COMPILE_OBJECT "<CMAKE_RC_COMPILER> <DEFINES> <INCLUDES> <FLAGS> /fo <OBJECT> <SOURCE>" CACHE STRING "")
+include("$ENV{VCPKG_ROOT}/scripts/toolchains/windows.cmake")

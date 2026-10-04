@@ -401,6 +401,25 @@ endif()
 # These find_package calls and the highway helper are hoisted here so they are
 # available before aegisub_core is defined below, and remain valid for Aegisub.
 find_package(ass REQUIRED)
+if(Ragbag_INCLUDE_DIR AND NOT IS_ABSOLUTE "${Ragbag_INCLUDE_DIR}")
+    get_filename_component(Ragbag_INCLUDE_DIR "${Ragbag_INCLUDE_DIR}"
+        ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    set(Ragbag_INCLUDE_DIR "${Ragbag_INCLUDE_DIR}" CACHE PATH
+        "Include root containing ragbag/subtitle_plugin_api.h" FORCE)
+endif()
+find_path(Ragbag_INCLUDE_DIR
+    NAMES ragbag/subtitle_plugin_api.h
+    HINTS "${CMAKE_SOURCE_DIR}/include"
+    DOC "Include root containing ragbag/subtitle_plugin_api.h"
+)
+if(NOT Ragbag_INCLUDE_DIR
+   OR NOT EXISTS "${Ragbag_INCLUDE_DIR}/ragbag/subtitle_plugin_api.h")
+    message(FATAL_ERROR
+        "The RagBag decoder ABI header ragbag/subtitle_plugin_api.h is required. "
+        "Set -DRagbag_INCLUDE_DIR=<include-root> to the directory containing it; "
+        "relative paths are resolved from the source root."
+    )
+endif()
 message(STATUS "Found libass headers: ${ass_INCLUDE_DIR}")
 if(ass_RUNTIME_LIBRARY)
     message(STATUS "Found libass runtime for staging: ${ass_RUNTIME_LIBRARY}")
@@ -1146,6 +1165,7 @@ target_link_libraries(aegisub_core PRIVATE luajit)
 # and would force Static Core C API consumers to provide ass::headers.
 target_include_directories(aegisub_core PRIVATE
     $<BUILD_INTERFACE:${ass_INCLUDE_DIR}>
+    "$<BUILD_INTERFACE:${Ragbag_INCLUDE_DIR}>"
 )
 target_link_libraries(aegisub_core PRIVATE aegisub_core_features "Boost::headers" "Boost::container" "Boost::locale" ${AEGISUB_REGEX_TARGET})
 target_link_libraries(aegisub_core PRIVATE pugixml::pugixml)

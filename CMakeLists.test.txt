@@ -743,6 +743,16 @@ if(GTEST_FOUND)
         "GTest::GTest"
         "GTest::Main"
     )
+    if(WIN32)
+        target_sources(font-collector-state-test PRIVATE
+            src/perf_trace.cpp
+            src/app_process_config.cpp
+        )
+        target_link_libraries(font-collector-state-test PRIVATE
+            ${wxWidgets_LIBRARIES}
+            Psapi
+        )
+    endif()
     if(BUILD_TESTING)
         add_test(
             NAME font_collector_state
