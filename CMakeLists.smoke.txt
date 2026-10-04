@@ -319,6 +319,15 @@ target_compile_features(provider-manager-registry-smoke PRIVATE cxx_std_20)
 target_compile_definitions(provider-manager-registry-smoke PRIVATE CMAKE_BUILD)
 target_link_libraries(provider-manager-registry-smoke PRIVATE aegisub_core libaegisub luajit)
 
+if(HAVE_LSMASNATIVE)
+    add_executable(lsmas-provider-smoke EXCLUDE_FROM_ALL
+        tests/smoke/lsmas_provider_smoke.cpp)
+    target_compile_features(lsmas-provider-smoke PRIVATE cxx_std_20)
+    target_compile_definitions(lsmas-provider-smoke PRIVATE CMAKE_BUILD)
+    target_include_directories(lsmas-provider-smoke PRIVATE "${PROJECT_SOURCE_DIR}/vendor/lsmasnative")
+    target_link_libraries(lsmas-provider-smoke PRIVATE aegisub_core libaegisub luajit)
+endif()
+
 if(HAVE_LSMASNATIVE AND HAVE_SCENECHANGE)
     set(AEGISUB_SCENECHANGE_SMOKE_VIDEO "" CACHE FILEPATH
         "Optional media fixture used by the LsmasNative/SceneChange integration smoke")
@@ -603,6 +612,7 @@ if(WITH_SKIA_SUBTITLE_GRID)
         tests/smoke/perf_trace_audio_stub.cpp
         src/skia_grid_renderer.cpp
         src/skia_grid_text_backend_skshaper.cpp
+        src/grid_core/subtitle_grid_renderer_contract.cpp
     )
     if(WIN32)
         target_sources(skia-grid-raster-smoke PRIVATE

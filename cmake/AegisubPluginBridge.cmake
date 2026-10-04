@@ -116,7 +116,7 @@ if(AEGISUB_PLUGIN_BRIDGE_RUNTIME_DIR)
         "${_aegisub_plugin_bridge_coreclr_dir}/Aegisub.CoreClr.Adapter.dll"
         "${_aegisub_plugin_bridge_coreclr_dir}/Aegisub.CoreClr.Adapter.runtimeconfig.json"
         "${_aegisub_plugin_bridge_sample_dir}/Aegisub.Managed.SampleExtension.dll"
-        "${_aegisub_plugin_bridge_native_dir}/Aegisub.DependencyControl.NativeAot.dll")
+        "${_aegisub_plugin_bridge_native_dir}/Aegisub.DependencyControl.NativeAot${CMAKE_SHARED_LIBRARY_SUFFIX}")
         if(NOT EXISTS "${_aegisub_runtime_file}")
             message(FATAL_ERROR
                 "AEGISUB_PLUGIN_BRIDGE_RUNTIME_DIR is missing ${_aegisub_runtime_file}")
