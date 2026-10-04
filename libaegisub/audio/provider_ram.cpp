@@ -46,7 +46,9 @@ std::string FormatWrappedProviderName(char const* wrapper_name, AudioProvider co
 
 class RAMAudioProvider final : public AudioProviderWrapper {
 	const int64_t samples_per_block;
-#ifdef _MSC_VER
+	/* clang-cl rejects the array-type pseudo-destructor expression in
+	** boost::container::stable_vector's node destructor. */
+#if defined(_MSC_VER) && !defined(__clang__)
 	mutable boost::container::stable_vector<char[CacheBlockSize]> blockcache;
 #else
 	mutable boost::container::stable_vector<std::array<char, CacheBlockSize>> blockcache;

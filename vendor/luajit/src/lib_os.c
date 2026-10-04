@@ -38,6 +38,10 @@
 #if LJ_TARGET_WINDOWS
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+/* The _w* declarations must not depend on transitive includes. */
+#include <stdlib.h>
+#include <stdio.h>
+#include <wchar.h>
 
 static wchar_t *widen_static(const char *narrow, int idx)
 {

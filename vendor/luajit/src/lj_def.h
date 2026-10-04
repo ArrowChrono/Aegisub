@@ -263,19 +263,25 @@ static LJ_AINLINE uint32_t lj_fls(uint32_t x)
   return _CountLeadingZeros(x) ^ 31;
 }
 #else
+/* clang-cl provides real declarations in <intrin.h>; its own variants
+** conflict with the custom uint32_t-based prototypes below. */
+#ifdef __clang__
+#include <intrin.h>
+#else
 unsigned char _BitScanForward(uint32_t *, unsigned long);
 unsigned char _BitScanReverse(uint32_t *, unsigned long);
 #pragma intrinsic(_BitScanForward)
 #pragma intrinsic(_BitScanReverse)
+#endif
 
 static LJ_AINLINE uint32_t lj_ffs(uint32_t x)
 {
-  uint32_t r; _BitScanForward(&r, x); return r;
+  uint32_t r; _BitScanForward((unsigned long *)&r, x); return r;
 }
 
 static LJ_AINLINE uint32_t lj_fls(uint32_t x)
 {
-  uint32_t r; _BitScanReverse(&r, x); return r;
+  uint32_t r; _BitScanReverse((unsigned long *)&r, x); return r;
 }
 #endif
 
