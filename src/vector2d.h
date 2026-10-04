@@ -75,7 +75,7 @@ public:
 	/// Get as string with given separator with values rounded to ints
 	std::string DStr(char sep = ',') const;
 
-	static Vector2D FromAngle(float angle) { return Vector2D(cos(-angle), sin(-angle)); }
+	static Vector2D FromAngle(float angle) { return Vector2D(std::cos(-angle), std::sin(-angle)); }
 };
 
 Vector2D operator * (float f, Vector2D v);

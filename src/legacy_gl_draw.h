@@ -28,6 +28,8 @@
 
 namespace legacy_gl {
 
+using ClientActiveTextureProc = void (APIENTRY *)(GLenum);
+
 template <typename Proc>
 inline Proc LoadOptionalProc(char const *name, char const *fallback_name = nullptr) {
 	if (auto *proc = opengl::GetProcAddress(name))
@@ -41,7 +43,7 @@ inline Proc LoadOptionalProc(char const *name, char const *fallback_name = nullp
 
 struct CompatibilityFunctions {
 	PFNGLACTIVETEXTUREPROC ActiveTexture = nullptr;
-	PFNGLCLIENTACTIVETEXTUREPROC ClientActiveTexture = nullptr;
+	ClientActiveTextureProc ClientActiveTexture = nullptr;
 	PFNGLBINDBUFFERPROC BindBuffer = nullptr;
 	PFNGLUSEPROGRAMPROC UseProgram = nullptr;
 	PFNGLBINDVERTEXARRAYPROC BindVertexArray = nullptr;
@@ -51,7 +53,7 @@ struct CompatibilityFunctions {
 inline CompatibilityFunctions const& GetCompatibilityFunctions() {
 	static const CompatibilityFunctions functions = {
 		LoadOptionalProc<PFNGLACTIVETEXTUREPROC>("glActiveTexture"),
-		LoadOptionalProc<PFNGLCLIENTACTIVETEXTUREPROC>("glClientActiveTexture"),
+		LoadOptionalProc<ClientActiveTextureProc>("glClientActiveTexture"),
 		LoadOptionalProc<PFNGLBINDBUFFERPROC>("glBindBuffer"),
 		LoadOptionalProc<PFNGLUSEPROGRAMPROC>("glUseProgram"),
 		LoadOptionalProc<PFNGLBINDVERTEXARRAYPROC>("glBindVertexArray"),

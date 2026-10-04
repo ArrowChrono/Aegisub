@@ -146,8 +146,8 @@ public:
 		if (wxSpinCtrlDouble::GTKOutput(text))
 			return true;
 
-		*text = wxNumberFormatter::ToString(GetValue(), GetDigits());
-		wxNumberFormatter::RemoveTrailingZeroes(*text);
+		*text = wxNumberFormatter::ToString(GetValue(), GetDigits(),
+			wxNumberFormatter::Style_WithThousandsSep | wxNumberFormatter::Style_NoTrailingZeroes);
 		return true;
 	}
 };

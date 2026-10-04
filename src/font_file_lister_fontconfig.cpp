@@ -427,7 +427,11 @@ CollectionResult FontConfigFontFileLister::GetFontPaths(std::string const& facen
 	FcPatternAddInteger(pat, FC_SLANT, slant);
 	FcPatternAddInteger(pat, FC_WEIGHT, weight);
 
+	#if FC_VERSION >= 21700
 	FcConfigSetDefaultSubstitute(config, pat);
+#else
+	FcDefaultSubstitute(pat);
+#endif
 	if (!FcConfigSubstitute(config, pat, FcMatchPattern)) return ret;
 
 	// Create a font set with only correctly named fonts

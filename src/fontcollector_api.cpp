@@ -3,6 +3,7 @@
 #include <aegisub/fontcollector/fontcollector.h>
 
 #include "ass_file.h"
+#include "ass_style.h"
 #include "ass_io_core.h"
 #include "ass_dialogue.h"
 #include "font_collector_core.h"
