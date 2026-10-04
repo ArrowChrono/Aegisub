@@ -21,6 +21,7 @@ namespace aegisub::subtitle_edit_ops {
 enum class JoinMode {
 	Karaoke,
 	Concatenate,
+	WithLineBreaks,
 	KeepFirst
 };
 

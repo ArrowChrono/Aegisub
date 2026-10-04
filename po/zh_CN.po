@@ -6858,3 +6858,19 @@ msgstr "自动更新："
 
 #~ msgid "&Forums"
 #~ msgstr "论坛(&F)…"
+
+#: src/command/edit.cpp
+msgid "With \\N"
+msgstr "以 \\N 分隔"
+
+#: src/command/edit.cpp
+msgid "Join with \\N"
+msgstr "合并（以 \\N 分隔）"
+
+#: src/command/edit.cpp
+msgid "Join selected lines in a single one, inserting \\N between lines"
+msgstr "将所选行合并为一行，在各行文本之间插入 \\N"
+
+#: default_menu.json
+msgid "Join (with \\N)"
+msgstr "合并（以 \\N 分隔）"

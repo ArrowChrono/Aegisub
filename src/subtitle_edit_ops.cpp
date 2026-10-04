@@ -125,6 +125,10 @@ void apply_join(AssDialogue *first, AssDialogue *second, aegisub::subtitle_edit_
 		if (second)
 			first->Text = first->Text.get() + " " + second->Text.get();
 		break;
+	case aegisub::subtitle_edit_ops::JoinMode::WithLineBreaks:
+		if (second)
+			first->Text = first->Text.get() + "\\N" + second->Text.get();
+		break;
 	case aegisub::subtitle_edit_ops::JoinMode::KeepFirst:
 		break;
 	}

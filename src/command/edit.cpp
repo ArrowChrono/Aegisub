@@ -1973,6 +1973,17 @@ struct edit_line_join_concatenate final : public validate_sel_multiple {
 	}
 };
 
+struct edit_line_join_with_line_breaks final : public validate_sel_multiple {
+	CMD_NAME("edit/line/join/with_line_breaks")
+	STR_MENU("With \\N")
+	STR_DISP("Join with \\N")
+	STR_HELP("Join selected lines in a single one, inserting \\N between lines")
+
+	void operator()(agi::Context *c) override {
+		combine_lines(c, aegisub::subtitle_edit_ops::JoinMode::WithLineBreaks, from_wx(_("join lines")));
+	}
+};
+
 struct edit_line_join_keep_first final : public validate_sel_multiple {
 	CMD_NAME("edit/line/join/keep_first")
 	STR_MENU("Keep &First")
@@ -2421,6 +2432,7 @@ namespace cmd {
 		reg(agi::make_unique<edit_line_duplicate_shift_back>());
 		reg(agi::make_unique<edit_line_join_as_karaoke>());
 		reg(agi::make_unique<edit_line_join_concatenate>());
+		reg(agi::make_unique<edit_line_join_with_line_breaks>());
 		reg(agi::make_unique<edit_line_join_keep_first>());
 		reg(agi::make_unique<edit_line_paste>());
 		reg(agi::make_unique<edit_line_paste_over>());
