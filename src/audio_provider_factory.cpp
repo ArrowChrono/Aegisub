@@ -234,6 +234,10 @@ std::unique_ptr<AudioProvider> OpenAudioProviderWithPreferred(fs::path const& fi
 			LOG_I("audio_provider") << "Using audio provider: " << factory->name;
 			break;
 		}
+		catch (UserCancelException const&) {
+			last_audio_provider_selection_report = diagnostics;
+			throw;
+		}
 		catch (fs::FileNotFound const& err) {
 			LOG_D("audio_provider") << err.GetMessage();
 			auto line_detail = err.GetMessage() + " not found.";
