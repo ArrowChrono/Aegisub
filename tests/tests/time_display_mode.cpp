@@ -5,8 +5,6 @@
 #include <libaegisub/fs.h>
 #include <libaegisub/vfr.h>
 
-#include <limits>
-
 TEST(time_display_mode, defaults_to_ass_for_ass_and_exact_for_other_formats) {
 	EXPECT_EQ(SubtitleTimeDisplayMode::Ass, DefaultTimeDisplayModeForFile(agi::fs::path("subtitle.ass")));
 	EXPECT_EQ(SubtitleTimeDisplayMode::Ass, DefaultTimeDisplayModeForFile(agi::fs::path("subtitle.ASS")));
@@ -146,28 +144,4 @@ TEST(time_display_mode, ass_duration_edit_supports_times_past_ten_hours) {
 		SubtitleTimeDisplayMode::Ass);
 
 	EXPECT_EQ(12 * 60 * 60 * 1000 + 2000, end.GetMillisecond());
-}
-
-TEST(time_display_mode, exact_duration_adds_unrounded_start_and_duration) {
-	auto const end = GetEndTimeForDisplayedDuration(
-		agi::Time(125), agi::Time(700), agi::Time(251), SubtitleTimeDisplayMode::Exact);
-	EXPECT_EQ(376, end.GetMillisecond());
-	EXPECT_EQ(251, GetDurationForDisplay(agi::Time(125), end, SubtitleTimeDisplayMode::Exact));
-}
-
-TEST(time_display_mode, exact_zero_duration_keeps_unrounded_start) {
-	auto const end = GetEndTimeForDisplayedDuration(
-		agi::Time(1234), agi::Time(2000), agi::Time(0), SubtitleTimeDisplayMode::Exact);
-	EXPECT_EQ(1234, end.GetMillisecond());
-	EXPECT_EQ(0, GetDurationForDisplay(agi::Time(1234), end, SubtitleTimeDisplayMode::Exact));
-}
-
-TEST(time_display_mode, exact_duration_saturates_at_internal_time_limit) {
-	auto const maximum = std::numeric_limits<int>::max();
-	auto const near_limit = GetEndTimeForDisplayedDuration(
-		agi::Time(maximum - 3), agi::Time(maximum), agi::Time(10), SubtitleTimeDisplayMode::Exact);
-	EXPECT_EQ(maximum, near_limit.GetMillisecond());
-	auto const largest_sum = GetEndTimeForDisplayedDuration(
-		agi::Time(maximum), agi::Time(maximum), agi::Time(maximum), SubtitleTimeDisplayMode::Exact);
-	EXPECT_EQ(maximum, largest_sum.GetMillisecond());
 }

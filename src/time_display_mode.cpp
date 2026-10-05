@@ -82,7 +82,7 @@ agi::Time GetEndTimeForDisplayedDuration(
 	SubtitleTimeDisplayMode mode,
 	agi::vfr::Framerate const* fps) {
 	if (mode == SubtitleTimeDisplayMode::Exact)
-		return clamp_internal_time_ms(static_cast<long long>(start.GetMillisecond()) + displayed_duration.GetMillisecond());
+		return start + displayed_duration;
 	if (mode != SubtitleTimeDisplayMode::Ass)
 		throw std::logic_error("Frame display mode does not expose millisecond durations");
 
