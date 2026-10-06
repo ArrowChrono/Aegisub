@@ -18,6 +18,8 @@ jobs:
   build-win:
     runs-on: windows-2025-vs2026
     env:
+      NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+      NUGET_HTTP_CACHE_PATH: ${{ github.workspace }}\.nuget\http-cache
       PROJECT_VCPKG_ROOT: ${{ github.workspace }}\vcpkg
       PROJECT_VCPKG_INSTALLED_ROOT: ${{ github.workspace }}\vcpkg_installed
       VCPKG_ROOT: ${{ github.workspace }}\vcpkg
