@@ -1541,7 +1541,7 @@ void SkiaAudioDisplay::ScheduleMiddleSeekTimer() {
 		return;
 	}
 	if (!wxGetMouseState().MiddleIsDown()) {
-		FinishMiddleSeek(impl->mouse_position_ms >= 0 ? impl->mouse_position_ms : 0);
+		FinishMiddleSeek(impl->mouse_position_ms);
 		return;
 	}
 	if (impl->viewport.IsValid()) {
@@ -1567,6 +1567,10 @@ void SkiaAudioDisplay::ScheduleMiddleSeekTimer() {
 void SkiaAudioDisplay::FinishMiddleSeek(int time_ms) {
 	if (!impl || !impl->middle_seek_active)
 		return;
+	if (time_ms < 0) {
+		CancelMiddleSeek();
+		return;
+	}
 	impl->middle_seek_timer.Stop();
 	impl->middle_seek_active = false;
 	impl->middle_seek_policy.OnRelease(time_ms, NavigationPreviewPolicy::Clock::now());
@@ -1603,7 +1607,7 @@ void SkiaAudioDisplay::OnMiddleSeekTimer(wxTimerEvent&) {
 	if (!impl || !impl->middle_seek_active)
 		return;
 	if (!wxGetMouseState().MiddleIsDown()) {
-		FinishMiddleSeek(impl->mouse_position_ms >= 0 ? impl->mouse_position_ms : 0);
+		FinishMiddleSeek(impl->mouse_position_ms);
 		return;
 	}
 	if (impl->viewport.IsValid()) {
@@ -1658,8 +1662,10 @@ void SkiaAudioDisplay::OnPlaybackStop() {
 	perf_trace::AudioUiDurationScope trace("audio_display.cursor_update", 1, 0);
 	impl->playback_position_ms = -1;
 	impl->ResetPlaybackOverlayRefresh();
-	impl->mouse_position_ms = -1;
-	impl->mouse_position_x = -1;
+	if (!impl->middle_seek_active) {
+		impl->mouse_position_ms = -1;
+		impl->mouse_position_x = -1;
+	}
 	Invalidate(Change::Cursor);
 	RequestRepaint();
 }
@@ -1926,8 +1932,8 @@ void SkiaAudioDisplay::OnMouseEvent(wxMouseEvent& event) {
 		auto core = impl->project_context->GetCore();
 		if (core.videoController && core.project->VideoProvider()) {
 			auto const time_ms = time_from_x(mouse.x);
-			set_middle_cursor(time_ms);
 			core.videoController->BeginInteractiveSeekPreview();
+			set_middle_cursor(time_ms);
 			bool const was_playing = core.videoController->IsPlaying();
 			impl->middle_seek_policy.BeginGesture(
 				was_playing,
