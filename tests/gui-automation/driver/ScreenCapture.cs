@@ -30,8 +30,10 @@ public static class ScreenCapture
     private static extern bool PrintWindow(nint window, nint dc, uint flags);
 
     public static WindowCaptureEvidence SaveWindowPng(AutomationElement element, string path)
+        => SaveWindowPng(new nint(element.Current.NativeWindowHandle), path);
+
+    public static WindowCaptureEvidence SaveWindowPng(nint handle, string path)
     {
-        var handle = new nint(element.Current.NativeWindowHandle);
         if (handle == 0 || !GetWindowRect(handle, out var rect))
             throw new InvalidOperationException("UIA element has no capturable window handle");
         var width = rect.Right - rect.Left;

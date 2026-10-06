@@ -33,6 +33,7 @@ class VisualToolRotateZ final : public VisualTool<VisualDraggableFeature> {
 
 	Feature *org; ///< The origin feature
 
+	bool SupportsGeometryLinking() const override { return true; }
 	bool InitializeHold() override;
 	void UpdateHold() override;
 

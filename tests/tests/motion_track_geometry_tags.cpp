@@ -10,6 +10,29 @@
 #include <string>
 #include <vector>
 
+TEST(visual_geometry_tags, affine_preserves_drawing_commands_and_polarity) {
+	using namespace aegisub::motion_track;
+	std::string const source = R"({\org(10,20)\iclip(2,m 0 0 l 20 0 20 20 n 4 4 b 6 8 12 8 16 4 s 10 10 12 14 14 10 p 18 8 c)\bord3}Text)";
+	PreparedAffineGeometry geometry(source);
+	auto result = geometry.Transform({{{1, 0, 3, 0, 1, -2, 0, 0, 1}}}, false);
+	ASSERT_TRUE(result.success) << result.error;
+	EXPECT_NE(std::string::npos, result.text.find(R"(\org(10,20))"));
+	EXPECT_NE(std::string::npos, result.text.find(R"(\iclip(6,m 96 -64 l 416 -64 416 256 n 160 0 b 192 64 288 64 352 0 s 256 96 288 160 320 96 p 384 64 c))"));
+	EXPECT_NE(std::string::npos, result.text.find(R"(\bord3}Text)"));
+	auto again = geometry.Transform({{{1, 0, 3, 0, 1, -2, 0, 0, 1}}}, false);
+	EXPECT_EQ(result.text, again.text);
+}
+
+TEST(visual_geometry_tags, rejects_animation_and_rectangle_precedence_changes) {
+	using namespace aegisub::motion_track;
+	PreparedAffineGeometry animated(R"({\clip(1,2,30,40)\t(0,500,\clip(2,m 0 0 l 4 4))}Text)");
+	EXPECT_FALSE(animated.Transform({{{1, 0, 2, 0, 1, 3, 0, 0, 1}}}, false).success);
+	PreparedAffineGeometry multiple(R"({\clip(1,2,30,40)\iclip(m 0 0 l 4 4)}Text)");
+	EXPECT_FALSE(multiple.Transform({{{0, -1, 0, 1, 0, 0, 0, 0, 1}}}, false).success);
+	PreparedAffineGeometry malformed(R"({\clip(m 0 0 l bad)}Text)");
+	EXPECT_FALSE(malformed.Transform({{{1, 0, 2, 0, 1, 3, 0, 0, 1}}}, false).success);
+}
+
 namespace {
 using namespace aegisub::motion_track;
 namespace drawing = agi::ass::drawing;

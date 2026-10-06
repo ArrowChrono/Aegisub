@@ -26,6 +26,7 @@
 #include "options.h"
 #include "subtitle_command_session.h"
 #include "ui_deadline_timer.h"
+#include "motion_track/geometry_tags.h"
 
 #include <libaegisub/owning_intrusive_list.h>
 #include <libaegisub/signal.h>
@@ -35,11 +36,13 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <map>
 
 #include <wx/gdicmn.h>
 #include <wx/timer.h>
 
 class AssDialogue;
+class AssStyle;
 class VideoDisplay;
 class VideoOverlayDrawContext;
 class VisualToolRenderSnapshot;
@@ -106,6 +109,51 @@ class VisualToolBase {
 	virtual void DoRefresh() { }
 
 protected:
+	enum class GeometryEditKind {
+		Affine,
+		Translation,
+		Endpoint,
+		Perspective
+	};
+	enum class GeometryValidationKind {
+		None,
+		StaticPose,
+		UnsupportedSource
+	};
+	struct GeometryState {
+		Vector2D position, origin, scale;
+		float rx = 0, ry = 0, rz = 0, fax = 0, fay = 0;
+	};
+	struct GeometrySnapshot {
+		std::unique_ptr<AssDialogue> source;
+		GeometryState state;
+		aegisub::motion_track::PreparedAffineGeometry geometry;
+		std::string validation_error;
+		GeometryValidationKind validation_kind = GeometryValidationKind::None;
+		GeometrySnapshot(AssDialogue const& line, GeometryState state, AssStyle const* style, int script_width, int script_height);
+	};
+	struct GeometryOverride {
+		std::string tag, value;
+		GeometryEditKind kind;
+		Vector2D translation;
+	};
+	std::map<AssDialogue *, GeometrySnapshot> geometry_snapshots;
+	std::map<AssDialogue *, std::vector<GeometryOverride>> geometry_overrides;
+	GeometryEditKind geometry_edit_kind = GeometryEditKind::Affine;
+	Vector2D geometry_translation;
+	bool geometry_error_reported = false;
+	bool geometry_mouse_gesture = false;
+	std::string geometry_error_message;
+	bool GeometryLinkingEnabled() const;
+	void BeginGeometryGesture(bool mouse = false);
+	void QueueGeometryOverride(AssDialogue *line, std::string const& tag, std::string const& value);
+	void QueueSelectedGeometryOverride(std::string const& tag, std::string const& value);
+	bool FinishGeometryEdit();
+	void ReportGeometryError();
+	void RefreshGeometryFeedback() { DoRefresh(); }
+	AssDialogue *GeometrySource(AssDialogue *line);
+	void SetGeometryEditKind(GeometryEditKind kind, Vector2D translation = Vector2D(0, 0));
+	virtual bool SupportsGeometryLinking() const { return false; }
 	std::vector<agi::signal::Connection> connections;
 
 	/// Called if a mouse interaction is interrupted by wx losing capture. Tools

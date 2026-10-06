@@ -174,6 +174,7 @@ class VideoDisplay final : public wxGLCanvas {
 
 	/// The active visual typesetting tool
 	std::unique_ptr<VisualToolBase> tool;
+	bool geometry_linking = false;
 	/// Text cache shared by persistent visual-guide labels on the legacy path.
 	std::unique_ptr<OpenGLText> visualGuideText;
 	/// Only this display releases text textures, with its own GL context current.
@@ -462,6 +463,11 @@ public:
 	std::optional<wxPoint> MapScreenToVideoPixel(wxPoint screen_pos) const;
 
 	void SetTool(std::unique_ptr<VisualToolBase> new_tool);
+	bool GeometryLinkingEnabled() const { return geometry_linking; }
+	void ToggleGeometryLinking() {
+		if (!IsVisualToolInteracting())
+			geometry_linking = !geometry_linking;
+	}
 	/// Bind legacy text resource lifetime to this display's GL context.
 	std::unique_ptr<OpenGLText> CreateTextRenderer();
 	bool IsVisualToolInteracting() const noexcept;

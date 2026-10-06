@@ -411,7 +411,17 @@ bool VisualToolDrag::InitializeDrag(Feature *feature) {
 
 	// Set time of clicked feature to the current frame and shift all other
 	// selected features by the same amount
-	if (feature->type != DRAG_ORIGIN) {
+	bool preserve_move_times = false;
+	if (GeometryLinkingEnabled()) {
+		for (auto const *selected : sel_features) {
+			if (selected->type == DRAG_ORIGIN || !selected->parent)
+				continue;
+			auto const found = geometry_snapshots.find(selected->line);
+			if (found != geometry_snapshots.end() && (found->second.geometry.HasClip() || found->second.geometry.HasOrigin()))
+				preserve_move_times = true;
+		}
+	}
+	if (feature->type != DRAG_ORIGIN && !preserve_move_times) {
 		auto core = c->GetCore();
 		int time = core.videoController->TimeAtFrame(frame_number) - feature->line->Start;
 		int change = time - feature->time;
@@ -423,8 +433,16 @@ bool VisualToolDrag::InitializeDrag(Feature *feature) {
 }
 
 void VisualToolDrag::UpdateDrag(Feature *feature) {
+	if (GeometryLinkingEnabled()) {
+		if (feature->type == DRAG_ORIGIN)
+			SetGeometryEditKind(GeometryEditKind::Affine);
+		else if (feature->parent)
+			SetGeometryEditKind(GeometryEditKind::Endpoint);
+		else
+			SetGeometryEditKind(GeometryEditKind::Translation, ToScriptCoords(feature->pos) - GetLinePosition(GeometrySource(feature->line)));
+	}
 	if (feature->type == DRAG_ORIGIN) {
-		SetOverride(feature->line, "\\org", ToScriptCoords(feature->pos).PStr());
+		QueueGeometryOverride(feature->line, "\\org", ToScriptCoords(feature->pos).PStr());
 		return;
 	}
 
@@ -433,34 +451,37 @@ void VisualToolDrag::UpdateDrag(Feature *feature) {
 		std::swap(feature, end_feature);
 
 	if (!feature->parent)
-		SetOverride(feature->line, "\\pos", ToScriptCoords(feature->pos).PStr());
+		QueueGeometryOverride(feature->line, "\\pos", ToScriptCoords(feature->pos).PStr());
 	else
-		SetOverride(feature->line, "\\move", agi::format("(%s,%s,%d,%d)"
-			, ToScriptCoords(feature->pos).Str()
-			, ToScriptCoords(end_feature->pos).Str()
-			, feature->time , end_feature->time));
+		QueueGeometryOverride(feature->line, "\\move", agi::format("(%s,%s,%d,%d)", ToScriptCoords(feature->pos).Str(), ToScriptCoords(end_feature->pos).Str(), feature->time, end_feature->time));
 }
 
 void VisualToolDrag::OnDoubleClick() {
 	RestoreDoubleClickSelection();
+	BeginGeometryGesture();
 	Vector2D d = ToScriptCoords(mouse_pos) - (primary ? ToScriptCoords(primary->pos) : GetLinePosition(active_line));
 
+	SetGeometryEditKind(GeometryEditKind::Translation, d);
 	auto core = c->GetCore();
 	for (auto line : core.selectionController->GetSelectedSet()) {
 		Vector2D p1, p2;
 		int t1, t2;
 		if (GetLineMove(line, p1, p2, t1, t2)) {
 			if (t1 > 0 || t2 > 0)
-				SetOverride(line, "\\move", agi::format("(%s,%s,%d,%d)", (p1 + d).Str(), (p2 + d).Str(), t1, t2));
+				QueueGeometryOverride(line, "\\move", agi::format("(%s,%s,%d,%d)", (p1 + d).Str(), (p2 + d).Str(), t1, t2));
 			else
-				SetOverride(line, "\\move", agi::format("(%s,%s)", (p1 + d).Str(), (p2 + d).Str()));
+				QueueGeometryOverride(line, "\\move", agi::format("(%s,%s)", (p1 + d).Str(), (p2 + d).Str()));
 		}
 		else
-			SetOverride(line, "\\pos", (GetLinePosition(line) + d).PStr());
+			QueueGeometryOverride(line, "\\pos", (GetLinePosition(line) + d).PStr());
 
 		if (Vector2D org = GetLineOrigin(line))
-			SetOverride(line, "\\org", (org + d).PStr());
+			QueueGeometryOverride(line, "\\org", (org + d).PStr());
 	}
 
+	if (!FinishGeometryEdit()) {
+		ReportGeometryError();
+		return;
+	}
 	CommitAndRefresh(_("positioning"));
 }

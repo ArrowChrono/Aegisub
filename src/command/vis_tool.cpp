@@ -53,6 +53,24 @@ namespace {
 		}
 	};
 
+	struct visual_geometry_linking final : public Command {
+		CMD_NAME("video/tool/geometry_linking")
+		CMD_ICON(toggle_audio_link)
+		STR_MENU("Geometry Linking")
+		STR_DISP("Geometry Linking")
+		STR_HELP("Link origins and clips to supported subtitle geometry edits")
+		CMD_TYPE(COMMAND_TOGGLE | COMMAND_VALIDATE)
+		bool Validate(agi::Context const *c) override {
+			return c->GetUI().videoDisplay != nullptr;
+		}
+		bool IsActive(agi::Context const *c) override {
+			return c->GetUI().videoDisplay->GeometryLinkingEnabled();
+		}
+		void operator()(agi::Context *c) override {
+			c->GetUI().videoDisplay->ToggleGeometryLinking();
+		}
+	};
+
 	struct visual_mode_cross final : public visual_tool_command<VisualToolCross> {
 		CMD_NAME("video/tool/cross")
 		CMD_ICON(visual_standard)
@@ -365,6 +383,7 @@ namespace {
 
 namespace cmd {
 	void init_visual_tools() {
+		reg(agi::make_unique<visual_geometry_linking>());
 		reg(agi::make_unique<visual_mode_cross>());
 		reg(agi::make_unique<visual_mode_drag>());
 		reg(agi::make_unique<visual_mode_rotate_z>());

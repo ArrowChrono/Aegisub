@@ -13,6 +13,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Windows.Automation;
 using Aegisub.GuiAutomation.Driver;
@@ -20,7 +21,9 @@ using Aegisub.GuiAutomation.Driver;
 try
 {
     var options = DriverOptions.Parse(args);
-    return options.InputContract == "none" ? Run(options) : RunInputContract(options);
+    return options.InputContract.StartsWith("geometry-", StringComparison.Ordinal)
+        ? PrivateDesktop.Run(args, options.Artifacts, isolation => RunGeometryContract(options, isolation))
+        : options.InputContract == "none" ? Run(options) : RunInputContract(options);
 }
 catch (Exception error)
 {
@@ -328,6 +331,1027 @@ static int Run(DriverOptions options)
         process?.Dispose();
     }
 }
+
+
+static int RunGeometryContract(DriverOptions options, PrivateDesktop isolation)
+{
+    var name = options.InputContract[9..];
+    var available = new[]
+    {
+        "translate", "off", "move", "scaled-curve",
+        "scale", "scale-shear", "normalize", "rotate",
+        "origin", "origin-xy", "nudge-origin", "reject-animation",
+        "reject-mixed", "reject-xy", "xy-no-clip", "empty",
+        "reject-animated-only", "reject-endpoint", "endpoint-no-geometry", "mixed-static-endpoint", "reject-perspective-scale",
+        "drawing-tail", "scale-layout", "reject-vertical-font", "reject-reset",
+        "reject-multiclip", "reject-zero-scale", "reject-malformed", "no-motion",
+        "return-to-start", "clip-only", "scale-nudge", "scale-curve",
+        "decimal-curve", "reject-decimal-curve", "reject-effect", "reject-pos-move",
+        "reject-duplicate-xy", "drawing-tail-vertical", "last-valid-preview", "reject-animated-spaced", "implicit-integer", "reject-implicit-fractional", "reject-implicit-reset", "reject-malformed-position", "implicit-no-geometry"
+    };
+    if (!available.Contains(name))
+        throw new ArgumentException("geometry case must be one of: " + string.Join(", ", available));
+    PrepareArtifactsDirectory(options.Artifacts);
+    isolation.RecordDriver();
+    var output = new StreamWriter(Path.Combine(options.Artifacts, "driver-output.log")) { AutoFlush = true };
+    Console.SetOut(output);
+    Console.SetError(output);
+    var fixturePath = Path.Combine(options.Artifacts, "scenario.ass");
+    var profilePath = Path.Combine(options.Artifacts, "profile");
+    var host = Path.Combine(options.Artifacts, "host");
+    Directory.CreateDirectory(host);
+    var firstTags = @"\pos(300,200)\org(260,180)\frz90\fscx100\fscy100\clip(260,100,340,180)";
+    var secondTags = @"\pos(420,320)\org(390,300)\frz90\fscx150\fscy80\iclip(370,230,450,320)";
+    const string curve = "m 480 320 l 640 320 640 480 n 500 340 b 520 300 580 300 600 340 s 500 340 540 380 580 340 p 620 360 c";
+    if (name is "move" or "reject-endpoint" or "endpoint-no-geometry")
+    {
+        firstTags = firstTags.Replace(@"\pos(300,200)", @"\move(300,200,360,250,400,1600)");
+        secondTags = secondTags.Replace(@"\pos(420,320)", @"\move(420,320,470,370,200,1800)");
+    }
+    if (name == "mixed-static-endpoint")
+        secondTags = @"\move(420,320,470,370,400,1600)\frz90\fscx150\fscy80";
+    if (name is "scaled-curve" or "scale-curve")
+    {
+        firstTags = Regex.Replace(firstTags, @"\\clip\([^)]*\)", @"\clip(2," + curve + ")");
+        secondTags = Regex.Replace(secondTags, @"\\iclip\([^)]*\)", @"\iclip(2," + curve + ")");
+    }
+    if (name == "normalize")
+        firstTags = firstTags.Replace(@"\fscx100\fscy100", @"\fscx200\fscy50");
+    if (name == "scale-shear")
+    {
+        firstTags = firstTags.Replace(@"\frz90", @"\frz30\fax0.2\fay0.1");
+        secondTags = secondTags.Replace(@"\frz90", @"\frz30\fax0.1\fay0.2");
+    }
+    if (name == "reject-animation")
+        secondTags += @"\t(0,1800,\clip(390,230,470,320))";
+    if (name == "reject-animated-only")
+        secondTags = Regex.Replace(secondTags, @"\\iclip\([^)]*\)", "") + @"\t(0,1800,\clip(390,230,470,320))";
+    if (name == "reject-animated-spaced")
+        secondTags = Regex.Replace(secondTags, @"\\iclip\([^)]*\)", "") + @"\t(0,1800,\ clip(390,230,470,320))";
+    if (name == "reject-perspective-scale")
+        secondTags += @"\frx25";
+    if (name == "reject-vertical-font")
+        secondTags += @"\fn@Arial";
+    if (name == "reject-reset")
+        secondTags += @"\rDefault";
+    if (name == "reject-multiclip")
+        secondTags += @"\clip(m 350 200 l 460 200 460 350)";
+    if (name == "reject-pos-move")
+        secondTags += @"\move(420,320,470,370,200,1800)";
+    if (name == "reject-duplicate-xy")
+        secondTags += @"\frx0\frx25";
+    if (name is "decimal-curve" or "reject-decimal-curve")
+    {
+        var coordinate = name == "decimal-curve" ? "0.1" : "0.01";
+        firstTags = Regex.Replace(firstTags, @"\\clip\([^)]*\)", @"\clip(2,m " + coordinate + " 200 l 600 200 600 480)");
+        secondTags = Regex.Replace(secondTags, @"\\iclip\([^)]*\)", @"\iclip(2,m " + coordinate + " 200 l 600 200 600 480)");
+    }
+    if (name == "implicit-integer")
+    {
+        firstTags = firstTags.Replace(@"\pos(300,200)", "").Replace(@"\org(260,180)", @"\org(295,426)").Replace(@"\clip(260,100,340,180)", @"\clip(260,330,340,470)");
+        secondTags = secondTags.Replace(@"\pos(420,320)", "").Replace(@"\org(390,300)", @"\org(294,407)").Replace(@"\iclip(370,230,450,320)", @"\iclip(270,300,360,450)");
+    }
+    if (name is "reject-implicit-fractional" or "reject-implicit-reset")
+        secondTags = secondTags.Replace(@"\pos(420,320)", "");
+    if (name == "reject-implicit-reset")
+        secondTags += @"\rAlternate";
+    if (name == "implicit-no-geometry")
+    {
+        firstTags = Regex.Replace(firstTags, @"\\(?:pos|org|clip)\([^)]*\)", "");
+        secondTags = Regex.Replace(secondTags, @"\\(?:pos|org|iclip)\([^)]*\)", "");
+    }
+    if (name == "reject-malformed-position")
+        secondTags = secondTags.Replace(@"\pos(420,320)", @"\pos(420)");
+    if (name == "reject-malformed")
+        secondTags = Regex.Replace(secondTags, @"\\iclip\([^)]*\)", @"\iclip(m 1 2 l invalid)");
+    if (name == "endpoint-no-geometry")
+    {
+        firstTags = Regex.Replace(firstTags, @"\\(?:org|clip)\([^)]*\)", "");
+        secondTags = Regex.Replace(secondTags, @"\\(?:org|iclip)\([^)]*\)", "");
+    }
+    if (name == "empty")
+    {
+        firstTags = Regex.Replace(firstTags, @"\\clip\([^)]*\)", @"\clip(0,0,0,0)");
+        secondTags = Regex.Replace(secondTags, @"\\iclip\([^)]*\)", @"\iclip(m 0 0)");
+    }
+    if (name == "xy-no-clip")
+    {
+        firstTags = Regex.Replace(firstTags, @"\\clip\([^)]*\)", "");
+        secondTags = Regex.Replace(secondTags, @"\\iclip\([^)]*\)", "");
+    }
+    var lines = Fixture.Build(48, true).Split('\n');
+    var firstEvent = Array.FindIndex(lines, line => line.StartsWith("Dialogue:", StringComparison.Ordinal));
+    lines[firstEvent] = @"Dialogue: 3,0:00:00.00,0:00:10.00,Default,linked-primary,12,23,34,,{" + firstTags + @"\bord2.5\shad1.25\1c&H74B2E8&\t(200,1800,\blur1.2)}Geometry primary";
+    lines[firstEvent + 1] = @"Dialogue: 1,0:00:00.00,0:00:10.00,Default,linked-secondary,31,42,53,,{" + secondTags + @"\bord1.5\shad0.5\1c&H80E8B2&}Geometry secondary" + (name == "reject-mixed" ? @"{\fscx70}mixed run" : "");
+    if (name is "drawing-tail" or "drawing-tail-vertical")
+    {
+        lines[firstEvent] = lines[firstEvent].Replace("Geometry primary", @"{\p1}m 0 0 l 100 0 100 60 0 60{\p0}");
+        lines[firstEvent + 1] = lines[firstEvent + 1].Replace("Geometry secondary", @"{\p1}m 0 0 b 20 -10 90 10 100 50 l 0 60{\p0}");
+    }
+    if (name == "implicit-integer")
+    {
+        lines[firstEvent] = lines[firstEvent].Replace("12,23,34,,{", "12,22,34,,{");
+        lines[firstEvent + 1] = lines[firstEvent + 1].Replace("31,42,53,,{", "31,43,53,,{");
+    }
+    if (name == "reject-implicit-reset")
+    {
+        lines[firstEvent + 1] = lines[firstEvent + 1].Replace("31,42,53,,{", "31,43,53,,{");
+        var style = lines.Single(line => line.StartsWith("Style: Default,"));
+        var alternate = style.Replace("Style: Default,", "Style: Alternate,").Replace(",2,10,10,10,1", ",1,70,20,20,1");
+        lines = lines.SelectMany(line => line == style ? new[] { line, alternate } : new[] { line }).ToArray();
+    }
+    if (name == "drawing-tail-vertical")
+        lines = lines.Select(line => line.Replace("Style: Default,Arial,", "Style: Default,@Arial,")).ToArray();
+    if (name == "reject-effect")
+        lines[firstEvent + 1] = lines[firstEvent + 1].Replace("31,42,53,,{", "31,42,53,Banner;0;0;5,{");
+    if (name == "scale-layout")
+        lines = lines.Select(line => line.Replace("LayoutResX: 640", "LayoutResX: 1280")).ToArray();
+    File.WriteAllText(fixturePath, string.Join('\n', lines), new UTF8Encoding(false));
+    WriteProfileConfig(profilePath, options.SubtitleProvider);
+    var menu = JsonNode.Parse(File.ReadAllText(Path.Combine("src", "libresrc", "default_menu.json")))!.AsObject();
+    menu["main"]!.AsArray().Add(new JsonObject { ["submenu"] = "geometry-test", ["text"] = "Geometry Test" });
+    var testMenu = new JsonArray();
+    foreach (var (command, text) in new[]
+    {
+        ("video/tool/scale/normalize/x", "Normalize X"),
+        ("video/tool/nudge/right/large", "Nudge Right"),
+        ("video/tool/nudge/up/large", "Nudge Up"),
+        ("subtitle/save", "Save Subtitles"), ("edit/undo", "Undo"), ("edit/redo", "Redo"),
+        ("video/frame/save", "Save Frame"),
+        ("video/tool/geometry_linking", "Geometry Linking")
+    }) testMenu.Add(new JsonObject { ["command"] = command, ["text"] = text });
+    menu["geometry-test"] = testMenu;
+    File.WriteAllText(Path.Combine(profilePath, "user", "menu.json"), menu.ToJsonString());
+    Process? process = null;
+    nint failureMain = 0;
+    using var watchdog = new Timer(_ => { try { if (process is not null) isolation.Stop(process); } finally { Environment.Exit(124); } }, null, TimeSpan.FromSeconds(180), Timeout.InfiniteTimeSpan);
+    try
+    {
+        var start = new ProcessStartInfo(options.Executable) { UseShellExecute = false, WorkingDirectory = Environment.CurrentDirectory, WindowStyle = ProcessWindowStyle.Minimized };
+        start.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
+        foreach (var argument in new[] { "--gui-test", "host", "--profile-dir", profilePath, "--artifacts", host, "--open", fixturePath, "--open", options.Video })
+            AddArgument(start, argument);
+        process = isolation.Start(start, "actual-host");
+        AutomationProtocol.WaitForReadyArtifact(Path.Combine(host, "ready.json"), process, TimeSpan.FromSeconds(options.TimeoutSeconds));
+        var hwnd = isolation.MainWindow(process, options.TimeoutSeconds);
+        failureMain = hwnd;
+        var window = AutomationElement.FromHandle(hwnd);
+        isolation.VerifyWindow(hwnd, process);
+        ShowWindow(hwnd, NativeConstants.ShowNoActivate);
+        SetWindowPos(hwnd, 0, 40, 40, options.WindowWidth, options.WindowHeight, SetWindowPosFlags.NoActivate | SetWindowPosFlags.ShowWindow);
+        Thread.Sleep(options.SettleMilliseconds);
+        ClickToolbar("Select all dialogue lines that are visible");
+        ConfirmMultiSelection(window, process, options.TimeoutSeconds, "geometry-before", CheckAlive);
+        File.AppendAllText(Path.Combine(options.Artifacts, "toolbar-evidence.ndjson"), JsonSerializer.Serialize(new
+        {
+            phase = "post-selection",
+            selected_lines = 2
+        }) + Environment.NewLine);
+        var scaleCases = new[]
+        {
+            "scale", "scale-shear", "normalize", "reject-animation",
+            "reject-mixed", "reject-animated-only", "reject-perspective-scale", "drawing-tail",
+            "scale-layout", "reject-vertical-font", "reject-reset", "reject-multiclip",
+            "reject-zero-scale", "reject-malformed", "scale-nudge", "scale-curve",
+            "reject-decimal-curve", "reject-effect", "reject-pos-move", "reject-duplicate-xy",
+            "drawing-tail-vertical", "last-valid-preview", "reject-animated-spaced", "implicit-integer", "reject-implicit-fractional", "reject-implicit-reset", "reject-malformed-position", "implicit-no-geometry"
+        };
+        var tool = scaleCases.Contains(name) ? "Scale subtitles on X and Y axes"
+            : name == "clip-only" ? "Clip subtitles to a rectangle"
+            : name is "origin-xy" or "reject-xy" or "xy-no-clip" ? "Rotate subtitles on their X and Y axes"
+            : name is "rotate" or "origin" or "nudge-origin" ? "Rotate subtitles on their Z axis" : "Drag subtitles";
+        ClickToolbar(tool);
+        ConfirmToolRadio(tool);
+        Thread.Sleep(250);
+        var canvas = Canvas();
+        if (!GetClientRect(canvas, out var rect) || Math.Abs(rect.Width / (double)rect.Height - 4.0 / 3) > .005)
+            throw new InvalidOperationException("Geometry fixture requires a 4:3 canvas");
+        PointI Pixel(double x, double y) => new((int)Math.Round(x * rect.Width / 640), (int)Math.Round(y * rect.Height / 480));
+        string WindowText(nint target) => isolation.ReadText(target, process);
+        void CheckAlive()
+        {
+            isolation.VerifyCurrent();
+            process.Refresh();
+            if (process.HasExited) throw new InvalidOperationException("Private host exited: " + isolation.ExitCode(process));
+        }
+        nint Canvas()
+        {
+            var deadline = Deadline(options.TimeoutSeconds);
+            while (Stopwatch.GetTimestamp() < deadline)
+            {
+                CheckAlive();
+                var candidate = EnumerateChildWindows(hwnd).Where(IsWindowVisible).Where(handle => NativeClassName(handle) == "wxGLCanvas").OrderByDescending(handle => NativeWindowRect(handle).Area).FirstOrDefault();
+                if (candidate != 0 && IsWindowEnabled(hwnd)) { isolation.VerifyWindow(candidate, process); return candidate; }
+                Thread.Sleep(50);
+            }
+            throw new TimeoutException("Private host video canvas was not ready");
+        }
+        void ClickToolbar(string tooltip) => ClickGeometryToolbar(window, process, tooltip, options.Artifacts, isolation);
+        void Command(string label)
+        {
+            isolation.VerifyWindow(hwnd, process);
+            var id = ObservedWindowsCommand.FindMenuCommand(hwnd, process.Id, "Geometry Test", label);
+            File.AppendAllText(Path.Combine(options.Artifacts, "command-evidence.ndjson"), JsonSerializer.Serialize(new { label, id, pid = process.Id, desktop = isolation.Name }) + Environment.NewLine);
+            ObservedWindowsCommand.PostMenuCommand(hwnd, process.Id, id);
+            Thread.Sleep(500);
+        }
+        void Mouse(nint target, WindowMessage message, PointI point, int state)
+        {
+            isolation.VerifyWindow(target, process);
+            SendMouseToWindow(target, message, point, state);
+        }
+        void PostMouse(nint target, WindowMessage message, PointI point, int state)
+        {
+            isolation.VerifyWindow(target, process);
+            PostMouseToWindow(target, message, point, state);
+        }
+        void CaptureState(nint target, bool captured)
+        {
+            isolation.VerifyWindow(target, process);
+            WaitForCapture(target, captured, process, options.TimeoutSeconds, CheckAlive);
+        }
+        void Undo()
+        {
+            Command("Undo");
+            WaitUntil(() => WindowText(hwnd).TrimStart().StartsWith("* ", StringComparison.Ordinal), "Undo modified state");
+        }
+        void Close()
+        {
+            isolation.VerifyWindow(hwnd, process);
+            if (!PostMessage(hwnd, (uint)WindowMessage.Close, 0, 0)) throw new Win32Exception("Private WM_CLOSE failed");
+            if (!process.WaitForExit(options.TimeoutSeconds * 1000)) throw new TimeoutException("Private host did not close");
+            var code = isolation.ExitCode(process);
+            if (code != 0) throw new InvalidOperationException("Private host exit code: " + code);
+        }
+        void WaitUntil(Func<bool> condition, string description)
+        {
+            var deadline = Deadline(options.TimeoutSeconds);
+            while (Stopwatch.GetTimestamp() < deadline)
+            {
+                CheckAlive();
+                if (condition()) return;
+                Thread.Sleep(50);
+            }
+            throw new TimeoutException(description);
+        }
+        void Capture(string label)
+        {
+            var destination = Path.GetFullPath(Path.Combine(options.Artifacts, label + "-frame.png"));
+            if (!destination.StartsWith(Path.GetFullPath(options.Artifacts) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || File.Exists(destination))
+                throw new InvalidOperationException("Frame destination must be a new file inside this case's artifacts");
+            Command("Save Frame");
+            SaveFrameDialog(destination);
+            WaitUntil(() => File.Exists(destination) && new FileInfo(destination).Length > 0, "Frame PNG was not exported");
+            using var image = new System.Drawing.Bitmap(destination);
+            if (image.Width != 640 || image.Height != 480) throw new InvalidOperationException("Exported frame dimensions differ from the fixture");
+            var colors = new HashSet<int>();
+            for (var y = 0; y < image.Height; ++y)
+                for (var x = 0; x < image.Width; ++x) colors.Add(image.GetPixel(x, y).ToArgb());
+            File.AppendAllText(Path.Combine(options.Artifacts, "frame-evidence.ndjson"), JsonSerializer.Serialize(new { label, image.Width, image.Height, distinct_colors = colors.Count, command = "video/frame/save", pid = process.Id, desktop = isolation.Name }) + Environment.NewLine);
+            if (name == "scale" && colors.Count < 8) throw new InvalidOperationException("Pixel-oracle frame is empty or background-only");
+            isolation.VerifyWindow(hwnd, process);
+            ScreenCapture.SaveWindowPng(hwnd, Path.Combine(options.Artifacts, label + "-window.png"));
+        }
+        nint Dialog(string title)
+        {
+            nint dialog = 0;
+            WaitUntil(() =>
+            {
+                dialog = isolation.Windows(process).SingleOrDefault(target => NativeClassName(target) == "#32770" && WindowText(target) == title);
+                return dialog != 0;
+            }, "Owned private-desktop dialog not found: " + title);
+            return dialog;
+        }
+        void Button(nint dialog, string label)
+        {
+            string Caption(nint target) => Regex.Replace(WindowText(target).Replace("&", "", StringComparison.Ordinal), @"\([A-Za-z]\)$", "");
+            var button = EnumerateChildWindows(dialog).Single(target => NativeClassName(target) == "Button" && IsWindowVisible(target) && (Caption(target) == label || (label == "Save" && Caption(target) == "保存")));
+            isolation.VerifyWindow(button, process);
+            var observed = WindowText(button);
+            var visible = IsWindowVisible(button);
+            var enabled = IsWindowEnabled(button);
+            if (!enabled) throw new InvalidOperationException("Observed dialog button is disabled");
+            var parent = NativeGetParent(button);
+            var id = NativeGetDlgCtrlId(button);
+            isolation.VerifyWindow(parent, process);
+            var route = label == "OK" ? "post-bm-click" : "post-parent-command";
+            File.AppendAllText(Path.Combine(options.Artifacts, "dialog-evidence.ndjson"), JsonSerializer.Serialize(new { phase = "button-observed-before-dispatch", route, label, observed_caption = observed, dialog = $"0x{dialog:X}", button = $"0x{button:X}", parent = $"0x{parent:X}", id, visible, enabled, pid = process.Id, desktop = isolation.Name }) + Environment.NewLine);
+            isolation.VerifyWindow(button, process);
+            if (label == "OK")
+            {
+                if (!PostMessage(button, 0x00F5, 0, 0)) throw new Win32Exception("Owned warning BM_CLICK could not be posted");
+            }
+            else ObservedWindowsCommand.PostButtonClick(button, process.Id);
+        }
+        void SaveFrameDialog(string destination)
+        {
+            var dialog = Dialog("Save PNG snapshot");
+            var edit = EnumerateChildWindows(dialog).Single(target => NativeClassName(target) == "Edit" && IsWindowVisible(target) && WindowText(target).EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+            isolation.VerifyWindow(edit, process);
+            var value = new StringBuilder(destination);
+            if (SendMessageStringTimeout(edit, 0x000C, 0, value, SendMessageTimeoutFlags.AbortIfHung | SendMessageTimeoutFlags.Block, 1000, out var result) == 0 || result == 0)
+                throw new InvalidOperationException("Observed File name edit rejected the artifact path");
+            if (WindowText(edit) != destination) throw new InvalidOperationException("File name edit did not retain the exact artifact path");
+            File.AppendAllText(Path.Combine(options.Artifacts, "dialog-evidence.ndjson"), JsonSerializer.Serialize(new { title = "Save PNG snapshot", dialog = $"0x{dialog:X}", edit = $"0x{edit:X}", pid = process.Id, desktop = isolation.Name, destination = Path.GetRelativePath(options.Artifacts, destination) }) + Environment.NewLine);
+            Button(dialog, "Save");
+            WaitUntil(() => !isolation.Windows(process).Contains(dialog), "Frame save dialog did not close");
+        }
+        string Save(string label)
+        {
+            isolation.VerifyWindow(hwnd, process);
+            if (WindowText(hwnd).TrimStart().StartsWith("* ", StringComparison.Ordinal))
+            {
+                var previousWrite = File.GetLastWriteTimeUtc(fixturePath);
+                Command("Save Subtitles");
+                WaitUntil(() => !WindowText(hwnd).TrimStart().StartsWith("* ", StringComparison.Ordinal) && File.GetLastWriteTimeUtc(fixturePath) >= previousWrite, "Save Subtitles did not reach a clean state");
+            }
+            File.Copy(fixturePath, Path.Combine(options.Artifacts, label + ".ass"));
+            return ContractDocument(fixturePath);
+        }
+        void ConfirmToolRadio(string tooltip)
+        {
+            var deadline = Deadline(5);
+            while (Stopwatch.GetTimestamp() < deadline)
+            {
+                var radio = window.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().First(element => element.Current.Name.Contains(tooltip, StringComparison.OrdinalIgnoreCase));
+                if (radio.TryGetCurrentPattern(TogglePattern.Pattern, out var toggle) && ((TogglePattern)toggle).Current.ToggleState == ToggleState.On)
+                {
+                    File.AppendAllText(Path.Combine(options.Artifacts, "toolbar-evidence.ndjson"), JsonSerializer.Serialize(new
+                    {
+                        phase = "post-state",
+                        target = radio.Current.Name,
+                        state = "On"
+                    }) + Environment.NewLine);
+                    return;
+                }
+                if (radio.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selection) && ((SelectionItemPattern)selection).Current.IsSelected)
+                    return;
+                Thread.Sleep(50);
+            }
+            throw new InvalidOperationException("Single tool command did not select the intended radio: " + tooltip);
+        }
+        const string linkingTooltip = "Link origins and clips to supported subtitle geometry edits";
+        var baseline = Save("before");
+        Capture("before");
+        if (name != "off")
+        {
+            ClickToolbar(linkingTooltip);
+            ConfirmToolRadio(linkingTooltip);
+            var intermediate = tool == "Drag subtitles" ? "Scale subtitles on X and Y axes" : "Drag subtitles";
+            ClickToolbar(intermediate);
+            ConfirmToolRadio(intermediate);
+            ConfirmToolRadio(linkingTooltip);
+            ClickToolbar(tool);
+            ConfirmToolRadio(tool);
+            ConfirmToolRadio(linkingTooltip);
+        }
+        var checkHeldLink = name is "translate" or "off" or "scale" or "origin" or "origin-xy" or "clip-only";
+        var heldLinkFailures = new List<string>();
+        var linkingToolbar = nint.Zero;
+        var linkingButtonId = 0;
+        var linkingMenuId = 0;
+        if (checkHeldLink)
+        {
+            var target = window.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>()
+                .Single(element => element.Current.ControlType == ControlType.Button && element.Current.Name.Contains(linkingTooltip, StringComparison.OrdinalIgnoreCase));
+            var automationId = target.Current.AutomationId;
+            var observedId = Regex.Match(automationId, @"(?:^|\D)(\d+)$");
+            if (!observedId.Success || !int.TryParse(observedId.Groups[1].Value, out linkingButtonId))
+                throw new InvalidOperationException("Geometry Linking has no observed numeric toolbar command ID: " + automationId);
+            for (var parent = TreeWalker.RawViewWalker.GetParent(target); parent is not null; parent = TreeWalker.RawViewWalker.GetParent(parent))
+                if (parent.Current.ControlType == ControlType.ToolBar && parent.Current.NativeWindowHandle != 0)
+                {
+                    linkingToolbar = new nint(parent.Current.NativeWindowHandle);
+                    break;
+                }
+            isolation.VerifyWindow(linkingToolbar, process);
+            if (NativeClassName(linkingToolbar) != "ToolbarWindow32"
+                || SendWindowMessage(linkingToolbar, WindowMessage.ToolbarCommandToIndex, linkingButtonId, 0) < 0)
+                throw new InvalidOperationException("Observed Geometry Linking command is not in its native toolbar");
+            linkingMenuId = ObservedWindowsCommand.FindMenuCommand(hwnd, process.Id, "Geometry Test", "Geometry Linking");
+            File.AppendAllText(Path.Combine(options.Artifacts, "toolbar-evidence.ndjson"), JsonSerializer.Serialize(new
+            {
+                phase = "held-link-target-observed", automation_id = automationId, button_id = linkingButtonId,
+                menu_id = linkingMenuId, toolbar = $"0x{linkingToolbar:X}", pid = process.Id, desktop = isolation.Name
+            }) + Environment.NewLine);
+            RecordHeldLink("before", false);
+        }
+        void RecordHeldLink(string phase, bool captured)
+        {
+            Thread.Sleep(200);
+            CaptureState(canvas, captured);
+            isolation.VerifyWindow(linkingToolbar, process);
+            var state = SendWindowMessage(linkingToolbar, WindowMessage.ToolbarGetState, linkingButtonId, 0).ToInt64();
+            if (state < 0) throw new InvalidOperationException("Observed Geometry Linking toolbar command disappeared");
+            var enabled = (state & 4) != 0;
+            var selected = (state & 1) != 0;
+            var expectedSelected = name != "off";
+            var screenshot = "link-" + phase + "-window.png";
+            isolation.VerifyWindow(hwnd, process);
+            ScreenCapture.SaveWindowPng(hwnd, Path.Combine(options.Artifacts, screenshot));
+            CaptureState(canvas, captured);
+            File.AppendAllText(Path.Combine(options.Artifacts, "link-state-evidence.ndjson"), JsonSerializer.Serialize(new
+            {
+                phase, state, enabled, selected, expected_selected = expectedSelected, expected_enabled = true,
+                captured, screenshot, route = "TB_GETSTATE", button_id = linkingButtonId,
+                toolbar = $"0x{linkingToolbar:X}", pid = process.Id, desktop = isolation.Name
+            }) + Environment.NewLine);
+            if (!enabled || selected != expectedSelected)
+                heldLinkFailures.Add($"{phase}: expected enabled=true, selected={expectedSelected}; got enabled={enabled}, selected={selected}");
+        }
+        var rejectionRelease = Pixel(180, 120);
+        void Drag(PointI from, PointI to, bool rejecting = false)
+        {
+            Mouse(canvas, WindowMessage.MouseMove, from, 0);
+            Mouse(canvas, WindowMessage.LeftButtonDown, from, NativeConstants.MouseKeyLeftButton);
+            CaptureState(canvas, true);
+            if (checkHeldLink) RecordHeldLink("down", true);
+            if (rejecting)
+            {
+                rejectionRelease = to;
+                PostMouse(canvas, WindowMessage.MouseMove, to, NativeConstants.MouseKeyLeftButton);
+                return;
+            }
+            Mouse(canvas, WindowMessage.MouseMove, new PointI((from.X + to.X) / 2, (from.Y + to.Y) / 2), NativeConstants.MouseKeyLeftButton);
+            if (checkHeldLink)
+            {
+                RecordHeldLink("held", true);
+                isolation.VerifyWindow(hwnd, process);
+                ObservedWindowsCommand.PostMenuCommand(hwnd, process.Id, linkingMenuId);
+                File.AppendAllText(Path.Combine(options.Artifacts, "command-evidence.ndjson"), JsonSerializer.Serialize(new
+                {
+                    label = "Geometry Linking", id = linkingMenuId, phase = "held", posts = 1,
+                    pid = process.Id, desktop = isolation.Name
+                }) + Environment.NewLine);
+                RecordHeldLink("held-after-command", true);
+            }
+            Mouse(canvas, WindowMessage.LeftButtonUp, to, 0);
+            CaptureState(canvas, false);
+            if (checkHeldLink)
+            {
+                RecordHeldLink("released", false);
+                if (heldLinkFailures.Count != 0)
+                    throw new InvalidOperationException("Geometry Linking held-state contract failed: " + string.Join("; ", heldLinkFailures));
+            }
+        }
+        var delta = new PointI(40, 30);
+        string? lastValidDocument = null;
+        void Phase(string value) => File.AppendAllText(Path.Combine(options.Artifacts, "gesture-phases.txt"), value + Environment.NewLine);
+        if (name == "last-valid-preview")
+        {
+            var from = Pixel(100, 80);
+            Drag(from, new PointI(from.X + 40, from.Y + 20));
+            lastValidDocument = Save("last-valid-preview");
+            if (lastValidDocument == baseline)
+                throw new InvalidOperationException("Legal reference gesture did not change either selected line");
+            var referenceTexts = File.ReadLines(fixturePath).Where(line => line.StartsWith("Dialogue:")).Take(2).Select(line => line.Split(',', 10)[9]).ToArray();
+            for (var index = 0; index < 2; ++index)
+            {
+                AssertGeometryTag(referenceTexts[index], "fscx", 150);
+                AssertGeometryTag(referenceTexts[index], "fscy", 75);
+                var ax = index == 0 ? 280d : 410d;
+                var ay = index == 0 ? 140d : 270d;
+                var screenXRatio = index == 0 ? .75d : 75d / 80;
+                var screenYRatio = index == 0 ? 1.5d : 1d;
+                AssertGeometryClip(index == 0 ? firstTags : secondTags, referenceTexts[index], (x, y) => (ax + (x - ax) * screenXRatio, ay + (y - ay) * screenYRatio));
+            }
+            Undo();
+            AssertContractEqual(baseline, Save("last-valid-reference-undo"), "Reference preparation restores the original selected events");
+            Phase("reference-restored");
+            Mouse(canvas, WindowMessage.LeftButtonDown, from, NativeConstants.MouseKeyLeftButton);
+            Phase("second-down-returned");
+            CaptureState(canvas, true);
+            Phase("second-captured");
+            Mouse(canvas, WindowMessage.MouseMove, new PointI(from.X + 40, from.Y + 20), NativeConstants.MouseKeyLeftButton);
+            Phase("valid-preview-returned");
+            rejectionRelease = new PointI(from.X + 80, from.Y + 80);
+            PostMouse(canvas, WindowMessage.MouseMove, rejectionRelease, NativeConstants.MouseKeyLeftButton);
+            Phase("invalid-preview-posted");
+        }
+        else if (name == "mixed-static-endpoint")
+        {
+            var from = Pixel(420, 320);
+            Drag(from, new PointI(from.X + delta.X, from.Y + delta.Y));
+        }
+        else if (name == "move")
+        {
+            var target = Pixel(360, 240);
+            Mouse(canvas, WindowMessage.LeftButtonDown, target, NativeConstants.MouseKeyLeftButton);
+            Mouse(canvas, WindowMessage.LeftButtonUp, target, 0);
+            Mouse(canvas, (WindowMessage)0x203, target, NativeConstants.MouseKeyLeftButton);
+            Mouse(canvas, WindowMessage.LeftButtonUp, target, 0);
+        }
+        else if (name == "normalize")
+        {
+            File.WriteAllText(Path.Combine(options.Artifacts, "normalize-uia.txt"), string.Join('\n', window.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().Select(element => element.Current.ControlType.ProgrammaticName + ":" + element.Current.Name)));
+            Command("Normalize X");
+        }
+        else if (name is "rotate" or "reject-xy" or "xy-no-clip" or "scale-nudge")
+            Command("Nudge Right");
+        else if (name == "clip-only")
+        {
+            var from = Pixel(260, 100);
+            Drag(from, new PointI(from.X + 40, from.Y + 30));
+        }
+        else if (name == "nudge-origin")
+            Command("Nudge Up");
+        else if (name is "origin" or "origin-xy")
+        {
+            var from = Pixel(260, 180);
+            Drag(from, new PointI(from.X + 30, from.Y + 20));
+        }
+        else if (scaleCases.Contains(name))
+        {
+            var from = Pixel(100, 80);
+            Drag(from, new PointI(from.X + 80, from.Y + (name == "reject-zero-scale" ? 80 : 40)), name.StartsWith("reject-"));
+        }
+        else if (name is "no-motion" or "return-to-start")
+        {
+            var from = Pixel(300, 200);
+            Mouse(canvas, WindowMessage.LeftButtonDown, from, NativeConstants.MouseKeyLeftButton);
+            CaptureState(canvas, true);
+            if (name == "return-to-start")
+                Mouse(canvas, WindowMessage.MouseMove, new PointI(from.X + 40, from.Y + 30), NativeConstants.MouseKeyLeftButton);
+            Mouse(canvas, WindowMessage.LeftButtonUp, from, 0);
+            CaptureState(canvas, false);
+        }
+        else
+        {
+            var from = Pixel(300, 200);
+            Drag(from, new PointI(from.X + delta.X, from.Y + delta.Y), name == "reject-endpoint");
+        }
+        if (name.StartsWith("reject-") || name == "last-valid-preview")
+        {
+            Phase("rejection-release-start");
+            PostMouse(canvas, WindowMessage.LeftButtonUp, rejectionRelease, 0);
+            Phase("rejection-release-posted");
+            CaptureState(canvas, false);
+            Phase("rejection-released");
+            var dialog = Dialog("Geometry Linking");
+            nint[] children = [];
+            var message = "";
+            var route = "native-static";
+            string[] lastUiTree = [];
+            void WarningEvidence() => File.WriteAllText(Path.Combine(options.Artifacts, "warning-provider.json"), JsonSerializer.Serialize(new
+            {
+                route, dialog = $"0x{dialog:X}", native_class = NativeClassName(dialog),
+                child_classes = children.Select(NativeClassName).Distinct().ToArray(), actual_message = message,
+                last_empty_uia_tree = lastUiTree, pid = process.Id, desktop = isolation.Name
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            WaitUntil(() =>
+            {
+                isolation.VerifyWindow(dialog, process);
+                children = EnumerateChildWindows(dialog).ToArray();
+                message = string.Join(" ", children.Where(target => NativeClassName(target) == "Static").Select(WindowText)).Trim();
+                if (message.Length == 0 && children.Any(target => NativeClassName(target) == "DirectUIHWND"))
+                {
+                    var exactDialog = AutomationElement.FromHandle(dialog);
+                    var elements = exactDialog.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text)).Cast<AutomationElement>().ToArray();
+                    if (elements.Any(element => element.Current.ProcessId != process.Id))
+                        throw new InvalidOperationException("TaskDialog text provider escaped the owned dialog process");
+                    message = string.Join(" ", elements.Select(element => element.Current.Name)).Trim();
+                    route = "directui-taskdialog-exact-hwnd-uia-text";
+                    if (message.Length == 0)
+                        lastUiTree = exactDialog.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().Select(element => element.Current.ControlType.ProgrammaticName + ":" + element.Current.Name).ToArray();
+                }
+                WarningEvidence();
+                return message.Length != 0;
+            }, "Owned warning provider did not publish nonempty text");
+            File.WriteAllText(Path.Combine(options.Artifacts, "rejection.txt"), message);
+            if (!message.Contains("No selected line was changed", StringComparison.Ordinal))
+                throw new InvalidOperationException("Rejection did not state batch atomicity");
+            var expectedReason = name switch
+            {
+                "reject-animation" or "reject-animated-only" or "reject-animated-spaced" => "Animated",
+                "reject-endpoint" => "single move endpoint",
+                "reject-xy" or "reject-perspective-scale" => "Perspective",
+                "reject-mixed" => "Visible runs",
+                "reject-reset" => "style resets",
+                "reject-multiclip" => "clip precedence",
+                "reject-zero-scale" or "last-valid-preview" => "Non-positive",
+                "reject-malformed" => "Malformed",
+                "reject-decimal-curve" => "libass and VSFilter",
+                "reject-effect" => "Scrolling",
+                "reject-pos-move" => "Conflicting position",
+                "reject-duplicate-xy" => "Duplicate pose",
+                "reject-vertical-font" => "Vertical fonts",
+                "reject-implicit-fractional" => "default position",
+                "reject-implicit-reset" => "style resets",
+                "reject-malformed-position" => "Malformed position",
+                _ => throw new InvalidOperationException("No expected failure boundary configured")
+            };
+            if (!message.Contains(expectedReason, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Expected rejection boundary " + expectedReason + ", observed: " + message);
+            isolation.VerifyWindow(dialog, process);
+            ScreenCapture.SaveWindowPng(dialog, Path.Combine(options.Artifacts, "rejected-dialog.png"));
+            Button(dialog, "OK");
+            WaitUntil(() => !isolation.Windows(process).Contains(dialog), "Warning dialog did not close");
+            AssertContractEqual(lastValidDocument ?? baseline, Save("rejected"), "Unsupported update leaves every selected line at the last valid preview");
+            if (lastValidDocument is not null)
+            {
+                Capture("after");
+                Undo();
+                AssertContractEqual(baseline, Save("undo"), "One Undo restores the original selection after an invalid final update");
+
+                Command("Redo");
+                Thread.Sleep(300);
+                AssertContractEqual(lastValidDocument, Save("redo"), "Redo restores the last valid preview, not the invalid update");
+            }
+        }
+        else if (name is "no-motion" or "return-to-start")
+        {
+            AssertContractEqual(baseline, Save("after"), "No movement or return to start preserves the original ASS text exactly");
+            Capture("after");
+        }
+        else
+        {
+            var actual = Save("after");
+            string Neutral(string document)
+            {
+                var documentLines = document.Split('\n');
+                var selectedCount = 0;
+                for (var i = 0; i < documentLines.Length && selectedCount < 2; ++i)
+                {
+                    if (!documentLines[i].StartsWith("Dialogue:", StringComparison.Ordinal))
+                        continue;
+                    documentLines[i] = Regex.Replace(documentLines[i], @"\\(?:pos|move|org|fscx|fscy|frz|frx|fry)(?:\([^)]*\)|[-+\d.eE]+)|\\i?clip\([^)]*\)", "");
+                    ++selectedCount;
+                }
+                return string.Join('\n', documentLines);
+            }
+            AssertContractEqual(Neutral(baseline), Neutral(actual), "Both selected lines preserve all unrelated tags, styles, text and other dialogues");
+            var texts = File.ReadLines(fixturePath).Where(line => line.StartsWith("Dialogue:")).Take(2).Select(line => line.Split(',', 10)[9]).ToArray();
+            for (var index = 0; index < 2; ++index)
+            {
+                var old = index == 0 ? firstTags : secondTags;
+                var px = index == 0 ? 300d : 420d;
+                var py = index == 0 ? 200d : 320d;
+                var ox = index == 0 ? 260d : 390d;
+                var oy = index == 0 ? 180d : 300d;
+                if (name == "implicit-integer")
+                {
+                    px = index == 0 ? 315 : 314;
+                    py = index == 0 ? 446 : 427;
+                    ox = index == 0 ? 295 : 294;
+                    oy = index == 0 ? 426 : 407;
+                }
+                Func<double, double, (double X, double Y)> mapping = (x, y) => (x, y);
+                if (name is "translate" or "scaled-curve" or "empty" or "decimal-curve")
+                {
+                    var dx = 40d * 640 / rect.Width;
+                    var dy = 30d * 480 / rect.Height;
+                    mapping = (x, y) => (x + dx, y + dy);
+                    AssertGeometryTag(texts[index], "pos", px + dx, py + dy);
+                    AssertGeometryTag(texts[index], "org", ox + dx, oy + dy);
+                }
+                if (name == "off")
+                {
+                    AssertGeometryTag(texts[index], "pos", px + 40d * 640 / rect.Width, py + 30d * 480 / rect.Height);
+                    AssertGeometryTag(texts[index], "org", ox, oy);
+                }
+                if (name == "move")
+                {
+                    var dx = Pixel(360, 240).X * 640d / rect.Width - 300;
+                    var dy = Pixel(360, 240).Y * 480d / rect.Height - 200;
+                    mapping = (x, y) => (x + dx, y + dy);
+                    AssertGeometryTag(texts[index], "move", px + dx, py + dy, (index == 0 ? 360 : 470) + dx, (index == 0 ? 250 : 370) + dy, index == 0 ? 400 : 200, index == 0 ? 1600 : 1800);
+                }
+                if (name is "origin" or "origin-xy")
+                {
+                    var dx = 30d * 640 / rect.Width;
+                    var dy = 20d * 480 / rect.Height;
+                    mapping = (x, y) => (x + dx - dy, y + dx + dy);
+                    AssertGeometryTag(texts[index], "org", ox + dx, oy + dy);
+                }
+                if (name == "endpoint-no-geometry")
+                {
+                    var dx = 40d * 640 / rect.Width;
+                    var dy = 30d * 480 / rect.Height;
+                    AssertGeometryTag(texts[index], "move", px + dx, py + dy, index == 0 ? 360 : 470, index == 0 ? 250 : 370, index == 0 ? 0 : -200, index == 0 ? 1600 : 1800);
+                }
+                if (name == "mixed-static-endpoint")
+                {
+                    var dx = 40d * 640 / rect.Width;
+                    var dy = 30d * 480 / rect.Height;
+                    if (index == 0)
+                    {
+                        mapping = (x, y) => (x + dx, y + dy);
+                        AssertGeometryTag(texts[index], "pos", px + dx, py + dy);
+                        AssertGeometryTag(texts[index], "org", ox + dx, oy + dy);
+                    }
+                    else
+                    {
+                        AssertGeometryTag(texts[index], "move", px + dx, py + dy, 470, 370, 0, 1600);
+                        if (Regex.IsMatch(texts[index], @"\\(?:pos|org|i?clip)\("))
+                            throw new InvalidOperationException("Bare move endpoint unexpectedly gained attached geometry or position");
+                    }
+                }
+                if (name == "clip-only")
+                {
+                    AssertGeometryTag(texts[index], "pos", px, py);
+                    AssertGeometryTag(texts[index], "org", ox, oy);
+                    AssertGeometryTag(texts[index], "frz", 90);
+                    AssertGeometryTag(texts[index], "fscx", index == 0 ? 100 : 150);
+                    AssertGeometryTag(texts[index], "fscy", index == 0 ? 100 : 80);
+                }
+                if (name is "scale" or "scale-shear" or "normalize" or "drawing-tail" or "scale-layout" or "scale-nudge" or "scale-curve" or "drawing-tail-vertical" or "implicit-integer" or "implicit-no-geometry")
+                {
+                    var sx = index == 0 ? (name == "normalize" ? 200d : 100d) : 150d;
+                    var sy = index == 0 ? (name == "normalize" ? 50d : 100d) : 80d;
+                    var nx = name == "normalize" ? 100d : name == "scale-nudge" ? 110d : 200d;
+                    var ny = name == "normalize" ? sy / sx * 100 : name == "scale-nudge" ? 100d : 50d;
+                    AssertGeometryTag(texts[index], "fscx", nx);
+                    AssertGeometryTag(texts[index], "fscy", ny);
+                    if (name is "implicit-integer" or "implicit-no-geometry")
+                    {
+                        if (Regex.IsMatch(texts[index], @"\\(?:pos|move)\("))
+                            throw new InvalidOperationException("Scale unexpectedly materialized an implicit position");
+                    }
+                    else
+                        AssertGeometryTag(texts[index], "pos", px, py);
+                    if (name == "implicit-no-geometry")
+                    {
+                        if (Regex.IsMatch(texts[index], @"\\(?:org|i?clip)\("))
+                            throw new InvalidOperationException("Ordinary scale unexpectedly added attached geometry");
+                    }
+                    else
+                        AssertGeometryTag(texts[index], "org", ox, oy);
+                    var a = (name == "scale-shear" ? -30d : -90d) * Math.PI / 180;
+                    var cos = Math.Cos(a);
+                    var sin = Math.Sin(a);
+                    var metric = name == "scale-layout" ? 2d : 1d;
+                    var ax = ox + cos * (px - ox) - sin * (py - oy) / metric;
+                    var ay = oy + sin * (px - ox) * metric + cos * (py - oy);
+                    mapping = (x, y) => { var vx = (x - ax) * metric; var vy = y - ay; var lx = (cos * vx + sin * vy) * nx / sx; var ly = (-sin * vx + cos * vy) * ny / sy; return (ax + (cos * lx - sin * ly) / metric, ay + sin * lx + cos * ly); };
+                }
+                if (name == "rotate")
+                {
+                    var angle = -15d * Math.PI / 180;
+                    mapping = (x, y) => (ox + Math.Cos(angle) * (x - ox) - Math.Sin(angle) * (y - oy), oy + Math.Sin(angle) * (x - ox) + Math.Cos(angle) * (y - oy));
+                    AssertGeometryTag(texts[index], "frz", 105);
+                }
+                if (name == "nudge-origin")
+                {
+                    mapping = (x, y) => (x + 10, y - 10);
+                    AssertGeometryTag(texts[index], "org", ox, oy - 10);
+                }
+                if (name == "xy-no-clip")
+                    AssertGeometryTag(texts[index], "fry", 15);
+                if (name is not "xy-no-clip" and not "endpoint-no-geometry" and not "clip-only" and not "implicit-no-geometry" && !(name == "mixed-static-endpoint" && index == 1))
+                    AssertGeometryClip(old, texts[index], mapping);
+            }
+            Capture("after");
+            Undo();
+            AssertContractEqual(baseline, Save("undo"), "One Undo restores all selected lines exactly");
+
+            Command("Redo");
+            Thread.Sleep(300);
+            AssertContractEqual(actual, Save("redo"), "One Redo restores the complete linked edit");
+        }
+        isolation.VerifyWindow(hwnd, process);
+        Close();
+        var actualProviderEvidence = ReadGeometryProviderEvidence(profilePath);
+        if (actualProviderEvidence.Count == 0 || actualProviderEvidence.Any(evidence => evidence.Provider != options.SubtitleProvider))
+            throw new InvalidOperationException("Actual host did not exclusively select the requested renderer");
+        var actualEvidenceKeys = actualProviderEvidence.Select(evidence => (evidence.LogFile, evidence.LineNumber)).ToHashSet();
+        IReadOnlyList<GeometryProviderEvidence> expectedProviderEvidence = [];
+        if (name == "scale")
+        {
+            var expectedTags1 = @"\pos(300,200)\org(260,180)\frz90\fscx200\fscy50\clip(270,60,310,220)";
+            var expectedTags2 = @"\pos(420,320)\org(390,300)\frz90\fscx200\fscy50\iclip(6,m 12320 6933 l 13920 6933 13920 10773 12320 10773)";
+            var expectedAss = Path.Combine(options.Artifacts, "expected.ass");
+            File.WriteAllText(expectedAss, File.ReadAllText(Path.Combine(options.Artifacts, "before.ass")).Replace(firstTags, expectedTags1, StringComparison.Ordinal).Replace(secondTags, expectedTags2, StringComparison.Ordinal), new UTF8Encoding(false));
+            var expectedHost = Path.Combine(options.Artifacts, "expected-host");
+            Directory.CreateDirectory(expectedHost);
+            var expectedStart = new ProcessStartInfo(options.Executable) { UseShellExecute = false, WorkingDirectory = Environment.CurrentDirectory, WindowStyle = ProcessWindowStyle.Minimized };
+            expectedStart.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
+            foreach (var argument in new[] { "--gui-test", "host", "--profile-dir", profilePath, "--artifacts", expectedHost, "--open", expectedAss, "--open", options.Video })
+                AddArgument(expectedStart, argument);
+            process = isolation.Start(expectedStart, "expected-host");
+            AutomationProtocol.WaitForReadyArtifact(Path.Combine(expectedHost, "ready.json"), process, TimeSpan.FromSeconds(options.TimeoutSeconds));
+            hwnd = isolation.MainWindow(process, options.TimeoutSeconds);
+            failureMain = hwnd;
+            window = AutomationElement.FromHandle(hwnd);
+            isolation.VerifyWindow(hwnd, process);
+            ShowWindow(hwnd, NativeConstants.ShowNoActivate);
+            SetWindowPos(hwnd, 0, 40, 40, options.WindowWidth, options.WindowHeight, SetWindowPosFlags.NoActivate | SetWindowPosFlags.ShowWindow);
+            Thread.Sleep(options.SettleMilliseconds);
+            canvas = Canvas();
+            Capture("expected");
+            isolation.VerifyWindow(hwnd, process);
+            Close();
+            using var afterImage = new System.Drawing.Bitmap(Path.Combine(options.Artifacts, "after-frame.png"));
+            using var expectedImage = new System.Drawing.Bitmap(Path.Combine(options.Artifacts, "expected-frame.png"));
+            if (afterImage.Size != expectedImage.Size)
+                throw new InvalidOperationException("Expected render dimensions differ");
+            var differingPixels = 0;
+            for (var y = 0; y < afterImage.Height; ++y)
+                for (var x = 0; x < afterImage.Width; ++x)
+                    if (afterImage.GetPixel(x, y) != expectedImage.GetPixel(x, y))
+                        ++differingPixels;
+            File.WriteAllText(Path.Combine(options.Artifacts, "pixel-oracle.json"), JsonSerializer.Serialize(new
+            {
+                differing_pixels = differingPixels,
+                allowed_pixels = 0,
+                oracle = "independently authored fixed expected ASS"
+            }));
+            if (differingPixels != 0)
+                throw new InvalidOperationException("Independent expected render differs at " + differingPixels + " pixels");
+        }
+        if (name == "scale")
+        {
+            expectedProviderEvidence = ReadGeometryProviderEvidence(profilePath).Where(evidence => !actualEvidenceKeys.Contains((evidence.LogFile, evidence.LineNumber))).ToArray();
+            if (expectedProviderEvidence.Count == 0 || expectedProviderEvidence.Any(evidence => evidence.Provider != options.SubtitleProvider))
+                throw new InvalidOperationException("Expected-render host did not exclusively select the requested renderer");
+        }
+        var provider = ReadSelectedSubtitleProvider(profilePath);
+        if (!provider.Equals(options.SubtitleProvider, StringComparison.Ordinal))
+            throw new InvalidOperationException("Unexpected renderer: " + provider);
+        File.WriteAllText(Path.Combine(options.Artifacts, "geometry-result.json"), JsonSerializer.Serialize(new
+        {
+            scenario = name,
+            passed = true,
+            provider,
+            provider_evidence = new
+            {
+                actual_host = actualProviderEvidence,
+                expected_host = expectedProviderEvidence
+            },
+            canvas = new
+            {
+                rect.Width,
+                rect.Height
+            },
+            total_timeout_seconds = 180
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
+    }
+    catch (Exception error)
+    {
+        File.WriteAllText(Path.Combine(options.Artifacts, "geometry-result.json"), JsonSerializer.Serialize(new
+        {
+            scenario = name,
+            passed = false,
+            error = error.ToString(),
+            total_timeout_seconds = 180
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        if (process is { HasExited: false })
+        {
+            try
+            {
+                var windows = isolation.Windows(process);
+                File.WriteAllText(Path.Combine(options.Artifacts, "failure-native.txt"), string.Join('\n', windows.SelectMany(target => EnumerateChildWindows(target).Prepend(target)).Select(target => NativeClassName(target) + ":" + isolation.ReadText(target, process))));
+            }
+            catch (Exception secondary) { File.AppendAllText(Path.Combine(options.Artifacts, "secondary-diagnostics.txt"), secondary + Environment.NewLine); }
+            try
+            {
+                isolation.VerifyWindow(failureMain, process);
+                ScreenCapture.SaveWindowPng(failureMain, Path.Combine(options.Artifacts, "failure-main-window.png"));
+            }
+            catch (Exception secondary) { File.AppendAllText(Path.Combine(options.Artifacts, "secondary-diagnostics.txt"), secondary + Environment.NewLine); }
+        }
+        throw;
+    }
+    finally { if (process is { HasExited: false }) isolation.Stop(process); }
+}
+
+static void ClickGeometryToolbar(AutomationElement window, Process process, string tooltip, string artifacts, PrivateDesktop isolation)
+{
+    isolation.VerifyWindow(new nint(window.Current.NativeWindowHandle), process);
+    var target = window.FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().Single(element => element.Current.IsEnabled && element.Current.ControlType == ControlType.Button && element.Current.Name.Contains(tooltip, StringComparison.OrdinalIgnoreCase));
+    var rectangle = target.Current.BoundingRectangle;
+    if (rectangle.IsEmpty || rectangle.Width <= 0 || rectangle.Height <= 0 || target.Current.IsOffscreen)
+        throw new InvalidOperationException("Toolbar target is not visible: " + tooltip);
+    nint toolbar = 0;
+    for (var parent = TreeWalker.RawViewWalker.GetParent(target); parent is not null; parent = TreeWalker.RawViewWalker.GetParent(parent))
+    {
+        if (parent.Current.ControlType != ControlType.ToolBar || parent.Current.NativeWindowHandle == 0)
+            continue;
+        toolbar = new nint(parent.Current.NativeWindowHandle);
+        break;
+    }
+    if (toolbar == 0 || NativeClassName(toolbar) != "ToolbarWindow32")
+        throw new InvalidOperationException("Target does not belong to a native toolbar: " + tooltip);
+    if (GetWindowThreadProcessId(toolbar, out var owner) == 0 || owner != process.Id)
+        throw new InvalidOperationException("Toolbar is not owned by the current host");
+    var point = new NativePoint { X = (int)Math.Round(rectangle.Left + rectangle.Width / 2), Y = (int)Math.Round(rectangle.Top + rectangle.Height / 2) };
+    if (!ScreenToClient(toolbar, ref point) || !GetClientRect(toolbar, out var client) || point.X < client.Left || point.X >= client.Right || point.Y < client.Top || point.Y >= client.Bottom)
+        throw new InvalidOperationException("Observed toolbar center is outside its client range");
+    File.AppendAllText(Path.Combine(artifacts, "toolbar-evidence.ndjson"), JsonSerializer.Serialize(new
+    {
+        phase = "single-actuation",
+        target = target.Current.Name,
+        owner,
+        toolbar = $"0x{toolbar.ToInt64():X}",
+        screen = new
+        {
+            rectangle.Left,
+            rectangle.Top,
+            rectangle.Width,
+            rectangle.Height
+        },
+        client = new
+        {
+            point.X,
+            point.Y
+        }
+    }) + Environment.NewLine);
+    var location = new PointI(point.X, point.Y);
+    isolation.VerifyWindow(toolbar, process);
+    SendMouseToWindow(toolbar, WindowMessage.MouseMove, location, 0);
+    isolation.VerifyWindow(toolbar, process);
+    SendMouseToWindow(toolbar, WindowMessage.LeftButtonDown, location, NativeConstants.MouseKeyLeftButton);
+    isolation.VerifyWindow(toolbar, process);
+    SendMouseToWindow(toolbar, WindowMessage.LeftButtonUp, location, 0);
+}
+
+static IReadOnlyList<GeometryProviderEvidence> ReadGeometryProviderEvidence(string profilePath)
+{
+    var records = new List<GeometryProviderEvidence>();
+    var logRoot = Path.Combine(profilePath, "user", "log");
+    const string prefix = "Selected subtitles provider: ";
+    foreach (var path in Directory.EnumerateFiles(logRoot, "*.ndjson"))
+    {
+        var lineNumber = 0;
+        foreach (var line in File.ReadLines(path))
+        {
+            ++lineNumber;
+            using var entry = JsonDocument.Parse(line);
+            if (entry.RootElement.TryGetProperty("section", out var section) && section.GetString() == "subtitle/provider/select"
+                && entry.RootElement.TryGetProperty("message", out var message) && message.GetString() is { } text && text.StartsWith(prefix, StringComparison.Ordinal))
+                records.Add(new GeometryProviderEvidence(Path.GetFileName(path), lineNumber, text[prefix.Length..]));
+        }
+    }
+    return records;
+}
+
+static void AssertGeometryTag(string text, string tag, params double[] expected)
+{
+    var match = Regex.Match(text, @"\\" + tag + @"(?:\((?<args>[^)]*)\)|(?<args>[-+\d.eE]+))");
+    if (!match.Success || Regex.Matches(text, @"\\" + tag + @"(?:\(|[-+\d])").Count != 1)
+        throw new InvalidOperationException("Missing or duplicated geometry tag: " + tag);
+    var values = match.Groups["args"].Value.Split(',').Select(value => double.Parse(value, CultureInfo.InvariantCulture)).ToArray();
+    if (values.Length != expected.Length || values.Zip(expected).Any(pair => Math.Abs(pair.First - pair.Second) > .001))
+        throw new InvalidOperationException(tag + " expected " + string.Join(',', expected) + " actual " + string.Join(',', values));
+}
+
+static void AssertGeometryClip(string source, string actual, Func<double, double, (double X, double Y)> mapping)
+{
+    (bool Inverse, string Commands, List<(double X, double Y)> Points) Read(string text)
+    {
+        var match = Regex.Match(text, @"\\(?<inverse>i?)clip\((?<args>[^)]*)\)");
+        if (!match.Success)
+            throw new InvalidOperationException("Missing linked clip");
+        var args = match.Groups["args"].Value;
+        var pieces = args.Split(',');
+        var points = new List<(double, double)>();
+        var numeric = pieces.Select(value => double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) ? (double?)number : null).ToArray();
+        if (pieces.Length == 4 && numeric.All(value => value.HasValue))
+        {
+            var x1 = numeric[0]!.Value;
+            var y1 = numeric[1]!.Value;
+            var x2 = numeric[2]!.Value;
+            var y2 = numeric[3]!.Value;
+            if (x2 > x1 && y2 > y1)
+                points.AddRange([(x1, y1), (x2, y1), (x2, y2), (x1, y2)]);
+            return (match.Groups["inverse"].Value == "i", "rectangle", points);
+        }
+        var scale = pieces.Length == 2 ? int.Parse(pieces[0], CultureInfo.InvariantCulture) : 1;
+        var shape = pieces[^1];
+        var coordinates = Regex.Matches(shape, @"[-+]?\d+(?:\.\d+)?").Select(value =>
+        {
+            var raw = double.Parse(value.Value, CultureInfo.InvariantCulture) * 64;
+            var nearest = Math.Round(raw, MidpointRounding.ToEven);
+            var truncated = Math.Truncate(raw);
+            if (nearest != truncated)
+                throw new InvalidOperationException("Oracle source has renderer-divergent fixed-point coordinates");
+            return nearest / 64 * Math.Pow(2, 1 - scale);
+        }).ToArray();
+        for (var i = 0; i < coordinates.Length; i += 2)
+            points.Add((coordinates[i], coordinates[i + 1]));
+        return (match.Groups["inverse"].Value == "i", string.Join(' ', Regex.Matches(shape, "[mnlbspc]").Select(value => value.Value)), points);
+    }
+    var before = Read(source);
+    var after = Read(actual);
+    if (before.Inverse != after.Inverse || before.Points.Count != after.Points.Count)
+        throw new InvalidOperationException("Clip polarity or point count changed");
+    if (before.Commands != "rectangle" && before.Commands != after.Commands)
+        throw new InvalidOperationException("Drawing contour/curve commands changed");
+    for (var i = 0; i < before.Points.Count; ++i)
+    {
+        var target = mapping(before.Points[i].X, before.Points[i].Y);
+        var found = after.Points[i];
+        if (Math.Abs(target.X - found.X) > .016 || Math.Abs(target.Y - found.Y) > .016)
+            throw new InvalidOperationException($"Clip point {i}: expected {target}, actual {found}");
+    }
+}
+
+
+
+
+
+
+
 
 static int RunInputContract(DriverOptions options)
 {
@@ -912,13 +1936,13 @@ static void SelectVisibleDialogueLines(AutomationElement mainWindow)
     Thread.Sleep(200);
 }
 
-static int ConfirmMultiSelection(AutomationElement mainWindow, Process process, int timeoutSeconds, string stage)
+static int ConfirmMultiSelection(AutomationElement mainWindow, Process process, int timeoutSeconds, string stage, Action? checkAlive = null)
 {
     var deadline = Deadline(timeoutSeconds);
     var status = "<StatusBar unavailable>";
     do
     {
-        ThrowIfProcessFailed(process);
+        if (checkAlive is null) ThrowIfProcessFailed(process); else checkAlive();
         var names = new List<string>();
         var descriptions = new List<string>();
         var statusBars = mainWindow.FindAll(
@@ -1165,7 +2189,8 @@ static void WaitForCapture(
     nint videoCanvas,
     bool captured,
     Process process,
-    int timeoutSeconds)
+    int timeoutSeconds,
+    Action? checkAlive = null)
 {
     var threadId = GetWindowThreadProcessId(videoCanvas, out _);
     if (threadId == 0)
@@ -1178,7 +2203,7 @@ static void WaitForCapture(
             throw new Win32Exception(Marshal.GetLastWin32Error(), "GetGUIThreadInfo failed");
         if (captured ? info.Capture == videoCanvas : info.Capture == 0)
             return;
-        ThrowIfProcessFailed(process);
+        if (checkAlive is null) ThrowIfProcessFailed(process); else checkAlive();
         Thread.Sleep(5);
     }
     throw new TimeoutException(captured
@@ -1285,6 +2310,15 @@ static extern bool GetWindowRect(nint hwnd, out NativeRect rect);
 [DllImport("user32.dll")]
 static extern bool GetClientRect(nint hwnd, out NativeRect rect);
 
+[DllImport("user32.dll",SetLastError=true)]
+static extern bool ScreenToClient(nint window,ref NativePoint point);
+
+[DllImport("user32.dll", EntryPoint = "GetParent")]
+static extern nint NativeGetParent(nint window);
+
+[DllImport("user32.dll", EntryPoint = "GetDlgCtrlID")]
+static extern int NativeGetDlgCtrlId(nint window);
+
 [DllImport("user32.dll")]
 static extern bool ShowWindow(nint hwnd, int command);
 
@@ -1310,6 +2344,9 @@ static extern nint SendMessageTimeout(
 
 [DllImport("user32.dll", SetLastError = true)]
 static extern bool PostMessage(nint hwnd, uint message, nint wParam, nint lParam);
+
+[DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+static extern nint SendMessageStringTimeout(nint hwnd, uint message, nint parameter, StringBuilder text, SendMessageTimeoutFlags flags, uint timeout, out nint result);
 
 [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
 static extern nint SendMessageTextTimeout(
@@ -1622,6 +2659,8 @@ static class Fixture
         return output.ToString().Replace(" )}", ")}", StringComparison.Ordinal);
     }
 }
+
+sealed record GeometryProviderEvidence(string LogFile,int LineNumber,string Provider);
 
 sealed record AssDialogueSnapshot(
     string SerializedDialogue,
@@ -1986,12 +3025,21 @@ enum WindowMessage : uint
     LeftButtonDown = 0x0201,
     LeftButtonUp = 0x0202,
     LeftButtonDoubleClick = 0x0203,
+    ToolbarGetState = 0x0412,
+    ToolbarCommandToIndex = 0x0419,
 }
 
 [Flags]
 enum KeyboardInputFlags : uint
 {
     KeyUp = 0x0002,
+}
+
+[StructLayout(LayoutKind.Sequential)]
+struct NativePoint
+{
+    public int X;
+    public int Y;
 }
 
 [StructLayout(LayoutKind.Sequential)]

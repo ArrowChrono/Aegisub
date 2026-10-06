@@ -82,6 +82,8 @@
         "video/tool/measure",
         "video/tool/motion_track",
         "",
+        "video/tool/geometry_linking",
+        "",
         "help/video"
     ]
 }

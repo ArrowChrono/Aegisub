@@ -302,6 +302,7 @@ void VisualToolRotateXY::DrawOverlay(VideoOverlayDrawContext &context) {
 }
 
 bool VisualToolRotateXY::InitializeHold() {
+	SetGeometryEditKind(GeometryEditKind::Perspective);
 	orig_x = angle_x;
 	orig_y = angle_y;
 
@@ -324,20 +325,22 @@ void VisualToolRotateXY::UpdateHold() {
 	angle_x = fmodf(angle_x + 360.f, 360.f);
 	angle_y = fmodf(angle_y + 360.f, 360.f);
 
-	SetSelectedOverride("\\frx", agi::format("%.4g", angle_x));
-	SetSelectedOverride("\\fry", agi::format("%.4g", angle_y));
+	QueueSelectedGeometryOverride("\\frx", agi::format("%.4g", angle_x));
+	QueueSelectedGeometryOverride("\\fry", agi::format("%.4g", angle_y));
 }
 
 void VisualToolRotateXY::UpdateDrag(Feature *feature) {
-	auto org = GetLineOrigin(active_line);
-	if (!org) org = GetLinePosition(active_line);
+	auto org = GetLineOrigin(GeometrySource(active_line));
+	if (!org)
+		org = GetLinePosition(GeometrySource(active_line));
 	auto d = ToScriptCoords(feature->pos) - org;
 
 	auto core = c->GetCore();
 	for (auto line : core.selectionController->GetSelectedSet()) {
-		org = GetLineOrigin(line);
-		if (!org) org = GetLinePosition(line);
-		SetOverride(line, "\\org", (d + org).PStr());
+		org = GetLineOrigin(GeometrySource(line));
+		if (!org)
+			org = GetLinePosition(GeometrySource(line));
+		QueueGeometryOverride(line, "\\org", (d + org).PStr());
 	}
 }
 
@@ -353,6 +356,8 @@ void VisualToolRotateXY::DoRefresh() {
 }
 
 bool VisualToolRotateXY::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) {
+	BeginGeometryGesture();
+	SetGeometryEditKind(GeometryEditKind::Perspective);
 	if (!active_line)
 		return false;
 
@@ -364,15 +369,20 @@ bool VisualToolRotateXY::Nudge(Vector2D direction, VisualNudgeMagnitude magnitud
 	// Same polarity as UpdateHold: right → +\fry, up → +\frx
 	if (direction.X() != 0.f) {
 		angle_y = fmodf(angle_y + direction.X() * step + 360.f, 360.f);
-		SetSelectedOverride("\\fry", agi::format("%.4g", angle_y));
+		QueueSelectedGeometryOverride("\\fry", agi::format("%.4g", angle_y));
 	}
 	if (direction.Y() != 0.f) {
 		// direction.Y is -1 for Up; UpdateHold uses angle_x = orig_x - delta.Y with
 		// screen-Y-down, so Up decreases screen Y → increases frx when mirrored as -direction.Y.
 		angle_x = fmodf(angle_x - direction.Y() * step + 360.f, 360.f);
-		SetSelectedOverride("\\frx", agi::format("%.4g", angle_x));
+		QueueSelectedGeometryOverride("\\frx", agi::format("%.4g", angle_x));
 	}
 
+	if (!FinishGeometryEdit()) {
+		DoRefresh();
+		ReportGeometryError();
+		return false;
+	}
 	DoRefresh();
 	CommitNudge();
 	return true;

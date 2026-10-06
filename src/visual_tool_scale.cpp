@@ -219,6 +219,7 @@ bool VisualToolScale::CanNormalizeScale(VisualScaleAxis axis) {
 }
 
 bool VisualToolScale::NormalizeScale(VisualScaleAxis axis) {
+	BeginGeometryGesture();
 	auto const fixed_axis = ToPolicyAxis(axis);
 	if (!active_line || !fixed_axis)
 		return false;
@@ -241,8 +242,12 @@ bool VisualToolScale::NormalizeScale(VisualScaleAxis axis) {
 	command_session.ResetCommitId();
 	auto reset_commit_id = agi::make_scope_exit([this] { command_session.ResetCommitId(); });
 	for (std::size_t i = 0; i < lines.size(); ++i) {
-		SetOverride(lines[i], "\\fscx", float_to_string((*normalized)[i].X()));
-		SetOverride(lines[i], "\\fscy", float_to_string((*normalized)[i].Y()));
+		QueueGeometryOverride(lines[i], "\\fscx", float_to_string((*normalized)[i].X()));
+		QueueGeometryOverride(lines[i], "\\fscy", float_to_string((*normalized)[i].Y()));
+	}
+	if (!FinishGeometryEdit()) {
+		ReportGeometryError();
+		return false;
 	}
 	CommitAndRefresh(_("scale normalization"));
 	return true;
@@ -367,8 +372,8 @@ void VisualToolScale::UpdateHold() {
 	if (ctrl_down)
 		scale = scale.Round(25.f);
 
-	SetSelectedOverride("\\fscx", std::to_string((int)scale.X()));
-	SetSelectedOverride("\\fscy", std::to_string((int)scale.Y()));
+	QueueSelectedGeometryOverride("\\fscx", std::to_string(static_cast<int>(scale.X())));
+	QueueSelectedGeometryOverride("\\fscy", std::to_string(static_cast<int>(scale.Y())));
 }
 
 void VisualToolScale::DoRefresh() {
@@ -384,6 +389,7 @@ void VisualToolScale::DoRefresh() {
 }
 
 bool VisualToolScale::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) {
+	BeginGeometryGesture();
 	if (!active_line)
 		return false;
 
@@ -394,9 +400,14 @@ bool VisualToolScale::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) 
 
 	// Same polarity as UpdateHold: right -> +\fscx, up -> +\fscy.
 	scale = Vector2D(0, 0).Max(scale + Vector2D(direction.X(), -direction.Y()) * step);
-	SetSelectedOverride("\\fscx", float_to_string(scale.X()));
-	SetSelectedOverride("\\fscy", float_to_string(scale.Y()));
+	QueueSelectedGeometryOverride("\\fscx", float_to_string(scale.X()));
+	QueueSelectedGeometryOverride("\\fscy", float_to_string(scale.Y()));
 
+	if (!FinishGeometryEdit()) {
+		DoRefresh();
+		ReportGeometryError();
+		return false;
+	}
 	DoRefresh();
 	CommitNudge();
 	return true;

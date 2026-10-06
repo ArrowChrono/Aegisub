@@ -42,6 +42,7 @@ class VisualToolRotateXY final : public VisualTool<VisualDraggableFeature> {
 	bool SupportsOverlayContext() const override { return true; }
 	void DrawOverlay(VideoOverlayDrawContext &context) override;
 	void UpdateDrag(Feature *feature) override;
+	bool SupportsGeometryLinking() const override { return true; }
 	bool InitializeHold() override;
 	void UpdateHold() override;
 public:

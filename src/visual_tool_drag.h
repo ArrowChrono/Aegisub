@@ -72,6 +72,7 @@ class VisualToolDrag final : public VisualTool<VisualToolDragDraggableFeature> {
 	void OnLineChanged() override;
 	void OnCoordinateSystemsChanged() override { OnFileChanged(); }
 
+	bool SupportsGeometryLinking() const override { return true; }
 	bool InitializeDrag(Feature *feature) override;
 	void UpdateDrag(Feature *feature) override;
 	void Draw() override;

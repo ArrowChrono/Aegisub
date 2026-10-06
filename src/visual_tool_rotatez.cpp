@@ -289,19 +289,21 @@ void VisualToolRotateZ::UpdateHold() {
 
 	angle = fmodf(angle + 360.f, 360.f);
 
-	SetSelectedOverride("\\frz", agi::format("%.4g", angle));
+	QueueSelectedGeometryOverride("\\frz", agi::format("%.4g", angle));
 }
 
 void VisualToolRotateZ::UpdateDrag(Feature *feature) {
-	auto org = GetLineOrigin(active_line);
-	if (!org) org = GetLinePosition(active_line);
+	auto org = GetLineOrigin(GeometrySource(active_line));
+	if (!org)
+		org = GetLinePosition(GeometrySource(active_line));
 	auto d = ToScriptCoords(feature->pos) - org;
 
 	auto core = c->GetCore();
 	for (auto line : core.selectionController->GetSelectedSet()) {
-		org = GetLineOrigin(line);
-		if (!org) org = GetLinePosition(line);
-		SetOverride(line, "\\org", (d + org).PStr());
+		org = GetLineOrigin(GeometrySource(line));
+		if (!org)
+			org = GetLinePosition(GeometrySource(line));
+		QueueGeometryOverride(line, "\\org", (d + org).PStr());
 	}
 }
 
@@ -319,6 +321,7 @@ void VisualToolRotateZ::DoRefresh() {
 }
 
 bool VisualToolRotateZ::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) {
+	BeginGeometryGesture();
 	if (!active_line)
 		return false;
 
@@ -331,7 +334,7 @@ bool VisualToolRotateZ::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude
 			magnitude));
 		// Right = clockwise = +\frz in ASS
 		angle = fmodf(angle + direction.X() * step + 360.f, 360.f);
-		SetSelectedOverride("\\frz", agi::format("%.4g", angle));
+		QueueSelectedGeometryOverride("\\frz", agi::format("%.4g", angle));
 		changed = true;
 	}
 
@@ -348,7 +351,7 @@ bool VisualToolRotateZ::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude
 			auto line_org = GetLineOrigin(line);
 			if (!line_org)
 				line_org = GetLinePosition(line);
-			SetOverride(line, "\\org", (line_org + delta).PStr());
+			QueueGeometryOverride(line, "\\org", (line_org + delta).PStr());
 		}
 		changed = true;
 	}
@@ -356,6 +359,11 @@ bool VisualToolRotateZ::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude
 	if (!changed)
 		return false;
 
+	if (!FinishGeometryEdit()) {
+		DoRefresh();
+		ReportGeometryError();
+		return false;
+	}
 	DoRefresh();
 	CommitNudge();
 	return true;

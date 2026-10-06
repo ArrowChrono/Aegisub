@@ -43,6 +43,7 @@ class VisualToolScale final : public VisualTool<VisualDraggableFeature> {
 	float ry = 0.f; ///< Y rotation
 	float rz = 0.f; ///< Z rotation
 
+	bool SupportsGeometryLinking() const override { return true; }
 	bool InitializeHold() override;
 	void UpdateHold() override;
 

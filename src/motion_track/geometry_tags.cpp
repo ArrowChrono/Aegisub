@@ -341,4 +341,217 @@ GeometryTagResult TransformGeometryTags(std::string_view text,
 	return result;
 }
 
-} // namespace aegisub::motion_track
+namespace {
+constexpr double max_affine_coordinate = (std::numeric_limits<std::int32_t>::max() / 64) / output_factor;
+
+bool StrictCoordinate(std::string_view text, double& number) {
+	if (!text.empty() && text.front() == '+')
+		text.remove_prefix(1);
+	auto const parsed = std::from_chars(text.data(), text.data() + text.size(), number);
+	return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && std::isfinite(number) && std::abs(number) <= std::numeric_limits<std::int32_t>::max();
+}
+}
+
+PreparedAffineGeometry::PreparedAffineGeometry(std::string_view text) : source(text) {
+	size_t consumed = 0;
+	while (true) {
+		auto const open = source.find('{', consumed);
+		if (open == std::string::npos)
+			break;
+		auto const close = source.find('}', open + 1);
+		if (close == std::string::npos)
+			break;
+		std::string_view body(source.data() + open + 1, close - open - 1);
+		auto scan = [&](auto&& self, std::string_view contents, int depth) -> void {
+			ass_tag_scanner::ScanRawTags(contents, [&](ass_tag_scanner::RawTag const& raw) {
+				if (ass_tag_scanner::NameHasPrefix(raw.name, "t") && raw.has_paren) {
+					if (depth < 32)
+						self(self, raw.args, depth + 1);
+					else {
+						clip_present = true;
+						error = "Geometry animation nesting is too deep.";
+					}
+					return;
+				}
+				bool const origin = ass_tag_scanner::NameHasPrefix(raw.name, "org");
+				bool const clip = ass_tag_scanner::NameHasPrefix(raw.name, "clip") || ass_tag_scanner::NameHasPrefix(raw.name, "iclip");
+				origin_present |= origin;
+				clip_present |= clip;
+				if (!origin && !clip)
+					return;
+				if (depth > 0) {
+					error = "Animated clips or origins cannot be linked. Disable geometry linking to edit this line.";
+					return;
+				}
+				Tag tag{.begin = static_cast<size_t>(raw.args.data() - source.data()), .length = raw.args.size(), .origin = origin};
+				auto const args = ass_tag_scanner::SplitLibassArgs(raw.args);
+				if (!raw.has_paren || (origin && args.size() != 2)) {
+					error = "Malformed origin or clip.";
+					return;
+				}
+				tag.rectangle = clip && args.size() == 4;
+				if (origin || tag.rectangle) {
+					for (auto arg : args) {
+						double value = 0;
+						if (!StrictCoordinate(arg, value))
+							error = "Malformed origin or rectangular clip coordinates.";
+						tag.coordinates.push_back({.begin = 0, .length = 0, .value = tag.rectangle ? std::trunc(value) : value});
+					}
+				}
+				else {
+					if (args.size() != 1 && args.size() != 2) {
+						error = "Unsupported clip argument count.";
+						return;
+					}
+					double factor = 1.0;
+					if (args.size() == 2) {
+						double scale = 0;
+						if (!StrictCoordinate(args[0], scale) || scale < 1 || scale > 31 || scale != std::round(scale)) {
+							error = "Unsupported vector clip scale.";
+							return;
+						}
+						factor = std::ldexp(1.0, 1 - static_cast<int>(scale));
+					}
+					tag.shape = args.back();
+					auto const lexemes = drawing::LexDrawing(tag.shape);
+					if (std::ranges::any_of(lexemes, [](auto const& lexeme) { return lexeme.type == drawing::LexemeType::Error; }))
+						error = "Malformed vector clip drawing.";
+					size_t offset = 0;
+					for (auto lexeme : lexemes) {
+						size_t const end = offset + lexeme.length;
+						if (lexeme.type == drawing::LexemeType::Normal || lexeme.type == drawing::LexemeType::Command || lexeme.type == drawing::LexemeType::Error) {
+							offset = end;
+							continue;
+						}
+						while (offset < end) {
+							char const ch = tag.shape[offset];
+							if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+								++offset;
+								continue;
+							}
+							double value = 0;
+							auto const *begin = tag.shape.data() + offset;
+							auto const *number_begin = begin + (ch == '+');
+							auto const parsed = std::from_chars(number_begin, tag.shape.data() + end, value);
+							if (parsed.ec != std::errc{} || parsed.ptr == number_begin || !std::isfinite(value) || std::abs(value) > std::numeric_limits<std::int32_t>::max() / 64.0) {
+								error = "Malformed vector clip drawing.";
+								offset = end;
+								break;
+							}
+							double const fixed = std::trunc(value * 64);
+							if (fixed != std::nearbyint(value * 64))
+								error = "Vector clip coordinates cannot be represented consistently by libass and VSFilter.";
+							auto const length = static_cast<size_t>(parsed.ptr - begin);
+							tag.coordinates.push_back({.begin = offset, .length = length, .value = fixed / 64 * factor});
+							offset += length;
+						}
+					}
+					if (tag.coordinates.size() % 2)
+						error = "Incomplete vector clip coordinate pair.";
+				}
+				tags.push_back(std::move(tag));
+			});
+		};
+		scan(scan, body, 0);
+		consumed = close + 1;
+	}
+}
+
+bool PreparedAffineGeometry::HasOrigin() const {
+	return origin_present;
+}
+bool PreparedAffineGeometry::HasClip() const {
+	return clip_present;
+}
+
+GeometryTagResult PreparedAffineGeometry::Transform(TrackTransform const& transform, bool origins) const {
+	GeometryTagResult result{.text = source};
+	auto fail = [&](std::string message) {
+		result.success = false;
+		result.error = std::move(message);
+		return result;
+	};
+	if (!error.empty())
+		return fail(error);
+	auto m = transform.matrix;
+	for (auto& value : m)
+		if (std::abs(value - std::round(value)) < 1e-10)
+			value = std::round(value);
+	if (!std::ranges::all_of(m, [](double value) { return std::isfinite(value); }) || m[6] != 0 || m[7] != 0 || m[8] != 1)
+		return fail("Geometry linking requires a finite affine transform.");
+	bool const identity = m == std::array<double, 9>{1, 0, 0, 0, 1, 0, 0, 0, 1};
+	if (identity)
+		return result;
+	auto project = [&](double x, double y, double& nx, double& ny) {
+		nx = m[0] * x + m[1] * y + m[2];
+		ny = m[3] * x + m[4] * y + m[5];
+		return std::isfinite(nx) && std::isfinite(ny) && std::abs(nx) <= max_affine_coordinate && std::abs(ny) <= max_affine_coordinate;
+	};
+	size_t consumed = 0;
+	bool converted_rectangle = false;
+	auto const clip_count = static_cast<size_t>(std::ranges::count_if(tags, [](Tag const& tag) { return !tag.origin; }));
+	std::string output;
+	output.reserve(source.size());
+	for (auto const& tag : tags) {
+		if (tag.origin && !origins)
+			continue;
+		result.has_geometry = true;
+		bool const empty_rectangle = tag.rectangle && (tag.coordinates[2].value <= tag.coordinates[0].value || tag.coordinates[3].value <= tag.coordinates[1].value);
+		std::vector<double> points;
+		points.reserve(tag.coordinates.size());
+		for (size_t i = 0; !empty_rectangle && i < tag.coordinates.size(); i += 2) {
+			double const x = tag.coordinates[i].value, y = tag.coordinates[i + 1].value;
+			double nx, ny;
+			if (!project(x, y, nx, ny))
+				return fail("Transformed clip or origin exceeds the ASS coordinate range.");
+			points.push_back(nx);
+			points.push_back(ny);
+		}
+		std::string replacement;
+		if (tag.origin)
+			replacement = Number(points[0]) + "," + Number(points[1]);
+		else if (tag.rectangle) {
+			if (empty_rectangle)
+				replacement = "0,0,0,0";
+			else if (m[1] == 0 && m[3] == 0 && m[0] > 0 && m[4] > 0 && std::ranges::all_of(points, [](double v) { return std::abs(v - std::round(v)) < 1e-8; }))
+				replacement = Number(std::round(points[0])) + "," + Number(std::round(points[1])) + "," + Number(std::round(points[2])) + "," + Number(std::round(points[3]));
+			else {
+				converted_rectangle = true;
+				replacement = std::to_string(output_scale) + ",m";
+				bool first = true;
+				for (auto pair : std::array<std::array<double, 2>, 4>{{{tag.coordinates[0].value, tag.coordinates[1].value}, {tag.coordinates[2].value, tag.coordinates[1].value}, {tag.coordinates[2].value, tag.coordinates[3].value}, {tag.coordinates[0].value, tag.coordinates[3].value}}}) {
+					double x, y;
+					if (!project(pair[0], pair[1], x, y))
+						return fail("Transformed clip or origin exceeds the ASS coordinate range.");
+					replacement += " " + std::to_string(std::llround(x * output_factor)) + " " + std::to_string(std::llround(y * output_factor));
+					if (first) {
+						replacement += " l";
+						first = false;
+					}
+				}
+			}
+		}
+		else if (points.empty())
+			replacement = source.substr(tag.begin, tag.length);
+		else {
+			replacement = std::to_string(output_scale) + ",";
+			size_t shape_consumed = 0;
+			for (size_t i = 0; i < tag.coordinates.size(); ++i) {
+				auto const& coordinate = tag.coordinates[i];
+				replacement.append(tag.shape, shape_consumed, coordinate.begin - shape_consumed);
+				replacement += std::to_string(std::llround(points[i] * output_factor));
+				shape_consumed = coordinate.begin + coordinate.length;
+			}
+			replacement.append(tag.shape, shape_consumed);
+		}
+		output.append(source, consumed, tag.begin - consumed);
+		output += replacement;
+		consumed = tag.begin + tag.length;
+	}
+	if (converted_rectangle && clip_count > 1)
+		return fail("Converting a rectangle alongside other clip tags would change ASS clip precedence.");
+	output.append(source, consumed);
+	result.text = std::move(output);
+	return result;
+}
+}
