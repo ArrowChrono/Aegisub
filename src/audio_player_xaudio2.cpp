@@ -97,8 +97,6 @@ public:
 	int64_t GetEndPosition();
 	/// @brief Get approximate playback position
 	/// @return Index of audio frame user is currently hearing
-	///
-	/// Returns 0 if playback is stopped or there is no playback thread
 	int64_t GetCurrentPosition();
 
 	/// @brief Change playback end position
@@ -293,8 +291,6 @@ public:
 
 	/// @brief Get approximate current audio frame being heard by the user
 	/// @return Audio frame index
-	///
-	/// Returns 0 if not playing
 	int64_t GetCurrentFrame();
 
 	/// @brief Get audio playback end point
@@ -533,6 +529,8 @@ void XAudio2Thread::Run() {
 
 		case WAIT_OBJECT_0 + EventStopPlayback:
 		stop_playback:
+			if (playback_should_be_running && !playback_start_pending)
+				publish_position(false);
 			// Stop playing and invalidate any pending start before flushing.
 			ResetEvent(is_playing);
 			playback_should_be_running = false;
@@ -784,10 +782,10 @@ XAudio2Thread::~XAudio2Thread() {
 	WaitForSingleObject(thread_handle, INFINITE);
 }
 
-void XAudio2Thread::Play(int64_t start, int64_t count)
-{
+void XAudio2Thread::Play(int64_t start, int64_t count) {
 	CheckError();
 
+	ResetEvent(event_stop_playback);
 	start_frame.store(start, std::memory_order_release);
 	end_frame.store(start + count, std::memory_order_release);
 	uint64_t const generation = playback_request_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -865,7 +863,6 @@ bool XAudio2Thread::IsPlaying() {
 
 int64_t XAudio2Thread::GetCurrentFrame() {
 	CheckError();
-	if (!IsPlaying()) return 0;
 	std::scoped_lock lock(playback_clock_mutex);
 	return playback_clock.Position(std::chrono::steady_clock::now(), provider->GetSampleRate());
 }

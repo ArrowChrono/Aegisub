@@ -116,6 +116,7 @@ void CheckEndpointChanges() {
 	Require(player->IsPlaying(), "internal endpoint rebuild published a stopped transport");
 	Require(provider.LastEnd() == shortened_end, "rebuilt queue was not clipped to the new endpoint");
 	WaitFor([&] { return !player->IsPlaying(); }, 1s, "shortened playback did not finish");
+	Require(player->GetCurrentPosition() == shortened_end, "completed playback lost its endpoint position");
 
 	player->Play(rate, rate / 5);
 	WaitFor([&] { return player->GetCurrentPosition() >= rate + rate / 20; }, 500ms, "nonzero-origin playback did not consume audio");
@@ -138,6 +139,7 @@ void CheckEndpointChanges() {
 		std::this_thread::sleep_for(2ms);
 	}
 	Require(passed_old_end, "playback did not pass the replaced EOS marker");
+	Require(player->GetCurrentPosition() == extended_end, "extended playback lost its endpoint position");
 	for (int seek = 0; seek < 6; ++seek) {
 		auto const start = rate + seek * 480;
 		player->Play(start, rate / 2);
@@ -174,6 +176,39 @@ void CheckBlockedWorkerClock() {
 	WaitFor([&] { return !player->IsPlaying(); }, 500ms, "XAudio2 did not stop after recovery");
 	std::cout << "PASS XAudio2 worker-blocked starvation and recovery clock\n";
 }
+
+void CheckSeekAfterPendingStop() {
+	SilentProvider provider;
+	auto player = CreateXAudio2Player(&provider, {});
+	auto release = agi::make_scope_exit([&] { provider.ReleaseRead(); });
+	player->Play(rate, rate * 5);
+	for (auto const start : {rate * 3, rate / 2, 0}) {
+		provider.BlockNextRead();
+		WaitFor([&] { return provider.BlockedAt() >= 0; }, 1s, "worker did not enter the seek decode stall");
+		player->Stop();
+		std::jthread unblock([&] {
+			std::this_thread::sleep_for(30ms);
+			provider.ReleaseRead();
+		});
+		player->Play(start, rate * 2);
+		Require(player->IsPlaying(), "pending stop cancelled the new seek");
+		Require(player->GetCurrentPosition() >= start, "seek reported an earlier stream position");
+		std::this_thread::sleep_for(60ms);
+		Require(player->IsPlaying(), "old stop was applied after the new seek started");
+		auto const position = player->GetCurrentPosition();
+		Require(position > start && position < start + rate, "seek clock did not advance from its requested origin");
+		std::cout << "XAudio2 pending-stop seek start_sample=" << start << " position_sample=" << position << '\n';
+	}
+	player->Stop();
+	WaitFor([&] { return !player->IsPlaying(); }, 500ms, "new stop did not stop the final seek");
+	auto const stopped_position = player->GetCurrentPosition();
+	Require(stopped_position > 0 && stopped_position < rate, "explicit stop lost the consumed position");
+	player->Stop();
+	std::this_thread::sleep_for(60ms);
+	Require(player->GetCurrentPosition() == stopped_position, "repeated stop changed the frozen playback position");
+	Require(!provider.TimedOut(), "seek decode stall exceeded its finite timeout");
+	std::cout << "PASS XAudio2 pending-stop forward, backward and zero seeks; stopped_sample=" << stopped_position << '\n';
+}
 }
 
 int main() {
@@ -188,6 +223,7 @@ int main() {
 	try {
 		CheckEndpointChanges();
 		CheckBlockedWorkerClock();
+		CheckSeekAfterPendingStop();
 		return 0;
 	}
 	catch (agi::Exception const& error) {
