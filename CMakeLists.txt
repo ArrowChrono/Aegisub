@@ -879,6 +879,7 @@ set(AEGISUB_CORE_SOURCES
     # export_fixstyle/export_framerate/ass_export_filter/ass_exporter expose
     # wxWindow* in their public API (ProcessSubs/GetConfigDialogWindow) and are
     # migrated to the exe until that surface is abstracted.
+    src/export_framerate_file.cpp
     src/export_framerate_transform.cpp
     # Subtitle edit / grid / timing ops (framework-agnostic)
     src/subtitle_character_markers.cpp

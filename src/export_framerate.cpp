@@ -29,17 +29,13 @@
 
 #include "export_framerate.h"
 
-#include "ass_dialogue.h"
-#include "ass_file.h"
 #include "async_video_provider.h"
 #include "compat.h"
-#include "export_framerate_transform.h"
+#include "export_framerate_file.h"
 #include "format.h"
 #include "include/aegisub/context.h"
 #include "include/aegisub/context_ui.h"
 #include "project.h"
-
-#include <libaegisub/of_type_adaptor.h>
 
 #include <utility>
 #include <wx/button.h>
@@ -58,7 +54,7 @@ AssTransformFramerateFilter::AssTransformFramerateFilter()
 }
 
 void AssTransformFramerateFilter::ProcessSubs(AssFile *subs, wxWindow *) {
-	TransformFrameRate(subs);
+	TransformAssFileFramerateForExport(*subs, Output, Input);
 }
 
 wxWindow *AssTransformFramerateFilter::GetConfigDialogWindow(wxWindow *parent, agi::Context *c) {
@@ -147,94 +143,5 @@ void AssTransformFramerateFilter::LoadSettings(bool is_default, agi::Context *c)
 
 		if (Reverse->IsChecked())
 			std::swap(Input, Output);
-	}
-}
-
-void AssTransformFramerateFilter::TransformTimeTags(std::string const& name, AssOverrideParameter *curParam, void *curData) {
-	(void)name;
-	VariableDataType type = curParam->GetType();
-	if (type != VariableDataType::INT && type != VariableDataType::FLOAT) return;
-
-	AssTransformFramerateFilter *instance = static_cast<AssTransformFramerateFilter*>(curData);
-	int parVal = curParam->Get<int>();
-	AssFramerateTransform const transform{
-		instance->newStart,
-		instance->newEnd,
-		instance->oldAssStart,
-		instance->oldAssEnd,
-		instance->newAssStart,
-		instance->newAssEnd
-	};
-
-	switch (curParam->classification) {
-		case AssParameterClass::RELATIVE_TIME_START: {
-			int value = TransformRelativeStartTagTimeForExport(
-				instance->Output,
-				instance->Input,
-				transform,
-				parVal);
-
-			// An end time of 0 is actually the end time of the line, so ensure
-			// nonzero is never converted to 0
-			// Needed here rather than the end case because start/end here mean
-			// which end of the line the time is relative to, not whether it's
-			// the start or end time (compare \move and \fad)
-			if (value == 0 && parVal != 0) value = 1;
-			curParam->Set(value);
-			break;
-		}
-		case AssParameterClass::RELATIVE_TIME_END:
-			curParam->Set(TransformRelativeEndTagTimeForExport(
-				instance->Output,
-				instance->Input,
-				transform,
-				parVal));
-			break;
-		case AssParameterClass::KARAOKE_START: {
-			curParam->Set(TransformKaraokeStartForExport(
-				instance->Output,
-				instance->Input,
-				transform,
-				parVal,
-				instance->oldK,
-				instance->newK));
-			break;
-		}
-		case AssParameterClass::KARAOKE: {
-			curParam->Set(TransformKaraokeDurationForExport(
-				instance->Output,
-				instance->Input,
-				transform,
-				parVal,
-				instance->oldK,
-				instance->newK));
-			break;
-		}
-		default:
-			return;
-	}
-}
-
-void AssTransformFramerateFilter::TransformFrameRate(AssFile *subs) {
-	if (!Input.IsLoaded() || !Output.IsLoaded()) return;
-	for (auto& curDialogue : subs->Events) {
-		line = &curDialogue;
-		newK = 0;
-		oldK = 0;
-		auto const transform = BuildAssFramerateTransform(Output, Input, curDialogue.Start, curDialogue.End);
-		newStart = transform.new_start_ms;
-		newEnd = transform.new_end_ms;
-		oldAssStart = transform.old_ass_start_ms;
-		oldAssEnd = transform.old_ass_end_ms;
-		newAssStart = transform.new_ass_start_ms;
-		newAssEnd = transform.new_ass_end_ms;
-
-		// Process stuff
-		auto blocks = line->ParseTags();
-		for (auto block : blocks | agi::of_type<AssDialogueBlockOverride>())
-			block->ProcessParameters(TransformTimeTags, this);
-		curDialogue.Start = newStart;
-		curDialogue.End = newEnd;
-		curDialogue.UpdateText(blocks);
 	}
 }
