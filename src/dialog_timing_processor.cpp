@@ -45,7 +45,10 @@
 #include <libaegisub/ass/time.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 #include <wx/button.h>
 #include <wx/checkbox.h>
@@ -317,7 +320,15 @@ void DialogTimingProcessor::OnApply(wxCommandEvent &) {
 	OPT_SET("Tool/Timing Post Processor/Enable/Adjacent")->SetBool(adjsEnable->IsChecked());
 	OPT_SET("Tool/Timing Post Processor/Only Selection")->SetBool(onlySelection->IsChecked());
 
-	Process();
+	try {
+		Process();
+	}
+	catch (std::overflow_error const&) {
+		wxMessageBox(
+			_("Adding lead-in/out would produce a time outside the supported range. No subtitles were changed."),
+			_("Invalid timing"), wxOK | wxICON_ERROR | wxCENTER, &d);
+		return;
+	}
 	d.EndModal(0);
 }
 
@@ -373,35 +384,47 @@ static int get_closest_kf(std::vector<int> const& kf, int frame) {
 	return (pos == begin(kf) || *pos - frame < frame - *(pos - 1)) ? *pos : *(pos - 1);
 }
 
-template<class Iter, class Field>
-static int safe_time(Iter begin, Iter end, AssDialogue *comp, int initial, Field field, int const& (*cmp)(int const&, int const&)) {
+template <class Iter, class Field>
+static int safe_time(Iter begin, Iter end, AssDialogue *comp, int64_t initial, Field field, int64_t const& (*cmp)(int64_t const&, int64_t const&)) {
 	// Compare to every previous line (yay for O(n^2)!) to see if it's OK to add lead-in
 	for (; begin != end; ++begin) {
 		// If the line doesn't already collide with this line, extend it only
 		// to the edge of the line
 		if (!comp->CollidesWith(*begin))
-			initial = cmp(initial, (*begin)->*field);
+			initial = cmp(initial, static_cast<int>((*begin)->*field));
 	}
-	return initial;
+	if (initial < std::numeric_limits<int>::min() || initial > std::numeric_limits<int>::max())
+		throw std::overflow_error("Timing processor lead-in/out exceeds the time range");
+	return static_cast<int>(initial);
 }
 
 void DialogTimingProcessor::Process() {
-	std::vector<AssDialogue*> sorted = SortDialogues();
-	if (sorted.empty()) return;
+	std::vector<AssDialogue *> original = SortDialogues();
+	if (original.empty())
+		return;
+
+	std::vector<AssDialogue> pending;
+	std::vector<AssDialogue *> sorted;
+	pending.reserve(original.size());
+	sorted.reserve(original.size());
+	for (auto line : original) {
+		pending.emplace_back(static_cast<AssDialogueBase const&>(*line));
+		sorted.push_back(&pending.back());
+	}
 
 	// Add lead-in/out
 	if (hasLeadIn->IsChecked() && leadIn) {
 		for (size_t i = 0; i < sorted.size(); ++i)
 			sorted[i]->Start = safe_time(sorted.rend() - i, sorted.rend(),
-				sorted[i], sorted[i]->Start - leadIn,
-				&AssDialogue::End, &std::max<int>);
+										 sorted[i], static_cast<int64_t>(static_cast<int>(sorted[i]->Start)) - leadIn,
+										 &AssDialogue::End, &std::max<int64_t>);
 	}
 
 	if (hasLeadOut->IsChecked() && leadOut) {
 		for (size_t i = 0; i < sorted.size(); ++i)
 			sorted[i]->End = safe_time(sorted.begin() + i + 1, sorted.end(),
-				sorted[i], sorted[i]->End + leadOut,
-				&AssDialogue::Start, &std::min<int>);
+									   sorted[i], static_cast<int64_t>(static_cast<int>(sorted[i]->End)) + leadOut,
+									   &AssDialogue::Start, &std::min<int64_t>);
 	}
 
 	// Make adjacent
@@ -451,6 +474,10 @@ void DialogTimingProcessor::Process() {
 		}
 	}
 
+	for (size_t i = 0; i < original.size(); ++i) {
+		original[i]->Start = sorted[i]->Start;
+		original[i]->End = sorted[i]->End;
+	}
 	c->GetCore().ass->Commit(from_wx(_("timing processor")), AssFile::COMMIT_DIAG_TIME);
 }
 }
