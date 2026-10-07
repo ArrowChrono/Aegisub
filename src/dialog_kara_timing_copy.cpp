@@ -91,7 +91,7 @@ public:
 	/// Number of syllables not yet matched from source
 	size_t GetRemainingSource() const { return unmatched_source.size(); }
 	/// Number of characters not yet matched from destination
-	size_t GetRemainingDestination() const { return distance(match_end, destination.end()); }
+	size_t GetRemainingDestination() const { return distance(match_begin, destination.end()); }
 
 	// Adjust source and destination match lengths
 	void IncreaseSourceMatch();
@@ -624,8 +624,15 @@ void DialogKanjiTimer::OnAccept(wxCommandEvent &) {
 	if (!currentDestinationLine) return;
 
 	if (display->GetRemainingSource() > 0)
-		wxMessageBox(_("Group all of the source text."),_("Error"),wxICON_EXCLAMATION | wxOK);
+		wxMessageBox(_("Group all of the source text."), _("Error"), wxICON_EXCLAMATION | wxOK);
 	else {
+		if (display->GetRemainingDestination() > 0 &&
+			wxMessageBox(_("The unmatched destination text will be discarded. Accept this line anyway?"),
+						 _("Kanji timing"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this) != wxYES) {
+			display->SetFocus();
+			return;
+		}
+
 		LinesToChange.emplace_back(currentDestinationLine, display->GetOutputLine());
 
 		currentSourceLine = FindNextStyleMatch(currentSourceLine, from_wx(SourceStyle->GetValue()));
@@ -655,13 +662,16 @@ void DialogKanjiTimer::OnKeyDown(wxKeyEvent &event) {
 		case WXK_DOWN : //dec source selection len
 			display->DecreaseSourceMatch();
 			break;
-		case WXK_RETURN :
-			if (display->GetRemainingSource() == 0 && display->GetRemainingDestination() == 0)
+		case WXK_RETURN:
+			if (display->GetRemainingSource() == 0)
 				OnAccept(evt);
-			else
+			else {
 				OnLink(evt);
+				if (display->GetRemainingSource() == 0 && display->GetRemainingDestination() == 0)
+					OnAccept(evt);
+			}
 			break;
-		default :
+		default:
 			event.Skip();
 	}
 }
