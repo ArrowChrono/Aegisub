@@ -89,7 +89,8 @@ bool SearchReplaceEngine::FindReplace(bool replace) {
 		if (settings.field == SearchReplaceSettings::Field::TEXT)
 			pos = core.textSelectionController->GetSelectionStart();
 
-		if ((replace_ms = matches(line, pos))) {
+		if (aegisub::subtitle_match_report::LineIsEligible(*line, settings) &&
+		    (replace_ms = matches(line, pos))) {
 			size_t end = bad_pos;
 			if (settings.field == SearchReplaceSettings::Field::TEXT)
 				end = core.textSelectionController->GetSelectionEnd();
