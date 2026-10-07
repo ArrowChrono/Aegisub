@@ -584,8 +584,8 @@ void DialogKanjiTimer::OnStart(wxCommandEvent &) {
 		if (currentDestinationLine->Style != destStyle)
 			currentDestinationLine = FindNextStyleMatch(currentDestinationLine, destStyle);
 		ResetForNewLine();
+		LinesToChange.clear();
 	}
-	LinesToChange.clear();
 }
 
 void DialogKanjiTimer::OnLink(wxCommandEvent &) {
