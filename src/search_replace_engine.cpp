@@ -181,13 +181,22 @@ bool SearchReplaceEngine::ReplaceAll() {
 
 	auto const& sel = core.selectionController->GetSelectedSet();
 	bool selection_only = settings.limit_to == SearchReplaceSettings::Limit::SELECTED;
+	auto field = get_dialogue_field(settings.field);
+	std::vector<std::pair<AssDialogue *, decltype(AssDialogueBase::Text)>> pending;
+	std::vector<aegisub::subtitle_match_report::ReplacementHit> replacements;
 
 	for (auto& diag : core.ass->Events) {
 		if (selection_only && !sel.count(&diag)) continue;
 		if (!aegisub::subtitle_match_report::LineIsEligible(diag, settings)) continue;
 
-		aegisub::subtitle_match_report::ReplaceInLine(diag, settings, enumerate, last_replacements);
+		AssDialogue prepared(static_cast<AssDialogueBase const&>(diag));
+		if (aegisub::subtitle_match_report::ReplaceInLine(prepared, settings, enumerate, replacements))
+			pending.emplace_back(&diag, prepared.*field);
 	}
+
+	for (auto const& [diag, value] : pending)
+		diag->*field = value;
+	last_replacements = std::move(replacements);
 
 	if (!last_replacements.empty()) {
 		core.ass->Commit(from_wx(_("replace")), AssFile::COMMIT_DIAG_TEXT);

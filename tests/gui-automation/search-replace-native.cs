@@ -13,10 +13,11 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Aegisub.GuiAutomation.Driver;
+using System.Windows.Automation;
 
 if (args.Length != 3)
 {
-    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/search-replace-native.cs -- EXE ARTIFACTS filters");
+    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/search-replace-native.cs -- EXE ARTIFACTS filters|atomic");
     return 2;
 }
 try { return PrivateDesktop.Run(args, Path.GetFullPath(args[1]), isolation => new Scenario(args, isolation).Run()); }
@@ -46,8 +47,9 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         }, Json));
         try
         {
-            if (args[2] != "filters") throw new ArgumentException("Unknown scenario");
-            Filters(true); Filters(false); NonTextFilter();
+            if (args[2] == "filters") { Filters(true); Filters(false); NonTextFilter(); }
+            else if (args[2] == "atomic") Atomic();
+            else throw new ArgumentException("Unknown scenario");
             File.WriteAllText(Path.Combine(artifacts, "result.json"), JsonSerializer.Serialize(new { passed = true, checks }, Json));
             return 0;
         }
@@ -144,7 +146,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         if (app is not null) { isolation.Stop(app); app.Dispose(); app = null; }
         main = dialog = editor = 0;
     }
-    void Start(string name, bool comment = false)
+    void Start(string name, bool comment = false, string? lateText = null)
     {
         Stop(); phase = name;
         var root = Path.Combine(artifacts, "host-" + ++launch); var profile = Path.Combine(root, "profile");
@@ -155,7 +157,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         var menu = JsonNode.Parse(File.ReadAllText("src/libresrc/default_menu.json"))!;
         menu["main"]!.AsArray().Add(new JsonObject { ["submenu"] = "search-test", ["text"] = "Search Test" });
         var commands = new JsonArray();
-        foreach (var (command, label) in new[] { ("edit/find_replace", "Replace"), ("subtitle/save", "Save"), ("edit/undo", "Undo"), ("edit/redo", "Redo"), ("edit/line/duplicate", "Duplicate") })
+        foreach (var (command, label) in new[] { ("edit/find_replace", "Replace"), ("subtitle/save", "Save"), ("subtitle/save/as", "Save As"), ("edit/undo", "Undo"), ("edit/redo", "Redo"), ("edit/line/duplicate", "Duplicate") })
             commands.Add(new JsonObject { ["command"] = command, ["text"] = label });
         menu["search-test"] = commands;
         File.WriteAllText(Path.Combine(profile, "user", "menu.json"), menu.ToJsonString());
@@ -179,6 +181,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             "Comment: 3,0:00:03.00,0:00:04.00,Other,comment,0031,0032,0033,fx,needle sentinel",
             "Dialogue: 4,0:00:04.00,0:00:05.00,Default,sentinel,0041,0042,0043,fx,unchanged sentinel"
         };
+        if (lateText is not null) events[^1] = events[^1][..(events[^1].LastIndexOf(',') + 1)] + lateText;
         File.WriteAllText(fixture, header + "\n" + string.Join('\n', events) + "\n", new UTF8Encoding(false));
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", root, "--open", fixture }) start.ArgumentList.Add(arg);
@@ -203,6 +206,45 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         Require(after[0].EndsWith("{\\i1}needle café 😀 needle") && after[1].EndsWith("changed 中文 😀 needle") && after[2].EndsWith("needle sentinel"), "Only the eligible next line was replaced");
         Command("Undo"); var undo = Save("undo");
         Require(undo[1].EndsWith("needle 中文 😀 needle") && undo[0] == after[0], "One Undo restores the sole eligible replacement");
+    }
+    string[] SaveAs(string label)
+    {
+        Command("Save As"); nint save = 0;
+        Wait(() => { save = Windows().SingleOrDefault(h => PrivateDesktop.ClassName(h) == "#32770" && Text(h).Contains("Save")); return save != 0; }, "Native Save As dialog");
+        var elements = AutomationElement.FromHandle(save).FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().ToArray();
+        var name = elements.Single(e => e.Current.ControlType == ControlType.Edit && e.Current.AutomationId == "1001");
+        var path = Path.Combine(artifacts, phase + "-" + label + ".ass");
+        var handle = (nint)name.Current.NativeWindowHandle; isolation.VerifyWindow(handle, app!); Native.SetText(handle, path);
+        var button = elements.Single(e => e.Current.ControlType == ControlType.Button && e.Current.AutomationId == "1" && e.Current.NativeWindowHandle != 0);
+        ObservedWindowsCommand.PostButtonClick((nint)button.Current.NativeWindowHandle, app!.Id);
+        Wait(() => File.Exists(path) && !Windows().Contains(save), "Native Save As completed"); fixture = path;
+        return File.ReadAllLines(path).Where(s => s.StartsWith("Dialogue:") || s.StartsWith("Comment:")).ToArray();
+    }
+    void Atomic()
+    {
+        Start("late-regex-error", lateText: new string('a', 100) + "!");
+        Command("Duplicate"); Command("Undo");
+        var before = SaveAs("before-error");
+        Query("needle|^(a+)+$", "changed", true); Click("Replace all");
+        nint error = 0;
+        Wait(() => { error = Windows().FirstOrDefault(h => h != main && h != dialog && Text(h).Contains("Error")); return error != 0; }, "Real Boost runtime error dialog");
+        Dump("regex-error");
+        var messages = AutomationElement.FromHandle(error).FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().Select(e => e.Current.Name).ToArray();
+        File.WriteAllText(Path.Combine(artifacts, "boost-error.json"), JsonSerializer.Serialize(messages, Json));
+        Require(messages.Any(s => s.Contains("complexity", StringComparison.OrdinalIgnoreCase) || s.Contains("stack space", StringComparison.OrdinalIgnoreCase)), "Boost reports an actual runtime regex complexity failure");
+        Send(Control(error, "OK"), 0xF5); Wait(() => !Windows().Contains(error), "Regex error dismissed");
+        Require(!Text(main).StartsWith('*'), "Failed Replace All did not dirty the document");
+        var after = SaveAs("after-error");
+        Require(after.SequenceEqual(before), "Late regex failure left every live field unchanged");
+        Command("Redo"); var redo = Save("existing-redo");
+        Require(redo.Length == before.Length + 1 && redo[0] == before[0] && redo[1] == before[0], "Failed Replace All preserves pre-existing Redo");
+        Command("Undo"); Require(Save("existing-redo-undone").SequenceEqual(before), "Pre-existing history remains reversible");
+        Query("needle", "changed"); Click("Replace all");
+        Wait(() => Text(main).StartsWith('*'), "Successful Replace All commits");
+        var success = Save("success");
+        Require(success.SequenceEqual(before.Select(s => s.Replace("needle", "changed"))), "Successful Replace All publishes all replacements together");
+        Command("Undo"); Require(Save("one-undo").SequenceEqual(before), "One Undo restores all replaced rows");
+        Command("Redo"); Require(Save("one-redo").SequenceEqual(success), "One Redo restores the complete replacement transaction");
     }
     void NonTextFilter()
     {

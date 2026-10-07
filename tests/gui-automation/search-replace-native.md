@@ -4,6 +4,7 @@ Run from the repository root with the built wx application:
 
 ```powershell
 dotnet run --file tests/gui-automation/search-replace-native.cs -- build-dir/RelWithDebInfo/Aegisub.exe build-dir/artifacts/search-filters filters
+dotnet run --file tests/gui-automation/search-replace-native.cs -- build-dir/RelWithDebInfo/Aegisub.exe build-dir/artifacts/search-atomic atomic
 ```
 
 Use a new artifact directory for each run. The driver launches the real GUI on
@@ -20,6 +21,13 @@ ineligible Actor-field replacement. Mixed styles, comment rows, override tags,
 accented text, CJK, supplementary Unicode, and untouched sentinel metadata are
 included. It checks no premature dirty state, the eligible next match, the saved
 ASS fields, and one-step Undo.
+
+The `atomic` scenario first creates a real Redo entry. Replace All can prepare
+several early-row replacements before `needle|^(a+)+$` reaches a late row of
+100 `a` characters followed by `!`. The scene requires Boost's real complexity
+error, unchanged dirty state and live ASS data (observed with Save As rather
+than the disabled Save command), and preservation of the prior Redo entry.
+A corrected query must then replace all rows in one independent Undo/Redo step.
 
 Artifacts include the producer source, executable/source hashes, native window
 observations, generated input and saved ASS files, per-assertion results, and
