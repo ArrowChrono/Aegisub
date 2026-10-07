@@ -463,13 +463,19 @@ void PreparePerspectiveSolverInput(
 	input.source = source.forward_input;
 	input.locked_rotation_z = PerspectiveRotationLock(source.state);
 	input.event_style = source.state.event_style_transform;
+	if (input.best_fit) {
+		input.representation_policy = PerspectiveRepresentationPolicy::Automatic;
+		input.edge_anchor = PerspectiveEdgeAnchor::None;
+	}
 	PerspectiveTagRewriter rewriter(source.fingerprint.line.text,
 									source.state.transform, source.state.event_style_transform);
 	input.measure_tag_cost = [rewriter = std::move(rewriter),
-							  policy = input.representation_policy](EvaluatedTransformState const& state,
-																	SerializedTransformState const& serialized, PerspectiveScalePolicy scale_policy)
+							  policy = input.representation_policy,
+							  best_fit = input.best_fit,
+							  preserve_rotation_z = input.best_fit && input.locked_rotation_z.has_value()](EvaluatedTransformState const& state,
+																										   SerializedTransformState const& serialized, PerspectiveScalePolicy scale_policy)
 		-> std::optional<PerspectiveTagCost> {
-		auto const result = rewriter.Rewrite(state, serialized, scale_policy, policy);
+		auto const result = rewriter.Rewrite(state, serialized, scale_policy, policy, best_fit, preserve_rotation_z);
 		if (!result)
 			return std::nullopt;
 		return result.cost;
@@ -487,10 +493,11 @@ PerspectivePlanResult BuildPerspectiveMutationPlan(
 	PerspectiveRepresentationPolicy representation_policy,
 	int maximum_decimals,
 	PerspectiveEdgeAnchor edge_anchor,
-	double shape_tolerance) {
+	double shape_tolerance,
+	bool best_fit) {
 	if (!ValidContext(current_context))
 		return PlanFailure(PerspectivePlanError::InvalidContext);
-	if (!std::isfinite(max_error) || max_error <= 0.0 || !std::isfinite(shape_tolerance) || shape_tolerance <= 0.0)
+	if (!std::isfinite(max_error) || max_error <= 0.0 || (!best_fit && (!std::isfinite(shape_tolerance) || shape_tolerance <= 0.0)))
 		return PlanFailure(PerspectivePlanError::InvalidErrorBudget);
 
 	PerspectivePlanError resolve_error = PerspectivePlanError::None;
@@ -530,6 +537,7 @@ PerspectivePlanResult BuildPerspectiveMutationPlan(
 	solver_input.output_mapping = current_context.output_mapping;
 	solver_input.max_error = max_error;
 	solver_input.shape_tolerance = shape_tolerance;
+	solver_input.best_fit = best_fit;
 	solver_input.scale_policy = scale_policy;
 	solver_input.representation_policy = representation_policy;
 	solver_input.edge_anchor = edge_anchor;
@@ -554,7 +562,9 @@ PerspectivePlanResult BuildPerspectiveMutationPlan(
 		captured.source->state.event_style_transform,
 		*solver.candidate,
 		scale_policy,
-		representation_policy);
+		solver_input.representation_policy,
+		best_fit,
+		best_fit && solver_input.locked_rotation_z.has_value());
 	if (!rewrite) {
 		auto result = PlanFailure(PerspectivePlanError::RewriteFailed);
 		result.rewrite_error = rewrite.error;
@@ -592,8 +602,8 @@ PerspectivePlanResult BuildPerspectiveMutationPlan(
 				!= captured.source->state.transform.scale_y))
 		return PlanFailure(PerspectivePlanError::StagedScaleMismatch);
 	if (!MatchesPerspectiveRepresentationPolicy(
-		captured.source->state.transform, staged_state.value.transform,
-		representation_policy))
+			captured.source->state.transform, staged_state.value.transform,
+			solver_input.representation_policy))
 		return PlanFailure(PerspectivePlanError::StagedRepresentationMismatch);
 	auto const layout_aspect = ResolvePerspectiveLayoutAspect(captured.source->forward_input);
 	if (!layout_aspect)

@@ -38,6 +38,7 @@ namespace {
 constexpr float kHandleRadius = 3.0f;
 constexpr float kHitTolerance = 5.0f;
 constexpr auto kPerspectiveFitTextOption = "Tool/Visual/Perspective/Fit Text";
+constexpr auto kPerspectiveBestFitOption = "Tool/Visual/Perspective/Best Fit";
 constexpr auto kPerspectiveFaxFrzOnlyOption = "Tool/Visual/Perspective/Fax Frz Only";
 constexpr auto kPerspectiveDecimalPlacesOption = "Tool/Visual/Perspective/Decimal Places";
 constexpr auto kPerspectiveShapeToleranceOption = "Tool/Visual/Perspective/Shape Tolerance";
@@ -445,8 +446,8 @@ wxString FormatPx(double value) {
 }
 
 VisualToolMeasure::VisualToolMeasure(VideoDisplay *parent, agi::Context *context)
-	: VisualToolBase(parent, context), controller(context->GetUI().visualGuideController), text(parent->CreateTextRenderer()), fit_text_to_target(OPT_GET(kPerspectiveFitTextOption)->GetBool()), fax_frz_only(OPT_GET(kPerspectiveFaxFrzOnlyOption)->GetBool()), perspective_decimal_places(perspective::ClampPerspectiveDecimalPlaces(
-																																																																	  OPT_GET(kPerspectiveDecimalPlacesOption)->GetInt())),
+	: VisualToolBase(parent, context), controller(context->GetUI().visualGuideController), text(parent->CreateTextRenderer()), fit_text_to_target(OPT_GET(kPerspectiveFitTextOption)->GetBool()), best_fit(OPT_GET(kPerspectiveBestFitOption)->GetBool()), fax_frz_only(OPT_GET(kPerspectiveFaxFrzOnlyOption)->GetBool()), perspective_decimal_places(perspective::ClampPerspectiveDecimalPlaces(
+																																																																															   OPT_GET(kPerspectiveDecimalPlacesOption)->GetInt())),
 	  perspective_shape_tolerance(OPT_GET(kPerspectiveShapeToleranceOption)->GetDouble()),
 	  invalid_line_color_opt(OPT_GET("Colour/Visual Tools/Perspective Invalid Line")), invalid_handle_color_opt(OPT_GET("Colour/Visual Tools/Perspective Invalid Handle")) {
 	auto core = c->GetCore();
@@ -477,6 +478,7 @@ VisualToolMeasure::VisualToolMeasure(VideoDisplay *parent, agi::Context *context
 									  }));
 	};
 	subscribe_solver_option(kPerspectiveFitTextOption, fit_text_to_target);
+	subscribe_solver_option(kPerspectiveBestFitOption, best_fit);
 	subscribe_solver_option(kPerspectiveFaxFrzOnlyOption, fax_frz_only);
 	connections.emplace_back(OPT_SUB(kPerspectiveShapeToleranceOption,
 									 [this](agi::OptionValue const& value) {
@@ -776,6 +778,7 @@ void VisualToolMeasure::UpdatePerspectivePreview() {
 	input.output_mapping = context->output_mapping;
 	input.max_error = kPerspectiveMaxError;
 	input.shape_tolerance = perspective_shape_tolerance;
+	input.best_fit = best_fit;
 	input.scale_policy = fit_text_to_target
 		? perspective::PerspectiveScalePolicy::Fit
 		: perspective::PerspectiveScalePolicy::Preserve;
@@ -855,6 +858,10 @@ void VisualToolMeasure::BeginPerspectiveInteraction() {
 		if (alt_down) {
 			if (auto const anchor = EdgeAnchorForHandle(handle);
 				anchor != perspective::PerspectiveEdgeAnchor::None) {
+				if (best_fit) {
+					c->ShowStatus(from_wx(_("Best Fit (No Reduction) ignores held edges; the previous edge selection is kept.")));
+					return;
+				}
 				perspective_edge_anchor =
 					perspective_edge_anchor == anchor
 						? perspective::PerspectiveEdgeAnchor::None
@@ -1123,7 +1130,8 @@ void VisualToolMeasure::ApplyPerspective() {
 			: perspective::PerspectiveRepresentationPolicy::Automatic,
 		perspective_decimal_places,
 		perspective_edge_anchor,
-		perspective_shape_tolerance);
+		perspective_shape_tolerance,
+		best_fit);
 	if (!planned) {
 		if (planned.error == perspective::PerspectivePlanError::SolverFailed
 			&& planned.solver_error
@@ -1676,8 +1684,7 @@ void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
 	// takes the handle colour rather than the line colour; an invalid quad
 	// keeps the invalid colour on every edge, because readiness outranks the
 	// anchor as a signal.
-	if (!perspective_creation
-		&& perspective_edge_anchor != perspective::PerspectiveEdgeAnchor::None) {
+	if (!perspective_creation && !best_fit && perspective_edge_anchor != perspective::PerspectiveEdgeAnchor::None) {
 		std::size_t from = 0;
 		std::size_t to = 1;
 		switch (perspective_edge_anchor) {
@@ -1830,7 +1837,16 @@ void VisualToolMeasure::OnSubTool(wxCommandEvent& event) {
 		RefreshAfterSolverOptionChange();
 		return;
 	}
-	if (event.GetId() == fax_frz_only_button && submode == SubMode::PerspectiveQuad) {
+	if (event.GetId() == best_fit_button && submode == SubMode::PerspectiveQuad) {
+		bool const next = event.IsChecked();
+		if (best_fit == next)
+			return;
+		best_fit = next;
+		OPT_SET(kPerspectiveBestFitOption)->SetBool(best_fit);
+		RefreshAfterSolverOptionChange();
+		return;
+	}
+	if (event.GetId() == fax_frz_only_button && submode == SubMode::PerspectiveQuad && !best_fit) {
 		bool const next = event.IsChecked();
 		if (fax_frz_only == next)
 			return;
@@ -1864,6 +1880,7 @@ void VisualToolMeasure::PopulateToolbar() {
 	clear_target_button = wxID_NONE;
 	reset_button = wxID_NONE;
 	fit_button = wxID_NONE;
+	best_fit_button = wxID_NONE;
 	fax_frz_only_button = wxID_NONE;
 	apply_button = wxID_NONE;
 	toolbar_helps_valid = false;
@@ -1899,6 +1916,13 @@ void VisualToolMeasure::PopulateToolbar() {
 								_("Scale text to fit the target; off matches the shape at the current font size"),
 								wxITEM_CHECK)
 						 ->GetId();
+		best_fit_button = toolbar->AddTool(
+									 wxID_ANY, _("Best Fit (No Reduction)"),
+									 wxBitmapBundle::FromBitmap(CMD_ICON_GET(visual_rotatexy, wxLayout_Default, icon_size)),
+									 _("Choose the best geometric fit without reducing tags. Only Fit Text and Decimal Places apply; "
+									   "Fax + Frz Only, Shape Tolerance, and held edges are ignored without changing their saved values."),
+									 wxITEM_CHECK)
+							  ->GetId();
 		fax_frz_only_button = toolbar->AddTool(
 			wxID_ANY, _("Fax + Frz Only"),
 			wxBitmapBundle::FromBitmap(CMD_ICON_GET(visual_rotatez, wxLayout_Default, icon_size)),
@@ -1957,6 +1981,7 @@ bool VisualToolMeasure::SetSubMode(int mode) {
 }
 
 void VisualToolMeasure::RefreshAfterSolverOptionChange() {
+	toolbar_helps_valid = false;
 	if (perspective_diagnostic_depends_on_solver_options) {
 		perspective_diagnostic.clear();
 		perspective_diagnostic_depends_on_solver_options = false;
@@ -1984,8 +2009,11 @@ void VisualToolMeasure::UpdateToolbarState() {
 		if (perspective_button != wxID_NONE)
 			toolbar->SetToolShortHelp(perspective_button,
 									  diagnostic.empty()
-										  ? _("Drag empty video space to create a target; drag corners "
-											  "to adjust it; Alt+click an edge to hold it in place")
+										  ? (best_fit
+												 ? _("Drag empty video space to create a target; drag corners "
+													 "to adjust it. Best Fit (No Reduction) ignores held edges.")
+												 : _("Drag empty video space to create a target; drag corners "
+													 "to adjust it; Alt+click an edge to hold it in place"))
 										  : to_wx(diagnostic));
 		if (apply_button != wxID_NONE)
 			toolbar->SetToolShortHelp(apply_button,
@@ -2008,10 +2036,14 @@ void VisualToolMeasure::UpdateToolbarState() {
 		toolbar->ToggleTool(fit_button, fit_text_to_target);
 		toolbar->EnableTool(fit_button, submode == SubMode::PerspectiveQuad);
 	}
+	if (best_fit_button != wxID_NONE) {
+		toolbar->ToggleTool(best_fit_button, best_fit);
+		toolbar->EnableTool(best_fit_button, submode == SubMode::PerspectiveQuad);
+	}
 	if (fax_frz_only_button != wxID_NONE) {
 		toolbar->ToggleTool(fax_frz_only_button, fax_frz_only);
 		toolbar->EnableTool(
-			fax_frz_only_button, submode == SubMode::PerspectiveQuad);
+			fax_frz_only_button, submode == SubMode::PerspectiveQuad && !best_fit);
 	}
 	if (apply_button != wxID_NONE) {
 		toolbar->EnableTool(apply_button, CanApplyPerspective());

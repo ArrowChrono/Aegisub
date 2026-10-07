@@ -685,6 +685,7 @@
 				"Perspective Step Large" : 10.0
 			},
 			"Perspective" : {
+				"Best Fit" : false,
 				"Decimal Places" : 4,
 				"Shape Tolerance" : 0.1,
 				"Fax Frz Only" : false,

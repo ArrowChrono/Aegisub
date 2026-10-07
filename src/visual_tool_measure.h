@@ -61,6 +61,7 @@ class VisualToolMeasure final : public VisualToolBase {
 	std::string perspective_diagnostic;
 	bool perspective_diagnostic_depends_on_solver_options = false;
 	bool fit_text_to_target;
+	bool best_fit;
 	bool fax_frz_only;
 	int perspective_decimal_places;
 	double perspective_shape_tolerance;
@@ -114,6 +115,7 @@ class VisualToolMeasure final : public VisualToolBase {
 	int clear_target_button = wxID_NONE;
 	int reset_button = wxID_NONE;
 	int fit_button = wxID_NONE;
+	int best_fit_button = wxID_NONE;
 	int fax_frz_only_button = wxID_NONE;
 	int apply_button = wxID_NONE;
 

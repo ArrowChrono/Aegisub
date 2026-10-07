@@ -162,6 +162,7 @@ struct SolverInput {
 	PerspectiveScalePolicy scale_policy = PerspectiveScalePolicy::Fit;
 	PerspectiveRepresentationPolicy representation_policy =
 		PerspectiveRepresentationPolicy::Automatic;
+	bool best_fit = false;
 	// Which drawn edge to hold exactly. A hard constraint on every candidate;
 	// see PerspectiveEdgeAnchor.
 	PerspectiveEdgeAnchor edge_anchor = PerspectiveEdgeAnchor::None;

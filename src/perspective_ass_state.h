@@ -124,7 +124,9 @@ class PerspectiveTagRewriter {
 		EvaluatedTransformState const& target,
 		SerializedTransformState const& serialized,
 		PerspectiveScalePolicy scale_policy,
-		PerspectiveRepresentationPolicy representation_policy) const;
+		PerspectiveRepresentationPolicy representation_policy,
+		bool best_fit = false,
+		bool preserve_rotation_z = false) const;
 };
 
 [[nodiscard]] char const* DescribeRewriteError(RewriteError error);
@@ -140,6 +142,7 @@ class PerspectiveTagRewriter {
 	// round-trips the value bit for bit -- instead of being re-serialized
 	// through the decimal caps.
 	PerspectiveRepresentationPolicy representation_policy =
-		PerspectiveRepresentationPolicy::Automatic);
-
+		PerspectiveRepresentationPolicy::Automatic,
+	bool best_fit = false,
+	bool preserve_rotation_z = false);
 }

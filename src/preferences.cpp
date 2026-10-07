@@ -736,6 +736,12 @@ void BuildVisualToolsPage(OptionPage *p) {
 	auto *fit_text = binder->AddBool(_("Fit Text"), "Tool/Visual/Perspective/Fit Text");
 	fit_text->SetHelpString(_(
 		"Scale text to fit the target quadrilateral"));
+	auto *best_fit = binder->AddBool(
+		_("Best Fit (No Reduction)"),
+		"Tool/Visual/Perspective/Best Fit");
+	best_fit->SetHelpString(_(
+		"Choose the best geometric fit without reducing tags. Only Fit Text and Decimal Places apply; "
+		"Fax + Frz Only, Shape Tolerance, and held edges are ignored without changing their saved values."));
 	auto *fax_frz_only = binder->AddBool(
 		_("Fax + Frz Only"),
 		"Tool/Visual/Perspective/Fax Frz Only");
@@ -747,14 +753,25 @@ void BuildVisualToolsPage(OptionPage *p) {
 		0, 6);
 	perspective_decimals->SetHelpString(_(
 		"Maximum digits after the decimal point in generated Perspective tags. "
-		"The default is 4. Use 0 for integers. Tags still use the shortest "
-		"digits that fit, so lowering this only trades precision."));
+		"The default is 4. Use 0 for integers. Best Fit keeps the allowed precision; "
+		"otherwise tags use the shortest digits that fit."));
 	auto *perspective_shape_tolerance = binder->AddDouble(
 		_("Shape tolerance (pixels)"),
 		"Tool/Visual/Perspective/Shape Tolerance", 0.001, 100, 0.1, 3);
 	perspective_shape_tolerance->SetHelpString(_(
 		"Allow simpler tags when the shape differs by at most this many output pixels. "
 		"Fit Text still controls scaling; anchored edges and decimal precision keep their own limits."));
+	auto update_perspective_enable = [grid, best_fit, fax_frz_only, perspective_shape_tolerance]() {
+		bool const enabled = !best_fit->GetValue().GetBool();
+		grid->EnableProperty(fax_frz_only, enabled);
+		grid->EnableProperty(perspective_shape_tolerance, enabled);
+	};
+	update_perspective_enable();
+	grid->Bind(wxEVT_PG_CHANGED, [best_fit, update_perspective_enable](wxPropertyGridEvent& evt) {
+		if (evt.GetProperty() == best_fit)
+			update_perspective_enable();
+		evt.Skip();
+	});
 	binder->AddCategory(_("Nudge"));
 	binder->AddDouble(_("Rotate step (degrees)"), "Tool/Visual/Nudge/Rotate Step", 0.01, 180, 0.1, 2);
 	binder->AddDouble(_("Rotate large step (degrees)"), "Tool/Visual/Nudge/Rotate Step Large", 0.01, 180, 0.1, 2);

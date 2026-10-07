@@ -191,7 +191,8 @@ class PerspectiveMutationPlan {
 		PerspectiveRepresentationPolicy,
 		int,
 		PerspectiveEdgeAnchor,
-		double);
+		double,
+		bool);
 
 	public:
 	PerspectiveMutationPlan(PerspectiveMutationPlan const&) = default;
@@ -258,7 +259,8 @@ struct PerspectiveExecutionResult : PerspectivePlanDiagnostic {
 	// Which drawn edge to hold exactly when the model has to give something up.
 	// See PerspectiveEdgeAnchor.
 	PerspectiveEdgeAnchor edge_anchor = PerspectiveEdgeAnchor::None,
-	double shape_tolerance = 0.1);
+	double shape_tolerance = 0.1,
+	bool best_fit = false);
 
 // Revalidates immediately before assigning Text. Commit ownership stays with
 // the host so it can supply the exact returned line as its changed-lines span.

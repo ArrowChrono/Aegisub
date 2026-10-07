@@ -1044,6 +1044,7 @@ struct RewriteDelta {
 	// inherits the style's default.
 	bool keep_shear_x_tags = false;
 	bool keep_shear_y_tags = false;
+	bool keep_rotation_z_tags = false;
 };
 
 bool HasChanges(RewriteDelta const& delta) {
@@ -1055,12 +1056,15 @@ bool RemoveTag(
 	PerspectiveScalePolicy scale_policy,
 	bool keep_restricted_tags,
 	bool keep_shear_x_tags,
-	bool keep_shear_y_tags) {
+	bool keep_shear_y_tags,
+	bool keep_rotation_z_tags) {
 	if (scale_policy == PerspectiveScalePolicy::Preserve && (name == "\\fsc" || name == "\\fscx" || name == "\\fscy"))
 		return false;
 	if (keep_restricted_tags && (name == "\\org" || name == "\\fay" || name == "\\frx" || name == "\\fry"))
 		return false;
 	if ((keep_shear_x_tags && name == "\\fax") || (keep_shear_y_tags && name == "\\fay"))
+		return false;
+	if (keep_rotation_z_tags && (name == "\\fr" || name == "\\frz"))
 		return false;
 	return name == "\\an" || name == "\\a" || name == "\\pos" || name == "\\move" || name == "\\org" || name == "\\fsc" || name == "\\fscx" || name == "\\fscy" || name == "\\fax" || name == "\\fay" || name == "\\fr" || name == "\\frz" || name == "\\frx" || name == "\\fry";
 }
@@ -1079,7 +1083,9 @@ std::optional<RewriteDelta> MakeRewriteDelta(
 	EvaluatedTransformState const& target,
 	SerializedTransformState const& serialized,
 	PerspectiveScalePolicy scale_policy,
-	PerspectiveRepresentationPolicy representation_policy) {
+	PerspectiveRepresentationPolicy representation_policy,
+	bool best_fit,
+	bool preserve_rotation_z) {
 	if (!FiniteTransform(source) || !FiniteTransform(event_style)
 		|| !FiniteTransform(target))
 		return std::nullopt;
@@ -1097,25 +1103,15 @@ std::optional<RewriteDelta> MakeRewriteDelta(
 	// reproduces the value bit for bit, so the rewrite must keep those tags
 	// and never re-emit them from rounded digits.
 	delta.keep_restricted_tags =
-		representation_policy == PerspectiveRepresentationPolicy::FaxFrzOnly && !MatchesPerspectiveRepresentationPolicy(
-																					target, representation_policy);
+		!best_fit && representation_policy == PerspectiveRepresentationPolicy::FaxFrzOnly && !MatchesPerspectiveRepresentationPolicy(target, representation_policy);
 	delta.keep_shear_x_tags = NearlyEqual(source.shear_x, target.shear_x) && !NearlyEqual(target.shear_x, event_style.shear_x);
-	delta.keep_shear_y_tags = NearlyEqual(source.shear_y, target.shear_y)
-		&& !NearlyEqual(target.shear_y, event_style.shear_y);
-	delta.changed = source.alignment != target.alignment
-		|| !SamePoint(source.position, target.position)
-		|| !SameOptionalPoint(source.origin, target.origin)
-		|| !NearlyEqual(source.scale_x, target.scale_x)
-		|| !NearlyEqual(source.scale_y, target.scale_y)
-		|| !NearlyEqual(source.shear_x, target.shear_x)
-		|| !NearlyEqual(source.shear_y, target.shear_y)
-		|| !NearlyEqual(source.rotation_x, target.rotation_x)
-		|| !NearlyEqual(source.rotation_y, target.rotation_y)
-		|| !NearlyEqual(source.rotation_z, target.rotation_z);
+	delta.keep_shear_y_tags = NearlyEqual(source.shear_y, target.shear_y) && !NearlyEqual(target.shear_y, event_style.shear_y);
+	delta.keep_rotation_z_tags = best_fit && preserve_rotation_z && source.rotation_z == target.rotation_z;
+	delta.changed = best_fit || source.alignment != target.alignment || !SamePoint(source.position, target.position) || !SameOptionalPoint(source.origin, target.origin) || !NearlyEqual(source.scale_x, target.scale_x) || !NearlyEqual(source.scale_y, target.scale_y) || !NearlyEqual(source.shear_x, target.shear_x) || !NearlyEqual(source.shear_y, target.shear_y) || !NearlyEqual(source.rotation_x, target.rotation_x) || !NearlyEqual(source.rotation_y, target.rotation_y) || !NearlyEqual(source.rotation_z, target.rotation_z);
 	if (!delta.changed)
 		return delta;
 
-	bool const inherit_alignment = target.alignment == event_style.alignment;
+	bool const inherit_alignment = !best_fit && target.alignment == event_style.alignment;
 	if (!inherit_alignment && !AppendTag(delta.line_bundle, "\\an",
 		FormatAssNumber(target.alignment, 0))) return std::nullopt;
 	// A line-wide alignment override changes the renderer's default position.
@@ -1130,32 +1126,29 @@ std::optional<RewriteDelta> MakeRewriteDelta(
 			return std::nullopt;
 	}
 
-	if (scale_policy == PerspectiveScalePolicy::Fit
-		&& !NearlyEqual(target.scale_x, event_style.scale_x)) {
+	if (scale_policy == PerspectiveScalePolicy::Fit && (best_fit || !NearlyEqual(target.scale_x, event_style.scale_x))) {
 		if (!AppendTag(delta.run_bundle, "\\fscx",
 					   serialized.scale_x))
 			return std::nullopt;
 	}
-	if (scale_policy == PerspectiveScalePolicy::Fit
-		&& !NearlyEqual(target.scale_y, event_style.scale_y)) {
+	if (scale_policy == PerspectiveScalePolicy::Fit && (best_fit || !NearlyEqual(target.scale_y, event_style.scale_y))) {
 		if (!AppendTag(delta.run_bundle, "\\fscy",
 					   serialized.scale_y))
 			return std::nullopt;
 	}
-	if (!delta.keep_shear_x_tags && !NearlyEqual(target.shear_x, event_style.shear_x) && !AppendTag(delta.run_bundle, "\\fax", serialized.shear_x))
+	if (!delta.keep_shear_x_tags && (best_fit || !NearlyEqual(target.shear_x, event_style.shear_x)) && !AppendTag(delta.run_bundle, "\\fax", serialized.shear_x))
 		return std::nullopt;
-	if (!delta.keep_shear_y_tags && !delta.keep_restricted_tags && !NearlyEqual(target.shear_y, event_style.shear_y) && !AppendTag(delta.run_bundle, "\\fay", serialized.shear_y))
+	if (!delta.keep_shear_y_tags && !delta.keep_restricted_tags && (best_fit || !NearlyEqual(target.shear_y, event_style.shear_y)) && !AppendTag(delta.run_bundle, "\\fay", serialized.shear_y))
 		return std::nullopt;
 	if (!delta.keep_restricted_tags) {
-		if (!EquivalentRotation(target.rotation_x, event_style.rotation_x) && !AppendTag(delta.run_bundle, "\\frx",
-																						 serialized.rotation_x))
+		if ((best_fit || !EquivalentRotation(target.rotation_x, event_style.rotation_x)) && !AppendTag(delta.run_bundle, "\\frx",
+																									   serialized.rotation_x))
 			return std::nullopt;
-		if (!EquivalentRotation(target.rotation_y, event_style.rotation_y) && !AppendTag(delta.run_bundle, "\\fry",
-																						 serialized.rotation_y))
+		if ((best_fit || !EquivalentRotation(target.rotation_y, event_style.rotation_y)) && !AppendTag(delta.run_bundle, "\\fry",
+																									   serialized.rotation_y))
 			return std::nullopt;
 	}
-	if (!EquivalentRotation(target.rotation_z, event_style.rotation_z) && !AppendTag(delta.run_bundle, "\\frz",
-																					 serialized.rotation_z))
+	if (!delta.keep_rotation_z_tags && (best_fit || !EquivalentRotation(target.rotation_z, event_style.rotation_z)) && !AppendTag(delta.run_bundle, "\\frz", best_fit && preserve_rotation_z ? FormatAssNumber(target.rotation_z, 9) : serialized.rotation_z))
 		return std::nullopt;
 
 	return delta;
@@ -1223,9 +1216,9 @@ std::string RewriteOverrideContent(
 			run_inserted = true;
 		}
 		if (!RemoveTag(tag.name, scale_policy, delta.keep_restricted_tags,
-					   delta.keep_shear_x_tags, delta.keep_shear_y_tags)) {
+					   delta.keep_shear_x_tags, delta.keep_shear_y_tags, delta.keep_rotation_z_tags)) {
 			output.append(tag.raw);
-			if (RemoveTag(tag.name, PerspectiveScalePolicy::Fit, false, false, false))
+			if (RemoveTag(tag.name, PerspectiveScalePolicy::Fit, false, false, false, false))
 				++tag_count;
 		}
 		if (tag.name == "\\r" && reset_needs[index]) {
@@ -1412,7 +1405,7 @@ PerspectiveTagRewriter::PerspectiveTagRewriter(
 		else if (validation == RewriteError::UnsupportedNamedReset && prepared->error == RewriteError::None)
 			prepared->error = validation;
 		for (auto const& tag : parsed.tags) {
-			if (RemoveTag(tag.name, PerspectiveScalePolicy::Fit, false, false, false))
+			if (RemoveTag(tag.name, PerspectiveScalePolicy::Fit, false, false, false, false))
 				++prepared->source_tag_count;
 		}
 	}
@@ -1422,7 +1415,9 @@ RewriteResult PerspectiveTagRewriter::Rewrite(
 	EvaluatedTransformState const& target,
 	SerializedTransformState const& serialized,
 	PerspectiveScalePolicy scale_policy,
-	PerspectiveRepresentationPolicy representation_policy) const {
+	PerspectiveRepresentationPolicy representation_policy,
+	bool best_fit,
+	bool preserve_rotation_z) const {
 	RewriteResult result;
 	result.error = data->error;
 	if (result.error != RewriteError::None)
@@ -1431,7 +1426,7 @@ RewriteResult PerspectiveTagRewriter::Rewrite(
 	auto const& parsed_spans = data->parsed_spans;
 	auto const delta = MakeRewriteDelta(
 		data->source_state, data->event_style_state, target, serialized, scale_policy,
-		representation_policy);
+		representation_policy, best_fit, preserve_rotation_z);
 	if (!delta) {
 		result.error = RewriteError::InvalidTarget;
 		return result;
@@ -1480,8 +1475,10 @@ RewriteResult RewritePerspectiveTags(
 	EvaluatedTransformState const& event_style_state,
 	SolverCandidate const& candidate,
 	PerspectiveScalePolicy scale_policy,
-	PerspectiveRepresentationPolicy representation_policy) {
+	PerspectiveRepresentationPolicy representation_policy,
+	bool best_fit,
+	bool preserve_rotation_z) {
 	return PerspectiveTagRewriter(source_text, source_state, event_style_state)
-		.Rewrite(candidate.state, candidate.serialized, scale_policy, representation_policy);
+		.Rewrite(candidate.state, candidate.serialized, scale_policy, representation_policy, best_fit, preserve_rotation_z);
 }
 }
