@@ -576,12 +576,12 @@ void DialogKanjiTimer::OnStart(wxCommandEvent &) {
 	else if (SourceStyle->GetValue() == DestStyle->GetValue())
 		wxMessageBox(_("The source and destination styles must be different."),_("Error"),wxICON_EXCLAMATION | wxOK);
 	else {
-		currentDestinationLine = currentSourceLine = &*subs->Events.begin();
+		currentDestinationLine = currentSourceLine = subs->Events.empty() ? nullptr : &subs->Events.front();
 		auto sourceStyle = from_wx(SourceStyle->GetValue());
 		auto destStyle = from_wx(DestStyle->GetValue());
-		if (currentSourceLine->Style != sourceStyle)
+		if (currentSourceLine != nullptr && currentSourceLine->Style != sourceStyle)
 			currentSourceLine = FindNextStyleMatch(currentSourceLine, sourceStyle);
-		if (currentDestinationLine->Style != destStyle)
+		if (currentDestinationLine != nullptr && currentDestinationLine->Style != destStyle)
 			currentDestinationLine = FindNextStyleMatch(currentDestinationLine, destStyle);
 		ResetForNewLine();
 		LinesToChange.clear();

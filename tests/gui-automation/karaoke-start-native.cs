@@ -14,9 +14,9 @@ using System.Text.Json;
 using System.Windows.Automation;
 using Aegisub.GuiAutomation.Driver;
 
-if (args.Length != 3 || args[2] is not ("rejected" or "restart"))
+if (args.Length != 3 || args[2] is not ("rejected" or "restart" or "no-pair" or "empty-file"))
 {
-    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/karaoke-start-native.cs -- EXE ARTIFACTS rejected|restart");
+    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/karaoke-start-native.cs -- EXE ARTIFACTS rejected|restart|no-pair|empty-file");
     return 2;
 }
 try { return PrivateDesktop.Run(args, Path.GetFullPath(args[1]), isolation => new Scenario(args, isolation).Run()); }
@@ -45,8 +45,14 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         }, Json));
         try
         {
-            Start();
-            if (args[2] == "rejected") RejectedStart(); else SuccessfulRestart();
+            Start(args[2] == "empty-file");
+            switch (args[2])
+            {
+                case "rejected": RejectedStart(); break;
+                case "restart": SuccessfulRestart(); break;
+                case "no-pair": NoPair(); break;
+                case "empty-file": EmptyFile(); break;
+            }
             File.WriteAllText(Path.Combine(artifacts, "result.json"), JsonSerializer.Serialize(new { passed = true, checks }, Json));
             return 0;
         }
@@ -147,17 +153,17 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         var ok = Control(warning, "OK"); isolation.VerifyWindow(ok, app!); Action("button", "Warning/OK"); Native.Post(ok, 0xF5, 0, 0);
         Wait(() => !Windows().Contains(warning), "User accepted the native warning");
     }
-    void StageTwoRows()
+    void StageTwoRows(string prefix = "")
     {
         Style(0, "Source"); Style(1, "Destination"); Click("Start!");
         for (var row = 1; row <= 2; ++row)
         {
             for (var syllable = 0; syllable < 3; ++syllable) Click("Link");
-            Capture(dialog, "linked-row-" + row); Click("Accept Line");
+            Capture(dialog, prefix + "linked-row-" + row); Click("Accept Line");
             Require(!Windows().Any(h => Text(h) == "Error"), "All three source syllables linked before Accept Line " + row);
             Require(!Text(main).StartsWith('*'), "Accept Line " + row + " remains staged until Close");
         }
-        Capture(dialog, "two-rows-staged");
+        Capture(dialog, prefix + "two-rows-staged");
     }
     void CloseTimer()
     {
@@ -192,10 +198,35 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
     }
     void History(string[] expected)
     {
+        VerifyHistoryMenu("Undo kanji timing", undoCommand, true, "before-undo-menu");
         Action("menu", "Edit/Undo"); ObservedWindowsCommand.PostMenuCommand(main, app!.Id, undoCommand); Thread.Sleep(180);
         Require(SaveAs("undo").SequenceEqual(baseline), "One Undo restores the entire baseline ASS including every metadata and event field");
+        VerifyHistoryMenu("Redo kanji timing", redoCommand, true, "after-undo-menu");
         Action("menu", "Edit/Redo"); ObservedWindowsCommand.PostMenuCommand(main, app.Id, redoCommand); Thread.Sleep(180);
         Require(SaveAs("redo").SequenceEqual(expected), "One Redo restores precisely the complete committed ASS");
+    }
+    void VerifyHistoryMenu(string label, int command, bool enabled, string artifact)
+    {
+        isolation.VerifyWindow(main, app!); Action("open-native-menu", "Edit");
+        Native.Post(main, 0x112, 0xF100, 'e'); nint popup = 0;
+        Wait(() => { popup = Windows().SingleOrDefault(h => PrivateDesktop.ClassName(h) == "#32768"); return popup != 0; }, "Actual native Edit menu popup opened");
+        try
+        {
+            Capture(popup, artifact);
+            var observedCommand = ObservedWindowsCommand.FindMenuCommand(main, app!.Id, "Edit", label);
+            var (menu, state) = Native.EditMenuState(main, command);
+            File.WriteAllText(Path.Combine(artifacts, artifact + ".json"), JsonSerializer.Serialize(new {
+                popup = popup.ToString("X"), menu = menu.ToString("X"), label, command = observedCommand, state,
+                enabled = (state & 3) == 0
+            }, Json));
+            Require(observedCommand == command, "Opened Edit menu has refreshed dynamic label: " + label);
+            Require(state != uint.MaxValue && ((state & 3) == 0) == enabled, "Opened Edit menu item is " + (enabled ? "enabled: " : "disabled: ") + label);
+        }
+        finally
+        {
+            Native.Post(main, 0x1F, 0, 0);
+            Wait(() => !Windows().Any(h => PrivateDesktop.ClassName(h) == "#32768"), "Native Edit menu popup dismissed");
+        }
     }
     void RejectedStart()
     {
@@ -226,7 +257,45 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         Require(actual.SequenceEqual(expected), "Successful new Start resets both earlier staged rows and commits only the alternate pair, preserving the complete remaining ASS");
         History(expected);
     }
-    void Start()
+    void EmptyDisplayEvidence(string label)
+    {
+        var display = Children(dialog).Single(h => PrivateDesktop.ClassName(h) == "wxWindow" && Text(h) == "control");
+        Capture(display, label + "-display");
+    }
+    void StartWithoutPair(string source, string destination, string label)
+    {
+        Style(0, source); Style(1, destination); Click("Start!");
+        Require(Native.IsWindowEnabled(dialog) && !Windows().Any(h => h != dialog && h != main && PrivateDesktop.ClassName(h) == "#32770"), "Valid styles without a matching pair show no additional modal: " + label);
+        Require(!Text(main).StartsWith('*'), "Start without a matching pair does not dirty the document: " + label);
+        Capture(dialog, label); EmptyDisplayEvidence(label);
+        Click("Accept Line");
+        Require(Native.IsWindowEnabled(dialog) && !Windows().Any(h => h != dialog && h != main && PrivateDesktop.ClassName(h) == "#32770"), "Accept on the empty pair display is a safe no-op: " + label);
+    }
+    void UnchangedClose(string label)
+    {
+        CloseTimer();
+        Require(!Text(main).StartsWith('*'), "Close after no matching pair does not dirty the document: " + label);
+        Require(SaveAs(label + "-after-close").SequenceEqual(baseline), "Close after no matching pair preserves the complete ASS: " + label);
+        VerifyHistoryMenu("Nothing to undo", undoCommand, false, label + "-no-undo-menu");
+    }
+    void NoPair()
+    {
+        OpenTimer(); EmptyDisplayEvidence("initial-empty"); StageTwoRows("before-no-pair-");
+        StartWithoutPair("Source", "Unused", "no-destination-pair");
+        UnchangedClose("no-destination-pair");
+        OpenTimer(); StageTwoRows("recovered-"); CloseTimer();
+        var actual = SaveAs("recovered-after-close");
+        var expected = Expected(("dest-one", "{\\k12}漢{\\k23}字{\\k34}語"), ("dest-two", "{\\k21}春{\\k32}夏{\\k43}秋"));
+        Require(actual.SequenceEqual(expected), "A later valid Start recovers normal two-pair matching after a no-pair reset and preserves every other ASS field");
+        History(expected);
+    }
+    void EmptyFile()
+    {
+        OpenTimer(); EmptyDisplayEvidence("initial-empty");
+        StartWithoutPair("Source", "Destination", "empty-file-default-row");
+        UnchangedClose("empty-file-default-row");
+    }
+    void Start(bool emptyEvents)
     {
         var root = Path.Combine(artifacts, "host"); var profile = Path.Combine(root, "profile");
         Directory.CreateDirectory(Path.Combine(profile, "user"));
@@ -260,7 +329,8 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             "Dialogue: 8,0:00:07.23,0:00:08.45,Destination,dest-three,0081,0082,0083,dest-fx,秋冬月",
             "Dialogue: 10,0:00:09.00,0:00:10.00,Default,sentinel,0101,0102,0103,sentinel,untouched {\\b1}世界{\\b0}, 😀"
         };
-        File.WriteAllText(fixture, header + "\n" + string.Join('\n', styles) + "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n" + string.Join('\n', events) + "\n", new UTF8Encoding(true));
+        File.WriteAllText(fixture, header + "\n" + string.Join('\n', styles) + "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n" + string.Join('\n', emptyEvents ? [] : events) + "\n", new UTF8Encoding(true));
+        Require(File.ReadAllLines(fixture).Count(line => line.StartsWith("Dialogue:") || line.StartsWith("Comment:")) == (emptyEvents ? 0 : 10), emptyEvents ? "Input ASS has zero Events before native loading" : "Input ASS has ten representative Events");
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", root, "--open", fixture }) start.ArgumentList.Add(arg);
         app = isolation.Start(start, args[2]);
@@ -269,7 +339,13 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         undoCommand = ObservedWindowsCommand.FindMenuCommand(main, app.Id, "Edit", "Nothing to undo");
         redoCommand = ObservedWindowsCommand.FindMenuCommand(main, app.Id, "Edit", "Nothing to redo");
         baseline = SaveAs("baseline");
-        Require(baseline.Count(line => line.StartsWith("Dialogue:") || line.StartsWith("Comment:")) == 10, "All ten fixture events loaded through the native file-open path");
+        var loadedEvents = baseline.Where(line => line.StartsWith("Dialogue:") || line.StartsWith("Comment:")).ToArray();
+        Require(loadedEvents.Length == (emptyEvents ? 1 : 10), emptyEvents ? "Native loading inserts one default Event; this is not an internally empty Events state" : "All ten fixture events loaded through the native file-open path");
+        if (emptyEvents)
+        {
+            var fields = loadedEvents.Single().Split(',', 10);
+            Require(fields[3] == "Default" && fields[9] == "", "The inserted default row is empty and matches neither selected karaoke style");
+        }
     }
 }
 
@@ -280,11 +356,30 @@ static class Native
     [DllImport("user32.dll")] static extern bool GetWindowRect(nint window, out Rect rect);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(nint parent, Callback callback, nint data);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(nint window);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(nint window);
+    [DllImport("user32.dll")] static extern nint GetMenu(nint window);
+    [DllImport("user32.dll")] static extern nint GetSubMenu(nint menu, int position);
+    [DllImport("user32.dll")] static extern int GetMenuItemCount(nint menu);
+    [DllImport("user32.dll")] static extern uint GetMenuState(nint menu, uint item, uint flags);
+    [DllImport("user32.dll", EntryPoint = "GetMenuStringW", CharSet = CharSet.Unicode)] static extern int GetMenuString(nint menu, uint item, StringBuilder text, int capacity, uint flags);
     [DllImport("user32.dll", EntryPoint = "PostMessageW")] static extern bool PostMessage(nint window, uint message, nint wp, nint lp);
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")] static extern nint SendMessage(nint window, uint message, nint wp, nint lp, uint flags, uint timeout, out nint result);
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)] static extern nint SendText(nint window, uint message, nint wp, string lp, uint flags, uint timeout, out nint result);
     public static int Top(nint window) { if (!GetWindowRect(window, out var rect)) throw new InvalidOperationException("Native control bounds unavailable"); return rect.Top; }
+    public static (nint Menu, uint State) EditMenuState(nint window, int command)
+    {
+        var bar = GetMenu(window); var matches = new List<nint>();
+        for (var i = 0; i < GetMenuItemCount(bar); ++i)
+        {
+            var label = new StringBuilder(256);
+            GetMenuString(bar, (uint)i, label, label.Capacity, 0x400);
+            if (label.ToString().Replace("&", "") == "Edit") matches.Add(GetSubMenu(bar, i));
+        }
+        var menu = matches.Single();
+        if (menu == 0) throw new InvalidOperationException("Observed Edit popup has no native menu handle");
+        return (menu, GetMenuState(menu, (uint)command, 0));
+    }
     public static nint[] Children(nint parent) { List<nint> found = []; Callback callback = (h, _) => { found.Add(h); return true; }; EnumChildWindows(parent, callback, 0); GC.KeepAlive(callback); return found.ToArray(); }
     public static long Send(nint window, uint message, long wp, long lp) { if (SendMessage(window, message, (nint)wp, (nint)lp, 0x22, 1000, out var result) == 0) throw new TimeoutException("Native control message"); return result.ToInt64(); }
     public static void SetText(nint window, string value) { if (SendText(window, 0xC, 0, value, 0x22, 1000, out _) == 0) throw new TimeoutException("Native text entry"); }
