@@ -28,6 +28,9 @@
 #include <libaegisub/exception.h>
 #include <libaegisub/string_utils.h>
 
+#include <tuple>
+#include <utility>
+
 namespace {
 static const size_t bad_pos = -1;
 static const MatchState bad_match{0, bad_pos};
@@ -55,6 +58,17 @@ Iterator circular_next(Iterator it, Container& c) {
 SearchReplaceEngine::SearchReplaceEngine(agi::Context *c)
 : context(c)
 {
+	continuation_connections = agi::signal::make_vector({
+		c->ass->AddCommitListener([this] { last_empty_match.reset(); }),
+		c->selectionController->AddActiveLineListener([this] { last_empty_match.reset(); }),
+		c->selectionController->AddSelectionListener([this] { last_empty_match.reset(); }),
+		c->textSelectionController->AddSelectionListener([this] {
+			if (last_empty_match &&
+			    (!std::cmp_equal(context->textSelectionController->GetSelectionStart(), last_empty_match->pos) ||
+			     !std::cmp_equal(context->textSelectionController->GetSelectionEnd(), last_empty_match->pos)))
+				last_empty_match.reset();
+		})
+	});
 }
 
 void SearchReplaceEngine::Replace(AssDialogue *diag, MatchState &ms) {
@@ -78,7 +92,12 @@ bool SearchReplaceEngine::FindReplace(bool replace) {
 	last_replacements.clear();
 
 	auto core = context->GetCore();
-	auto matches = GetMatcher(settings);
+	if (replace)
+		last_empty_match.reset();
+	bool continuing_empty = last_empty_match.has_value();
+	auto matches = continuing_empty
+		? MakeSubtitleMatcher(settings, last_empty_match->search_pos)
+		: GetMatcher(settings);
 
 	AssDialogue *line = core.selectionController->GetActiveLine();
 	auto it = core.ass->iterator_to(*line);
@@ -121,6 +140,10 @@ bool SearchReplaceEngine::FindReplace(bool replace) {
 	bool selection_only = sel.size() > 1 && settings.limit_to == SearchReplaceSettings::Limit::SELECTED;
 
 	do {
+		if (continuing_empty && &*it != line) {
+			matches = GetMatcher(settings);
+			continuing_empty = false;
+		}
 		if (selection_only && !sel.count(&*it)) continue;
 		if (!aegisub::subtitle_match_report::LineIsEligible(*it, settings)) continue;
 
@@ -133,6 +156,10 @@ bool SearchReplaceEngine::FindReplace(bool replace) {
 
 			if (settings.field == SearchReplaceSettings::Field::TEXT)
 				core.textSelectionController->SetSelection(ms.start, ms.end);
+
+			last_empty_match.reset();
+			if (!replace && settings.use_regex && settings.field == SearchReplaceSettings::Field::TEXT && ms.start == ms.end)
+				last_empty_match = EmptyMatch{.pos = ms.start, .search_pos = ms.search_end};
 
 			return true;
 		}
@@ -152,6 +179,7 @@ bool SearchReplaceEngine::FindAll() {
 
 	last_matches.clear();
 	last_replacements.clear();
+	last_empty_match.reset();
 
 	auto core = context->GetCore();
 
@@ -175,6 +203,7 @@ bool SearchReplaceEngine::ReplaceAll() {
 
 	last_matches.clear();
 	last_replacements.clear();
+	last_empty_match.reset();
 
 	auto core = context->GetCore();
 	auto enumerate = MakeSubtitleMatchEnumerator(settings);
@@ -210,6 +239,13 @@ bool SearchReplaceEngine::ReplaceAll() {
 }
 
 void SearchReplaceEngine::Configure(SearchReplaceSettings const& new_settings) {
+	auto query = [](SearchReplaceSettings const& s) {
+		return std::tie(s.find, s.replace_with, s.field, s.limit_to, s.match_case,
+			s.use_regex, s.use_unicode_escapes, s.ignore_comments, s.skip_tags,
+			s.exact_match, s.match_styles);
+	};
+	if (!initialized || query(settings) != query(new_settings))
+		last_empty_match.reset();
 	settings = new_settings;
 	initialized = true;
 }

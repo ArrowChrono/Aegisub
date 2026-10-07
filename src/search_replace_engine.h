@@ -16,6 +16,9 @@
 
 #include "subtitle_match_report.h"
 
+#include <libaegisub/signal.h>
+
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,6 +29,12 @@ class SearchReplaceEngine {
 	agi::Context *context;
 	bool initialized = false;
 	SearchReplaceSettings settings;
+	struct EmptyMatch {
+		size_t pos;
+		size_t search_pos;
+	};
+	std::optional<EmptyMatch> last_empty_match;
+	std::vector<agi::signal::Connection> continuation_connections;
 
 	std::vector<aegisub::subtitle_match_report::MatchHit> last_matches;
 	std::vector<aegisub::subtitle_match_report::ReplacementHit> last_replacements;

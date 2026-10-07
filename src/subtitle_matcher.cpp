@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <optional>
 #include <vector>
 
 namespace {
@@ -542,7 +543,8 @@ std::string prepare_search_text(SearchReplaceSettings const& settings) {
 }
 
 template<typename Accessor>
-matcher get_matcher(SearchReplaceSettings const& settings, Accessor&& a) {
+matcher get_matcher(SearchReplaceSettings const& settings, Accessor&& a,
+                    std::optional<size_t> search_after_empty = std::nullopt) {
 	std::string search_text = prepare_search_text(settings);
 	std::string prepared_find = settings.match_case ? std::move(search_text)
 	                                                : boost::locale::normalize(search_text);
@@ -564,7 +566,7 @@ matcher get_matcher(SearchReplaceSettings const& settings, Accessor&& a) {
 			while (search_at <= limit) {
 				a.prepare(diag);
 				auto const& full = a.full_haystack();
-				size_t const from = a.orig_to_search(search_at);
+				size_t const from = search_after_empty.value_or(a.orig_to_search(search_at));
 				if (from > full.size())
 					return bad_match;
 
@@ -577,9 +579,11 @@ matcher get_matcher(SearchReplaceSettings const& settings, Accessor&& a) {
 				u32_iterator const search_end(end_it, base_it, end_it);
 				// 6-arg form: `base_it` is the sequence start so lookbehind can
 				// read characters before `from`. Flags mark mid-field starts.
-				auto const mflags = from > 0
+				auto mflags = from > 0
 					? (boost::match_not_bol | boost::match_not_bob | boost::match_prev_avail)
 					: boost::match_default;
+				if (search_after_empty)
+					mflags |= boost::regex_constants::match_not_initial_null;
 				if (!boost::regex_search(search_begin, search_end, result, regex, mflags, base))
 					return bad_match;
 
@@ -587,7 +591,7 @@ matcher get_matcher(SearchReplaceSettings const& settings, Accessor&& a) {
 				size_t const abs_e = static_cast<size_t>(result[0].second.base() - base_it);
 				MatchState ms = a.make_match_state_abs(abs_s, abs_e);
 
-				if (ms.start >= start) {
+				if (search_after_empty || ms.start >= start) {
 					set_regex_replacements(ms, result, regex, settings.replace_with);
 					return ms;
 				}
@@ -850,6 +854,14 @@ MakeSubtitleMatcher(SearchReplaceSettings const& settings) {
 	if (settings.skip_tags)
 		return get_matcher(settings, skip_tags_accessor(settings.field, normalize));
 	return get_matcher(settings, noop_accessor(settings.field, normalize));
+}
+
+std::function<MatchState(const AssDialogue *, size_t)>
+MakeSubtitleMatcher(SearchReplaceSettings const& settings, size_t search_after_empty) {
+	const bool normalize = !settings.match_case;
+	if (settings.skip_tags)
+		return get_matcher(settings, skip_tags_accessor(settings.field, normalize), search_after_empty);
+	return get_matcher(settings, noop_accessor(settings.field, normalize), search_after_empty);
 }
 
 SubtitleMatchEnumerator

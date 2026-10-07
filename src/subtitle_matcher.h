@@ -97,6 +97,9 @@ struct SearchReplaceSettings {
 std::function<MatchState(const AssDialogue *, size_t)>
 MakeSubtitleMatcher(SearchReplaceSettings const &settings);
 
+std::function<MatchState(const AssDialogue *, size_t)>
+MakeSubtitleMatcher(SearchReplaceSettings const& settings, size_t search_after_empty);
+
 /// Build a reusable whole-line enumerator. Unlike repeatedly calling
 /// MakeSubtitleMatcher with advancing original offsets, this preserves
 /// searchable-surface order across NFC reordering and Boost's empty-match

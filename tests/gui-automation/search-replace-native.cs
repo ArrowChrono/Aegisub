@@ -17,7 +17,7 @@ using System.Windows.Automation;
 
 if (args.Length != 3)
 {
-    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/search-replace-native.cs -- EXE ARTIFACTS filters|atomic");
+    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/search-replace-native.cs -- EXE ARTIFACTS filters|atomic|zero");
     return 2;
 }
 try { return PrivateDesktop.Run(args, Path.GetFullPath(args[1]), isolation => new Scenario(args, isolation).Run()); }
@@ -49,6 +49,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         {
             if (args[2] == "filters") { Filters(true); Filters(false); NonTextFilter(); }
             else if (args[2] == "atomic") Atomic();
+            else if (args[2] == "zero") ZeroWidth();
             else throw new ArgumentException("Unknown scenario");
             File.WriteAllText(Path.Combine(artifacts, "result.json"), JsonSerializer.Serialize(new { passed = true, checks }, Json));
             return 0;
@@ -146,7 +147,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         if (app is not null) { isolation.Stop(app); app.Dispose(); app = null; }
         main = dialog = editor = 0;
     }
-    void Start(string name, bool comment = false, string? lateText = null)
+    void Start(string name, bool comment = false, string? lateText = null, string? firstText = null)
     {
         Stop(); phase = name;
         var root = Path.Combine(artifacts, "host-" + ++launch); var profile = Path.Combine(root, "profile");
@@ -181,14 +182,15 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             "Comment: 3,0:00:03.00,0:00:04.00,Other,comment,0031,0032,0033,fx,needle sentinel",
             "Dialogue: 4,0:00:04.00,0:00:05.00,Default,sentinel,0041,0042,0043,fx,unchanged sentinel"
         };
+        if (firstText is not null) events[0] = events[0][..(events[0].LastIndexOf(',') + 1)] + firstText;
         if (lateText is not null) events[^1] = events[^1][..(events[^1].LastIndexOf(',') + 1)] + lateText;
-        File.WriteAllText(fixture, header + "\n" + string.Join('\n', events) + "\n", new UTF8Encoding(false));
+        File.WriteAllText(fixture, header + "\n" + string.Join('\n', events) + "\n", new UTF8Encoding(true));
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", root, "--open", fixture }) start.ArgumentList.Add(arg);
         app = isolation.Start(start, name);
         AutomationProtocol.WaitForReadyArtifact(Path.Combine(root, "ready.json"), app, TimeSpan.FromSeconds(20));
         main = isolation.MainWindow(app, 10);
-        editor = Children(main).Single(h => PrivateDesktop.ClassName(h) == "Edit" && Text(h).StartsWith("{\\i1}needle"));
+        editor = Children(main).Single(h => PrivateDesktop.ClassName(h) == "Edit" && Text(h) == (firstText ?? "{\\i1}needle café 😀 needle"));
         Save("before"); Command("Replace");
         Wait(() => { dialog = Windows().SingleOrDefault(h => Text(h) == "Replace"); return dialog != 0; }, "Native Replace dialog");
         Dump("opened");
@@ -219,6 +221,31 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         ObservedWindowsCommand.PostButtonClick((nint)button.Current.NativeWindowHandle, app!.Id);
         Wait(() => File.Exists(path) && !Windows().Contains(save), "Native Save As completed"); fixture = path;
         return File.ReadAllLines(path).Where(s => s.StartsWith("Dialogue:") || s.StartsWith("Comment:")).ToArray();
+    }
+    void Next(long start, long end) { Click("Find next"); Selected(start, end); }
+    void ZeroWidth()
+    {
+        Start("zero-basic", firstText: "aa"); Query("(?=a)", "", true);
+        Next(0, 0); Next(1, 1);
+        Start("zero-unicode-alternatives", firstText: "😀aéa"); Query("(?=😀|a)|😀|a|$", "", true); Check("Selected rows", true);
+        Next(0, 0); Next(0, 4); Next(4, 4); Next(4, 5); Next(7, 7); Next(7, 8); Next(8, 8); Next(14, 14);
+        Require(Text(editor) == "needle 中文 😀 needle", "End-of-line zero width advances to the next row");
+        Start("zero-normalized", firstText: "e\u0301é"); Query("(?=é)|é|$", "", true); Check("Match case", false);
+        Next(0, 0); Next(0, 3); Next(3, 3); Next(3, 5); Next(5, 5);
+        Start("zero-tags", firstText: "😀{\\i1}a{\\i0}a"); Query("(?=a)|a", "", true); Check("Skip Override Tags", true);
+        Next(9, 9); Next(9, 10); Next(15, 15); Next(15, 16);
+        Start("zero-reset", firstText: "aa"); Query("(?=a)", "", true); Next(0, 0);
+        Query("a", "", true); Next(0, 1);
+        Send(editor, 0xB1, 0, 0); Native.Post(editor, 0x101, 0x25, unchecked((int)0xC0000001)); Thread.Sleep(100);
+        Query("(?=a)", "", true); Next(0, 0); Next(1, 1);
+        Send(editor, 0xB1, 0, 0); Native.Post(editor, 0x101, 0x25, unchecked((int)0xC0000001)); Thread.Sleep(100);
+        Next(0, 0);
+        Require(!Text(main).StartsWith('*'), "Find Next never dirties the document");
+        Command("Duplicate"); Command("Undo"); Next(0, 0);
+        Require(!Text(main).StartsWith('*'), "Undo invalidates zero-width continuation without introducing another edit");
+        Start("first-hit-short-circuit", firstText: "x " + new string('a', 100) + "!"); Query("(?=x)|x|(?:a+)+$", "", true);
+        Next(0, 0); Next(0, 1);
+        Require(!Windows().Any(h => Text(h) == "Error"), "A valid first match succeeds without evaluating a later catastrophic suffix");
     }
     void Atomic()
     {
@@ -252,6 +279,8 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         Click("Replace next");
         Require(!Text(main).StartsWith('*'), "An ineligible actor field cannot be replaced without a text selection");
         var after = Save("after"); Require(after[0].Contains(",first,"), "Ineligible actor preserved");
+        Query("second", "renamed"); Click("Replace next"); Click("Replace next");
+        var eligible = Save("eligible-actor"); Require(eligible[1].Contains(",renamed,") && eligible[1].EndsWith("needle 中文 😀 needle"), "Actor mode replaces the eligible actor without changing subtitle text");
     }
 }
 
