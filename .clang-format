@@ -1,0 +1,53 @@
+# Aegisub clang-format configuration (C++20)
+# Matches the existing code style: tab indentation (width 4), attached
+# braces with else/catch on a new line, pointers bound to the variable
+# name ("int *p"), references bound to the type ("std::string const& s").
+#
+# ColumnLimit is 0 on purpose: the codebase contains many long lines and
+# reflowing them would churn history. Known cost (no clang-format option
+# avoids it): manually wrapped long expressions (if conditions, ternaries,
+# ctor init lists) get joined into one line when their lines are
+# reformatted — avoid --lines ranges covering untouched wrapped lines.
+# New code is expected to keep lines reasonably short.
+#
+# Line endings are derived per file (DeriveLineEnding) so the CRLF files
+# in this repository keep their CRLF endings.
+---
+Language: Cpp
+Standard: c++20
+ColumnLimit: 0
+UseTab: ForContinuationAndIndentation
+TabWidth: 4
+IndentWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: 0
+IndentCaseLabels: true
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterControlStatement: Never
+  AfterFunction: false
+  AfterClass: false
+  AfterStruct: false
+  AfterUnion: false
+  AfterEnum: false
+  AfterNamespace: false
+  AfterExternBlock: false
+  BeforeElse: true
+  BeforeCatch: true
+  IndentBraces: false
+PointerAlignment: Right
+ReferenceAlignment: Left
+# The codebase relies on single-line if statements (~729 in src) and
+# single-line loop bodies (~35); splitting them would churn every
+# changed-line reformat.
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+# Leave preserves existing comment spacing; Never/Consecutive would rewrite
+# neighbouring lines, breaking the format-only-changed-lines workflow.
+AlignTrailingComments:
+  Kind: Leave
+NamespaceIndentation: None
+AllowShortCaseLabelsOnASingleLine: true
+SortIncludes: Never
+FixNamespaceComments: false
+DeriveLineEnding: true
