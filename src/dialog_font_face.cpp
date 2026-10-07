@@ -275,6 +275,8 @@ class FontFaceDialog final : public wxDialog {
 	int charset = 1;
 	bool vertical_requested = false;
 	bool variant_modified = false;
+	bool weight_modified = false;
+	bool italic_modified = false;
 	bool implicit_variant_pinned = false;
 	bool syncing_variant = false;
 	bool initial_explicit_weight = false;
@@ -593,6 +595,8 @@ class FontFaceDialog final : public wxDialog {
 			committed_family_id = current_id;
 			family_changed = true;
 			variant_modified = false;
+			weight_modified = false;
+			italic_modified = false;
 			UpdateVariantControls(true);
 		}
 		UpdateInformation();
@@ -615,6 +619,8 @@ class FontFaceDialog final : public wxDialog {
 			source == font_style || source == bold || source == italic;
 		if (!syncing_variant && changes_variant) {
 			variant_modified = true;
+			weight_modified |= source == font_style || source == bold;
+			italic_modified |= source == font_style || source == italic;
 			implicit_variant_pinned = false;
 			if (source == font_style) {
 				auto const selection = font_style->GetSelection();
@@ -684,6 +690,7 @@ public:
 			this, to_wx(initial.face_name), wxSize(400, -1),
 			font_model.choices, contains_matching, auto_expand);
 		committed_family = from_wx(face_name->GetValue());
+		committed_family_id = face_name->SelectedFamilyId();
 		face_name->SetToolTip(_("Font face; this exact name will be written to ASS"));
 		font_style = new wxComboBox(
 			this, -1, wxEmptyString, wxDefaultPosition, wxDefaultSize,
@@ -816,6 +823,8 @@ public:
 		result.has_explicit_weight = initial_explicit_weight;
 		result.has_explicit_italic = initial_explicit_italic;
 		result.variant_modified = variant_modified;
+		result.weight_modified = weight_modified;
+		result.italic_modified = italic_modified;
 		result.implicit_variant_pinned = implicit_variant_pinned;
 		result.allow_replace_explicit = allow_replace_explicit->GetValue();
 		if (font_model.catalog && !face_name->SelectedFamilyId() &&

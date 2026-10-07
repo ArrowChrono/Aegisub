@@ -399,6 +399,7 @@ DialogStyleEditor::DialogStyleEditor(wxWindow *parent, AssStyle *style, agi::Con
 	// Fill font face list box
 	FontName->ChangeValue(to_wx(font_model.PreferredName(style->font)));
 	committed_font_family = from_wx(FontName->GetValue());
+	committed_font_family_id = FontName->SelectedFamilyId();
 
 	// Set encoding value
 	bool found = false;

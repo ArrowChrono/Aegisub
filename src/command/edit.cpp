@@ -1475,10 +1475,12 @@ struct edit_font final : public Command {
 			}
 
 			auto may_write_weight = [&](line_font_state const& startfont) {
-				return !startfont.displayed.has_explicit_weight || allow_replace_explicit;
+				return !startfont.displayed.has_explicit_weight || allow_replace_explicit ||
+					   selected.weight_modified;
 			};
 			auto may_write_italic = [&](line_font_state const& startfont) {
-				return !startfont.displayed.has_explicit_italic || allow_replace_explicit;
+				return !startfont.displayed.has_explicit_italic || allow_replace_explicit ||
+					   selected.italic_modified;
 			};
 
 			struct line_variant_selection {

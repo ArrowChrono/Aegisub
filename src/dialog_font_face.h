@@ -24,6 +24,8 @@ struct FontFaceDialogSelection {
 	bool has_explicit_weight = false;
 	bool has_explicit_italic = false;
 	bool variant_modified = false;
+	bool weight_modified = false;
+	bool italic_modified = false;
 	bool implicit_variant_pinned = false;
 	bool allow_replace_explicit = false;
 	bool from_native_dialog = false;
