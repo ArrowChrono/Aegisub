@@ -1,0 +1,45 @@
+name: Aegisub Translations
+
+on:
+  push:
+    branches: [exp]
+    paths:
+      - 'po/**'
+  pull_request:
+    paths:
+      - 'po/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-translations:
+    runs-on: ubuntu-latest
+    steps:
+    - name: checkout code
+      uses: actions/checkout@v6
+
+    - name: show gettext version
+      run: msgfmt --version | head -1
+
+    - name: build translations
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p locale
+        cat > locale/README.txt <<'EOF'
+        Put this "locale" folder next to aegisub.exe.
+        Layout: locale/<lang>/LC_MESSAGES/aegisub.mo
+        EOF
+        for lang in $(cat po/LINGUAS); do
+          mkdir -p "locale/$lang/LC_MESSAGES"
+          echo "== $lang =="
+          msgfmt -c --statistics -o "locale/$lang/LC_MESSAGES/aegisub.mo" "po/$lang.po" 2>&1
+        done
+
+    - name: upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: aegisub-translations.zip
+        path: locale
