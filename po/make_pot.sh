@@ -18,7 +18,7 @@ maybe_append() {
 
 find ../src -name \*.cpp -o -name \*.h \
   | LC_ALL=C sort \
-  | xgettext --files-from=- -o - --c++ \
+  | TZ=UTC xgettext --files-from=- -o - --c++ --from-code=UTF-8 \
              -k_ -kSTR_MENU -kSTR_DISP -kSTR_HELP -kfmt_tl -kfmt_plural:2,3 -kwxT -kwxPLURAL:1,2 \
   | sed 's/SOME DESCRIPTIVE TITLE./Aegisub 3.3+/' \
   | sed 's/YEAR/2005-2020/' \
