@@ -80,3 +80,4 @@ vendor/luajit/src/luajit
 
 **/.*/*
 !.git/*
+!.github/*
