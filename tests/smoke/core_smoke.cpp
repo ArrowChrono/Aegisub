@@ -1,4 +1,5 @@
 #include "ass_file.h"
+#include "ass_dialogue.h"
 #include "ass_file_app.h"
 #include "audio_provider_factory.h"
 #include "export_framerate_transform.h"
@@ -20,11 +21,13 @@
 #include <libaegisub/vfr.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <thread>
 
@@ -51,11 +54,6 @@ std::filesystem::path MakeTempAssPath() {
 std::filesystem::path MakeTempTxtPath() {
 	auto const stamp = std::chrono::steady_clock::now().time_since_epoch().count();
 	return std::filesystem::temp_directory_path() / ("aegisub_core_smoke_" + std::to_string(stamp) + ".txt");
-}
-
-std::filesystem::path MakeTempStlPath() {
-	auto const stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-	return std::filesystem::temp_directory_path() / ("aegisub_core_smoke_" + std::to_string(stamp) + ".stl");
 }
 
 constexpr char kCoreSmokeOptionDefaults[] = R"({
@@ -252,7 +250,119 @@ void WriteSmokeTxt(std::filesystem::path const& path) {
 		"Bob: Second line\n";
 }
 
-int RunSmoke() {
+size_t RunEbuTimecodeSmoke(AssFile const& source, std::filesystem::path const& artifact_directory) {
+	ScopedCoreSmokeOptions options;
+	AssFile file(source);
+	auto& first = file.Events.front();
+	first.Start = 1000;
+	first.End = 2400;
+	first.Text = "{\\i1}" + std::string(36, 'A') + "\\N" + std::string(36, 'B') + "\\N" + std::string(36, 'C') + "\\N" + std::string(36, 'D');
+	for (auto const& times : std::array<std::array<int, 2>, 2>{{{5000, 6200}, {12000, 13600}}}) {
+		auto *line = new AssDialogue(first);
+		line->Start = times[0];
+		line->End = times[1];
+		line->Text = times[0] == 5000 ? "Second cue after rollover" : "Third cue with a distinct interval";
+		file.Events.push_back(*line);
+	}
+
+	using Timecode = std::array<unsigned char, 4>;
+	struct Scenario {
+		char const *name;
+		int standard;
+		Timecode offset;
+		char const *tcp;
+		char const *tcf;
+		char const *dfc;
+		std::array<Timecode, 3> in;
+		std::array<Timecode, 3> inclusive_out;
+		std::array<Timecode, 3> exclusive_out;
+	};
+	std::array<Scenario, 2> const scenarios{{{.name = "pal25",
+											  .standard = 2,
+											  .offset = {1, 2, 3, 17},
+											  .tcp = "01020317",
+											  .tcf = "01020417",
+											  .dfc = "STL25.01",
+											  .in = {{{1, 2, 4, 17}, {1, 2, 8, 17}, {1, 2, 15, 17}}},
+											  .inclusive_out = {{{1, 2, 6, 1}, {1, 2, 9, 21}, {1, 2, 17, 6}}},
+											  .exclusive_out = {{{1, 2, 6, 2}, {1, 2, 9, 22}, {1, 2, 17, 7}}}},
+											 {.name = "ntsc-drop",
+											  .standard = 4,
+											  .offset = {0, 9, 59, 17},
+											  .tcp = "00095917",
+											  .tcf = "00100016",
+											  .dfc = "STL30.01",
+											  .in = {{{0, 10, 0, 16}, {0, 10, 4, 16}, {0, 10, 11, 16}}},
+											  .inclusive_out = {{{0, 10, 1, 27}, {0, 10, 5, 21}, {0, 10, 13, 3}}},
+											  .exclusive_out = {{{0, 10, 1, 28}, {0, 10, 5, 22}, {0, 10, 13, 4}}}}}};
+	std::filesystem::create_directories(artifact_directory);
+	std::ofstream report(artifact_directory / "fields.txt", std::ios::trunc);
+	if (!report)
+		throw std::runtime_error("failed to create EBU timecode field report");
+	auto write_timecode = [&](Timecode const& tc) {
+		for (size_t i = 0; i < tc.size(); ++i)
+			report << (i ? ":" : "") << static_cast<unsigned int>(tc[i]);
+	};
+	size_t total_bytes = 0;
+	for (auto const& scenario : scenarios) {
+		OPT_SET("Subtitle Format/EBU STL/TV Standard")->SetInt(scenario.standard);
+		std::array<char const *, 4> const fields{"H", "M", "S", "F"};
+		for (size_t i = 0; i < fields.size(); ++i)
+			OPT_SET(std::string("Subtitle Format/EBU STL/Timecode Offset/") + fields[i])->SetInt(scenario.offset[i]);
+		for (bool inclusive : {true, false}) {
+			OPT_SET("Subtitle Format/EBU STL/Inclusive End Times")->SetBool(inclusive);
+			auto const name = std::string(scenario.name) + (inclusive ? "-inclusive" : "-exclusive");
+			auto const path = artifact_directory / (name + ".stl");
+			auto const *writer = SubtitleFormat::GetWriter(path);
+			if (!writer)
+				throw std::runtime_error("EBU STL writer was not registered");
+			writer->WriteFile(&file, path, agi::vfr::Framerate(), "");
+			std::ifstream input(path, std::ios::binary);
+			std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+			if (!input || bytes.size() != 1024 + 4 * 128)
+				throw std::runtime_error(name + ": unexpected STL size or extension block count");
+			total_bytes += bytes.size();
+			auto const tcp = bytes.substr(256, 8);
+			auto const tcf = bytes.substr(264, 8);
+			auto const dfc = bytes.substr(3, 8);
+			report << name << " bytes=" << bytes.size() << " TCP=" << tcp << " expected=" << scenario.tcp
+				   << " TCF=" << tcf << " expected=" << scenario.tcf << " DFC=" << dfc << " expected=" << scenario.dfc << '\n';
+			bool matches = tcp == scenario.tcp && tcf == scenario.tcf && dfc == scenario.dfc;
+			std::array<size_t, 4> const cue_numbers{0, 0, 1, 2};
+			std::array<unsigned char, 4> const extension_numbers{0, 255, 255, 255};
+			for (size_t block = 0; block < cue_numbers.size(); ++block) {
+				auto const pos = 1024 + block * 128;
+				auto const cue = cue_numbers[block];
+				Timecode in{}, out{};
+				for (size_t i = 0; i < 4; ++i) {
+					in[i] = static_cast<unsigned char>(bytes[pos + 5 + i]);
+					out[i] = static_cast<unsigned char>(bytes[pos + 9 + i]);
+				}
+				auto const& expected_out = inclusive ? scenario.inclusive_out[cue] : scenario.exclusive_out[cue];
+				report << "  block=" << block << " cue=" << cue
+					   << " SN=" << (static_cast<unsigned char>(bytes[pos + 1]) + 256 * static_cast<unsigned char>(bytes[pos + 2]))
+					   << " EBN=" << static_cast<unsigned int>(static_cast<unsigned char>(bytes[pos + 3])) << " TCI=";
+				write_timecode(in);
+				report << " expected=";
+				write_timecode(scenario.in[cue]);
+				report << " TCO=";
+				write_timecode(out);
+				report << " expected=";
+				write_timecode(expected_out);
+				report << '\n';
+				matches = matches && in == scenario.in[cue] && out == expected_out && static_cast<unsigned char>(bytes[pos + 1]) == cue && bytes[pos + 2] == 0 && static_cast<unsigned char>(bytes[pos + 3]) == extension_numbers[block];
+			}
+			report.flush();
+			if (!report)
+				throw std::runtime_error("failed to write EBU timecode field report");
+			if (!matches)
+				throw std::runtime_error(name + ": STL fields differ from independent timecode expectations");
+		}
+	}
+	return total_bytes;
+}
+
+int RunSmoke(std::filesystem::path const& artifact_directory) {
 	ScopedCoreSmokeDispatch dispatch;
 	ScopedCoreSmokeOptions options;
 
@@ -409,13 +519,7 @@ int RunSmoke() {
 			throw std::runtime_error("core video provider manager did not create Dummy video with partial global options");
 	}
 
-	ScopedFile stl_path(MakeTempStlPath());
-	auto const* stl_writer = SubtitleFormat::GetWriter(stl_path.get());
-	if (!stl_writer)
-		throw std::runtime_error("EBU STL writer was not registered");
-	stl_writer->WriteFile(&file, stl_path.get(), agi::vfr::Framerate(), "");
-	if (std::filesystem::file_size(stl_path.get()) < 1024)
-		throw std::runtime_error("EBU STL writer produced an unexpectedly small file");
+	auto const stl_bytes = RunEbuTimecodeSmoke(file, artifact_directory);
 
 	agi::vfr::Framerate source(24.0);
 	agi::vfr::Framerate destination(25.0);
@@ -426,7 +530,7 @@ int RunSmoke() {
 	std::cout
 		<< "aegisub_core_smoke: rows=" << window.total_rows
 		<< " txt_rows=" << txt_window.total_rows
-		<< " stl_bytes=" << std::filesystem::file_size(stl_path.get())
+		<< " stl_bytes=" << stl_bytes
 		<< " subtitle_provider=\"" << subtitles_provider->GetDebugName() << "\""
 		<< " audio_rate=" << audio_provider->GetSampleRate()
 		<< " video_frames=" << video_provider->GetFrameCount()
@@ -437,9 +541,9 @@ int RunSmoke() {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
 	try {
-		return RunSmoke();
+		return RunSmoke(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("artifacts/ebu-timecode-smoke"));
 	}
 	catch (std::exception const& err) {
 		std::cerr << "aegisub_core_smoke failed: " << err.what() << '\n';

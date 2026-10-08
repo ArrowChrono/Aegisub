@@ -359,7 +359,7 @@ namespace
 
 		agi::vfr::Framerate fps = export_settings.GetFramerate();
 		EbuTimecode tcofs = export_settings.timecode_offset;
-		int timecode_bias = fps.FrameAtSmpte(tcofs.h, tcofs.m, tcofs.s, tcofs.s);
+		int timecode_bias = fps.FrameAtSmpte(tcofs.h, tcofs.m, tcofs.s, tcofs.f);
 
 		AssStyle default_style;
 		std::vector<EbuSubtitle> subs_list;
@@ -597,7 +597,7 @@ namespace
 			memcpy(gsi.mnr, "99", 2);
 			gsi.tcs = '1';
 			EbuTimecode tcofs = export_settings.timecode_offset;
-			fieldprintf(gsi.tcp, 8, "%02u%02u%02u%02u", (unsigned int)tcofs.h, (unsigned int)tcofs.m, (unsigned int)tcofs.s, (unsigned int)tcofs.s);
+			fieldprintf(gsi.tcp, 8, "%02u%02u%02u%02u", (unsigned int)tcofs.h, (unsigned int)tcofs.m, (unsigned int)tcofs.s, (unsigned int)tcofs.f);
 		}
 		gsi.tnd = '1';
 		gsi.dsn = '1';
