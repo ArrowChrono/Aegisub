@@ -965,15 +965,12 @@ bool Project::PromptAndGenerateSceneChangeKeyframes(agi::fs::path const& cache_p
 		return true;
 	}
 	catch (agi::UserCancelException const&) {
-		RemoveSceneChangeKeyframeCacheFile(cache_path);
 		return false;
 	}
 	catch (agi::Exception const& err) {
-		RemoveSceneChangeKeyframeCacheFile(cache_path);
 		ShowError(err.GetMessage(), "Error generating keyframes");
 	}
 	catch (std::exception const& err) {
-		RemoveSceneChangeKeyframeCacheFile(cache_path);
 		ShowError(err.what(), "Error generating keyframes");
 	}
 
