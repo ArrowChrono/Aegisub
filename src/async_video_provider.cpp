@@ -34,6 +34,7 @@
 
 #include <libaegisub/background_runner.h>
 #include <libaegisub/dispatch.h>
+#include <libaegisub/exception.h>
 #include <libaegisub/log.h>
 #include <libaegisub/make_unique.h>
 
@@ -990,8 +991,30 @@ void AsyncVideoProvider::GenerateSceneChangeKeyframes(agi::fs::path const& outpu
 		});
 	};
 
-	if (br)
-		br->Run(run);
+	if (br) {
+		std::exception_ptr error;
+		bool task_failed = false;
+		try {
+			br->Run([&](agi::ProgressSink *ps) {
+				try {
+					run(ps);
+				}
+				catch (agi::UserCancelException const&) {
+					error = std::current_exception();
+				}
+				catch (...) {
+					error = std::current_exception();
+					task_failed = true;
+				}
+			});
+		}
+		catch (...) {
+			if (!task_failed)
+				throw;
+		}
+		if (error)
+			std::rethrow_exception(error);
+	}
 	else
 		run(nullptr);
 }

@@ -29,6 +29,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -102,6 +103,7 @@ public:
 	std::vector<SourceFrameOutputMode> available_modes = { SourceFrameOutputMode::Bgra8 };
 	SourceFrameOutputMode output_mode = SourceFrameOutputMode::Bgra8;
 	std::function<void(int, VideoFrame&)> fill_frame;
+	std::function<void()> generate_scenechange_keyframes;
 
 	explicit FakeVideoProvider(std::shared_ptr<VideoProviderState> state)
 	: state(std::move(state)) {
@@ -142,6 +144,12 @@ public:
 	double GetDAR() const override { return 1.0; }
 	agi::vfr::Framerate GetFPS() const override { return agi::vfr::Framerate(24.0); }
 	std::vector<int> GetKeyFrames() const override { return {}; }
+	void GenerateSceneChangeKeyframes(agi::fs::path const& output_path, agi::ProgressSink *ps) override {
+		if (generate_scenechange_keyframes)
+			generate_scenechange_keyframes();
+		else
+			VideoProvider::GenerateSceneChangeKeyframes(output_path, ps);
+	}
 	std::string GetColorSpace() const override { return color_space; }
 	std::string GetRealColorSpace() const override { return real_color_space; }
 	SourceFrameGeometry GetFrameGeometry() const override {
@@ -205,6 +213,14 @@ public:
 		return true;
 	}
 	std::string GetDecoderName() const override { return "fake"; }
+};
+
+class FailingAfterTaskBackgroundRunner final : public agi::BackgroundRunner {
+	public:
+	void Run(std::function<void(agi::ProgressSink *)> task) override {
+		task(nullptr);
+		throw std::runtime_error("SceneChange runner failed after task completion");
+	}
 };
 
 void SetBgraPixel(VideoFrame& frame, int x, int y, unsigned char b, unsigned char g, unsigned char r) {
@@ -1045,6 +1061,67 @@ TEST(async_video_provider, request_frame_keeps_only_latest_pending_render) {
 
 	std::lock_guard<std::mutex> lock(state->mutex);
 	EXPECT_EQ((std::vector<int>{1, 4}), state->requested_frames);
+}
+
+TEST(async_video_provider, scenechange_task_failure_takes_priority_over_runner_error) {
+	auto fake = agi::make_unique<FakeVideoProvider>(std::make_shared<VideoProviderState>());
+	fake->generate_scenechange_keyframes = [] {
+		throw VideoProviderError("SceneChange provider could not publish keyframes");
+	};
+	AsyncVideoProvider provider(
+		std::move(fake),
+		agi::make_unique<FakeSubtitlesProvider>(),
+		AsyncVideoProviderEventSink{});
+	FailingAfterTaskBackgroundRunner runner;
+
+	EXPECT_THROW({
+		try {
+			provider.GenerateSceneChangeKeyframes("keyframes.txt", &runner);
+		}
+		catch (VideoProviderError const& error) {
+			EXPECT_EQ("SceneChange provider could not publish keyframes", error.GetMessage());
+			throw;
+		} }, VideoProviderError);
+}
+
+TEST(async_video_provider, scenechange_runner_error_propagates_after_task_success) {
+	auto fake = agi::make_unique<FakeVideoProvider>(std::make_shared<VideoProviderState>());
+	fake->generate_scenechange_keyframes = [] {};
+	AsyncVideoProvider provider(
+		std::move(fake),
+		agi::make_unique<FakeSubtitlesProvider>(),
+		AsyncVideoProviderEventSink{});
+	FailingAfterTaskBackgroundRunner runner;
+
+	EXPECT_THROW({
+		try {
+			provider.GenerateSceneChangeKeyframes("keyframes.txt", &runner);
+		}
+		catch (std::runtime_error const& error) {
+			EXPECT_STREQ("SceneChange runner failed after task completion", error.what());
+			throw;
+		} }, std::runtime_error);
+}
+
+TEST(async_video_provider, scenechange_runner_error_takes_priority_over_task_cancellation) {
+	auto fake = agi::make_unique<FakeVideoProvider>(std::make_shared<VideoProviderState>());
+	fake->generate_scenechange_keyframes = [] {
+		throw agi::UserCancelException("SceneChange provider cancelled generation");
+	};
+	AsyncVideoProvider provider(
+		std::move(fake),
+		agi::make_unique<FakeSubtitlesProvider>(),
+		AsyncVideoProviderEventSink{});
+	FailingAfterTaskBackgroundRunner runner;
+
+	EXPECT_THROW({
+		try {
+			provider.GenerateSceneChangeKeyframes("keyframes.txt", &runner);
+		}
+		catch (std::runtime_error const& error) {
+			EXPECT_STREQ("SceneChange runner failed after task completion", error.what());
+			throw;
+		} }, std::runtime_error);
 }
 
 TEST(async_video_provider, cancel_pending_frame_requests_drops_in_flight_render) {

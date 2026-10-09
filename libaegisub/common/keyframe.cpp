@@ -21,6 +21,7 @@
 
 #include "libaegisub/io.h"
 #include "libaegisub/line_iterator.h"
+#include "libaegisub/scope_exit.h"
 #include "libaegisub/string_utils.h"
 
 namespace {
@@ -71,10 +72,13 @@ char x264(std::string const& line) {
 namespace agi { namespace keyframe {
 void Save(agi::fs::path const& filename, std::vector<int> const& keyframes) {
 	io::Save file(filename);
+	auto cancel = agi::make_scope_exit([&] { file.Cancel(); });
 	std::ostream& of = file.Get();
 	of << "# keyframe format v1" << std::endl;
 	of << "fps " << 0 << std::endl;
 	std::copy(keyframes.begin(), keyframes.end(), std::ostream_iterator<int>(of, "\n"));
+	file.Close();
+	cancel.release();
 }
 
 std::vector<int> Load(agi::fs::path const& filename) {

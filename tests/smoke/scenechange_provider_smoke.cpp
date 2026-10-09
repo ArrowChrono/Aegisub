@@ -161,6 +161,10 @@ int main(int argc, char **argv) {
 		PrintKeyframes(keyframes);
 		return 0;
 	}
+	catch (agi::Exception const& error) {
+		std::cerr << "scenechange-provider-smoke: " << error.GetMessage() << '\n';
+		return 1;
+	}
 	catch (std::exception const& error) {
 		std::cerr << "scenechange-provider-smoke: " << error.what() << '\n';
 		return 1;
