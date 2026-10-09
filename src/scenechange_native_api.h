@@ -80,6 +80,15 @@ inline char const *CacheTokenForBackend(Api::Backend backend) noexcept {
 	return backend == Api::Backend::ScxvidProvider ? "scxvid" : "wwxd";
 }
 
+class KeyframeRequest {
+	Api api;
+
+	public:
+	explicit KeyframeRequest(Api const& selected) noexcept : api(selected) {}
+	[[nodiscard]] char const *GetCacheToken() const noexcept { return CacheTokenForBackend(api.backend); }
+	[[nodiscard]] Api const& GetApi() const noexcept { return api; }
+};
+
 // Selects the preferred compatible backend which accepts one of
 // supported_input_formats. Returns the selected Api by value so callers do not
 // depend on mutable process-global selection state.
@@ -88,12 +97,5 @@ BackendSelection SelectBackendForDimensions(
 	int32_t height,
 	InputPixelFormatMask supported_input_formats,
 	bool log_fallback = false);
-
-// Human-readable status of both provider DLLs (loaded path / load error / not loaded).
-std::string FormatProviderLoadStatus();
-
-// Message for SelectBackendForDimensions → Unavailable: distinguishes "no DLLs"
-// from "DLLs present but excluded by dimensions/preference".
-std::string FormatUnavailableBackendMessage();
 
 } // namespace scenechange

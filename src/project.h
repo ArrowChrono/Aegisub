@@ -31,6 +31,9 @@ namespace agi { class AudioProvider; }
 namespace agi { class BackgroundRunner; }
 namespace agi { struct Context; }
 namespace aegisub::video_session_ops { struct OpenedVideoSummary; }
+namespace scenechange {
+class KeyframeRequest;
+}
 enum class MkvBitmapSubtitleCodec;
 struct ProjectProperties;
 
@@ -72,13 +75,10 @@ class Project {
 	void DoLoadTimecodes(agi::fs::path const& path);
 	void DoLoadKeyframes(agi::fs::path const& path);
 #ifdef WITH_SCENECHANGE
-	// Loads backend-specific SceneChange keyframe cache. When prompt_if_missing
-	// is true (video open), offers to generate if no cache exists.
-	// cache_token: when non-empty, skips a second provider selection.
 	bool TryLoadSceneChangeKeyframes(agi::fs::path const& video_path,
-		bool prompt_if_missing = true,
-		std::string const& cache_token = {});
-	bool PromptAndGenerateSceneChangeKeyframes(agi::fs::path const& cache_path, bool cache_exists);
+									 bool prompt_if_missing, scenechange::KeyframeRequest const& request);
+	bool PromptAndGenerateSceneChangeKeyframes(scenechange::KeyframeRequest const& request,
+											   agi::fs::path const& cache_path, bool cache_exists);
 	// SceneChange backend only affects keyframe generation/cache paths; do not
 	// reopen the video provider (that would re-index LsmasNative unnecessarily).
 	// Preference changes only load an existing cache — generation is via menu.

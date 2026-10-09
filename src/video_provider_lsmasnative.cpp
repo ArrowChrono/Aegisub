@@ -319,9 +319,9 @@ public:
     bool WantsCaching() const override { return false; }
     bool HasAudio() const override { return has_audio; }
 #ifdef WITH_SCENECHANGE
-    bool CanGenerateSceneChangeKeyframes() const override;
-    std::string GetSceneChangeKeyframeCacheToken() const override;
-    void GenerateSceneChangeKeyframes(agi::fs::path const& output_path, agi::ProgressSink *ps) override;
+	[[nodiscard]] std::optional<scenechange::KeyframeRequest> PrepareSceneChangeKeyframes() const override;
+	void GenerateSceneChangeKeyframes(scenechange::KeyframeRequest const& request,
+									  agi::fs::path const& output_path, agi::ProgressSink *ps) override;
 #endif
 };
 
@@ -600,25 +600,16 @@ scenechange::InputPixelFormatMask GetSupportedSceneChangeInputFormats(lsmas::Api
     return formats;
 }
 
-// Capability / cache-token path: never throw (callers treat empty as unavailable).
 scenechange::BackendSelection SelectSceneChangeBackend(lsmas_video_info_t const& info) noexcept {
     try {
         auto const& lsm = lsmas::GetApi();
-        return scenechange::SelectBackendForDimensions(
-            info.width, info.height, GetSupportedSceneChangeInputFormats(lsm));
-    }
+		return scenechange::SelectBackendForDimensions(
+			info.width, info.height, GetSupportedSceneChangeInputFormats(lsm), true);
+	}
     catch (...) {
         // LsmasNative runtime missing or broken — not a SceneChange DLL issue.
         return {};
     }
-}
-
-[[noreturn]] void ThrowSceneChangeSelectionError(scenechange::BackendSelectionStatus status) {
-    if (status == scenechange::BackendSelectionStatus::Unsupported) {
-        throw VideoProviderError(
-            "No available SceneChange backend accepts the frame formats exposed by this LsmasNative provider.");
-    }
-    throw VideoProviderError(scenechange::FormatUnavailableBackendMessage());
 }
 
 // Scans with a pre-selected backend snapshot (no second SelectBackend call).
@@ -652,7 +643,9 @@ std::vector<int> ScanSceneChangeKeyframes(lsmas_handle_t *handle,
     char sc_error[4096] = {};
     {
         std::string const backend_name = scenechange::BackendName(sc.backend);
-        void *ctx = sc.provider.create(info.width, info.height, nullptr, 0, sc_error, sizeof(sc_error));
+		LOG_I("provider/lsmasnative/scenechange")
+			<< "Scanning scene changes with backend: " << backend_name;
+		void *ctx = sc.provider.create(info.width, info.height, nullptr, 0, sc_error, sizeof(sc_error));
         if (!ctx)
             ThrowSceneChangeError(sc_error, "Failed to create " + backend_name + ".");
         auto destroy_ctx = agi::make_scope_exit([&] { sc.provider.destroy(ctx); });
@@ -759,38 +752,24 @@ bool LsmasVideoProvider::SetOutputMode(SourceFrameOutputMode mode) {
 }
 
 #ifdef WITH_SCENECHANGE
-bool LsmasVideoProvider::CanGenerateSceneChangeKeyframes() const {
-    // Capability is "has a selectable backend"; token path shares the same select.
-    return !GetSceneChangeKeyframeCacheToken().empty();
-}
-
-std::string LsmasVideoProvider::GetSceneChangeKeyframeCacheToken() const {
-    auto const selection = SelectSceneChangeBackend(info);
+std::optional<scenechange::KeyframeRequest> LsmasVideoProvider::PrepareSceneChangeKeyframes() const {
+	auto const selection = SelectSceneChangeBackend(info);
     if (selection.status != scenechange::BackendSelectionStatus::Selected)
         return {};
-    return scenechange::CacheTokenForBackend(selection.selected.backend);
+	return scenechange::KeyframeRequest(selection.selected);
 }
 
-void LsmasVideoProvider::GenerateSceneChangeKeyframes(agi::fs::path const& output_path, agi::ProgressSink *ps) {
-    if (output_path.empty())
+void LsmasVideoProvider::GenerateSceneChangeKeyframes(scenechange::KeyframeRequest const& request,
+													  agi::fs::path const& output_path, agi::ProgressSink *ps) {
+	if (output_path.empty())
         throw VideoProviderError("SceneChange keyframe output path is empty.");
-    // Validate before backend selection: SelectBackendForDimensions treats
-    // non-positive sizes as Unavailable and would mis-blame SceneChange prefs.
     if (!handle)
         throw VideoProviderError("LsmasNative handle is not open.");
     if (info.width <= 0 || info.height <= 0 || info.num_frames <= 0)
         throw VideoProviderError("LsmasNative returned invalid video dimensions for SceneChange.");
 
-    // Resolve LsmasNative first so a missing runtime surfaces as an lsmas error,
-    // not as FormatUnavailableBackendMessage (SceneChange DLL / dimensions).
-    auto const& lsm = lsmas::GetApi();
-    auto const selection = scenechange::SelectBackendForDimensions(
-        info.width, info.height, GetSupportedSceneChangeInputFormats(lsm), true);
-    if (selection.status != scenechange::BackendSelectionStatus::Selected)
-        ThrowSceneChangeSelectionError(selection.status);
-
-    auto generated = ScanSceneChangeKeyframes(handle, info, selection.selected, ps);
-    agi::keyframe::Save(output_path, generated);
+	auto generated = ScanSceneChangeKeyframes(handle, info, request.GetApi(), ps);
+	agi::keyframe::Save(output_path, generated);
     LOG_I("provider/lsmasnative/scenechange")
         << "Generated " << generated.size() << " SceneChange keyframes: "
         << agi::fs::PathToString(output_path);

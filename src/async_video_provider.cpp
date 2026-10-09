@@ -961,32 +961,23 @@ AsyncVideoProviderMemoryStats AsyncVideoProvider::CollectMemoryStats() {
 	return stats;
 }
 
-bool AsyncVideoProvider::CanGenerateSceneChangeKeyframes() const {
-	bool result = false;
-	if (IsReentrantWorkerCall()) return false;
-	worker->Sync([&] {
-		WorkerSyncTracker sync_tracker(*this);
-		result = source_provider->CanGenerateSceneChangeKeyframes();
-	});
-	return result;
-}
-
-std::string AsyncVideoProvider::GetSceneChangeKeyframeCacheToken() const {
-	std::string token;
+std::optional<scenechange::KeyframeRequest> AsyncVideoProvider::PrepareSceneChangeKeyframes() const {
+	std::optional<scenechange::KeyframeRequest> request;
 	if (IsReentrantWorkerCall()) return {};
 	worker->Sync([&] {
 		WorkerSyncTracker sync_tracker(*this);
-		token = source_provider->GetSceneChangeKeyframeCacheToken();
+		request = source_provider->PrepareSceneChangeKeyframes();
 	});
-	return token;
+	return request;
 }
 
-void AsyncVideoProvider::GenerateSceneChangeKeyframes(agi::fs::path const& output_path, agi::BackgroundRunner *br) {
+void AsyncVideoProvider::GenerateSceneChangeKeyframes(scenechange::KeyframeRequest const& request,
+													  agi::fs::path const& output_path, agi::BackgroundRunner *br) {
 	auto run = [&](agi::ProgressSink *ps) {
 		worker->Sync([&] {
 			WorkerSyncTracker sync_tracker(*this);
 			while (ProcessPending()) { }
-			source_provider->GenerateSceneChangeKeyframes(output_path, ps);
+			source_provider->GenerateSceneChangeKeyframes(request, output_path, ps);
 			ResetCachedSourceFrame();
 		});
 	};

@@ -6,6 +6,7 @@
 #include "../../src/async_video_trace.h"
 #include "../../src/export_fixstyle.h"
 #include "../../src/include/aegisub/subtitles_provider.h"
+#include "../../src/scenechange_native_api.h"
 #include "../../src/subtitle_overlay_blend.h"
 #include "../../src/ui_services.h"
 #include "../../src/transient_font_set.h"
@@ -29,6 +30,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -103,7 +105,8 @@ public:
 	std::vector<SourceFrameOutputMode> available_modes = { SourceFrameOutputMode::Bgra8 };
 	SourceFrameOutputMode output_mode = SourceFrameOutputMode::Bgra8;
 	std::function<void(int, VideoFrame&)> fill_frame;
-	std::function<void()> generate_scenechange_keyframes;
+	std::function<std::optional<scenechange::KeyframeRequest>()> prepare_scenechange_keyframes;
+	std::function<void(scenechange::KeyframeRequest const&)> generate_scenechange_keyframes;
 
 	explicit FakeVideoProvider(std::shared_ptr<VideoProviderState> state)
 	: state(std::move(state)) {
@@ -144,11 +147,16 @@ public:
 	double GetDAR() const override { return 1.0; }
 	agi::vfr::Framerate GetFPS() const override { return agi::vfr::Framerate(24.0); }
 	std::vector<int> GetKeyFrames() const override { return {}; }
-	void GenerateSceneChangeKeyframes(agi::fs::path const& output_path, agi::ProgressSink *ps) override {
+	[[nodiscard]] std::optional<scenechange::KeyframeRequest> PrepareSceneChangeKeyframes() const override {
+		if (prepare_scenechange_keyframes)
+			return prepare_scenechange_keyframes();
+		return VideoProvider::PrepareSceneChangeKeyframes();
+	}
+	void GenerateSceneChangeKeyframes(scenechange::KeyframeRequest const& request, agi::fs::path const& output_path, agi::ProgressSink *ps) override {
 		if (generate_scenechange_keyframes)
-			generate_scenechange_keyframes();
+			generate_scenechange_keyframes(request);
 		else
-			VideoProvider::GenerateSceneChangeKeyframes(output_path, ps);
+			VideoProvider::GenerateSceneChangeKeyframes(request, output_path, ps);
 	}
 	std::string GetColorSpace() const override { return color_space; }
 	std::string GetRealColorSpace() const override { return real_color_space; }
@@ -1065,7 +1073,7 @@ TEST(async_video_provider, request_frame_keeps_only_latest_pending_render) {
 
 TEST(async_video_provider, scenechange_task_failure_takes_priority_over_runner_error) {
 	auto fake = agi::make_unique<FakeVideoProvider>(std::make_shared<VideoProviderState>());
-	fake->generate_scenechange_keyframes = [] {
+	fake->generate_scenechange_keyframes = [](scenechange::KeyframeRequest const&) {
 		throw VideoProviderError("SceneChange provider could not publish keyframes");
 	};
 	AsyncVideoProvider provider(
@@ -1073,10 +1081,11 @@ TEST(async_video_provider, scenechange_task_failure_takes_priority_over_runner_e
 		agi::make_unique<FakeSubtitlesProvider>(),
 		AsyncVideoProviderEventSink{});
 	FailingAfterTaskBackgroundRunner runner;
+	scenechange::KeyframeRequest const request(scenechange::Api{.backend = scenechange::Api::Backend::WwxdProvider});
 
 	EXPECT_THROW({
 		try {
-			provider.GenerateSceneChangeKeyframes("keyframes.txt", &runner);
+			provider.GenerateSceneChangeKeyframes(request, "keyframes.txt", &runner);
 		}
 		catch (VideoProviderError const& error) {
 			EXPECT_EQ("SceneChange provider could not publish keyframes", error.GetMessage());
@@ -1086,16 +1095,17 @@ TEST(async_video_provider, scenechange_task_failure_takes_priority_over_runner_e
 
 TEST(async_video_provider, scenechange_runner_error_propagates_after_task_success) {
 	auto fake = agi::make_unique<FakeVideoProvider>(std::make_shared<VideoProviderState>());
-	fake->generate_scenechange_keyframes = [] {};
+	fake->generate_scenechange_keyframes = [](scenechange::KeyframeRequest const&) {};
 	AsyncVideoProvider provider(
 		std::move(fake),
 		agi::make_unique<FakeSubtitlesProvider>(),
 		AsyncVideoProviderEventSink{});
 	FailingAfterTaskBackgroundRunner runner;
+	scenechange::KeyframeRequest const request(scenechange::Api{.backend = scenechange::Api::Backend::WwxdProvider});
 
 	EXPECT_THROW({
 		try {
-			provider.GenerateSceneChangeKeyframes("keyframes.txt", &runner);
+			provider.GenerateSceneChangeKeyframes(request, "keyframes.txt", &runner);
 		}
 		catch (std::runtime_error const& error) {
 			EXPECT_STREQ("SceneChange runner failed after task completion", error.what());
@@ -1105,7 +1115,7 @@ TEST(async_video_provider, scenechange_runner_error_propagates_after_task_succes
 
 TEST(async_video_provider, scenechange_runner_error_takes_priority_over_task_cancellation) {
 	auto fake = agi::make_unique<FakeVideoProvider>(std::make_shared<VideoProviderState>());
-	fake->generate_scenechange_keyframes = [] {
+	fake->generate_scenechange_keyframes = [](scenechange::KeyframeRequest const&) {
 		throw agi::UserCancelException("SceneChange provider cancelled generation");
 	};
 	AsyncVideoProvider provider(
@@ -1113,15 +1123,69 @@ TEST(async_video_provider, scenechange_runner_error_takes_priority_over_task_can
 		agi::make_unique<FakeSubtitlesProvider>(),
 		AsyncVideoProviderEventSink{});
 	FailingAfterTaskBackgroundRunner runner;
+	scenechange::KeyframeRequest const request(scenechange::Api{.backend = scenechange::Api::Backend::WwxdProvider});
 
 	EXPECT_THROW({
 		try {
-			provider.GenerateSceneChangeKeyframes("keyframes.txt", &runner);
+			provider.GenerateSceneChangeKeyframes(request, "keyframes.txt", &runner);
 		}
 		catch (std::runtime_error const& error) {
 			EXPECT_STREQ("SceneChange runner failed after task completion", error.what());
 			throw;
 		} }, std::runtime_error);
+}
+
+TEST(async_video_provider, scenechange_generation_uses_prepared_api_snapshot_on_worker) {
+	auto fake = agi::make_unique<FakeVideoProvider>(std::make_shared<VideoProviderState>());
+	scenechange::Api selected{.backend = scenechange::Api::Backend::ScxvidProvider};
+	selected.provider.commit_written_frame = [](void *, scenechange_provider_result *result, char *, size_t) -> int32_t {
+		result->frame_index = 17;
+		result->is_scene_change = 1;
+		return SCENECHANGE_PROVIDER_OK;
+	};
+	int prepare_count = 0;
+	auto const caller_thread = std::this_thread::get_id();
+	AsyncVideoProvider *async = nullptr;
+	scenechange_provider_result generated_result{.struct_size = SCENECHANGE_PROVIDER_RESULT_V1_SIZE};
+	fake->prepare_scenechange_keyframes = [&] {
+		++prepare_count;
+		EXPECT_NE(caller_thread, std::this_thread::get_id());
+		EXPECT_FALSE(async->PrepareSceneChangeKeyframes());
+		return scenechange::KeyframeRequest(selected);
+	};
+	fake->generate_scenechange_keyframes = [&](scenechange::KeyframeRequest const& request) {
+		EXPECT_NE(caller_thread, std::this_thread::get_id());
+		EXPECT_FALSE(async->PrepareSceneChangeKeyframes());
+		EXPECT_EQ(scenechange::Api::Backend::ScxvidProvider, request.GetApi().backend);
+		EXPECT_STREQ("scxvid", request.GetCacheToken());
+		auto commit = request.GetApi().provider.commit_written_frame;
+		ASSERT_NE(nullptr, commit);
+		EXPECT_EQ(SCENECHANGE_PROVIDER_OK, commit(nullptr, &generated_result, nullptr, 0));
+	};
+	AsyncVideoProvider provider(
+		std::move(fake),
+		agi::make_unique<FakeSubtitlesProvider>(),
+		AsyncVideoProviderEventSink{});
+	async = &provider;
+
+	auto request = provider.PrepareSceneChangeKeyframes();
+	ASSERT_TRUE(request);
+	selected.backend = scenechange::Api::Backend::WwxdProvider;
+	selected.provider.commit_written_frame = [](void *, scenechange_provider_result *result, char *, size_t) -> int32_t {
+		result->frame_index = 29;
+		result->is_scene_change = 1;
+		return SCENECHANGE_PROVIDER_OK;
+	};
+	auto newer_request = provider.PrepareSceneChangeKeyframes();
+	ASSERT_TRUE(newer_request);
+	EXPECT_EQ(scenechange::Api::Backend::WwxdProvider, newer_request->GetApi().backend);
+	EXPECT_STREQ("wwxd", newer_request->GetCacheToken());
+
+	provider.GenerateSceneChangeKeyframes(*request, "keyframes.txt", nullptr);
+
+	EXPECT_EQ(17, generated_result.frame_index);
+	EXPECT_EQ(1, generated_result.is_scene_change);
+	EXPECT_EQ(2, prepare_count);
 }
 
 TEST(async_video_provider, cancel_pending_frame_requests_drops_in_flight_render) {

@@ -32,6 +32,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <thread>
 #include <utility>
@@ -379,9 +380,9 @@ public:
 	std::string GetNativeFormatDescription() const { return source_provider->GetNativeFormatDescription(); }
 	bool ShouldSetVideoProperties() const { return source_provider->ShouldSetVideoProperties(); }
 	bool HasAudio() const                 { return source_provider->HasAudio(); }
-	bool CanGenerateSceneChangeKeyframes() const;
-	std::string GetSceneChangeKeyframeCacheToken() const;
-	void GenerateSceneChangeKeyframes(agi::fs::path const& output_path, agi::BackgroundRunner *br);
+	[[nodiscard]] std::optional<scenechange::KeyframeRequest> PrepareSceneChangeKeyframes() const;
+	void GenerateSceneChangeKeyframes(scenechange::KeyframeRequest const& request,
+									  agi::fs::path const& output_path, agi::BackgroundRunner *br);
 
 	/// @brief Constructor
 	/// @param videoFileName File to open

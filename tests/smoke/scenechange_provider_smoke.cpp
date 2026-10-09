@@ -1,4 +1,5 @@
 #include "include/aegisub/video_provider.h"
+#include "options.h"
 #include "scenechange_native_api.h"
 #include "video_provider_manager.h"
 
@@ -6,14 +7,19 @@
 #include <libaegisub/exception.h>
 #include <libaegisub/fs.h>
 #include <libaegisub/keyframe.h>
+#include <libaegisub/log.h>
+#include <libaegisub/scope_exit.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -76,12 +82,100 @@ void PrintKeyframes(std::vector<int> const& keyframes) {
 	std::cout << '\n';
 }
 
+class BackendLog final : public agi::log::Emitter {
+	std::mutex mutex;
+	std::vector<std::string> events;
+
+	public:
+	void log(agi::log::SinkMessage const& message) override {
+		if (std::string_view(message.section) != "provider/lsmasnative/scenechange" || !message.message.starts_with("Scanning scene changes with backend: "))
+			return;
+		std::scoped_lock lock(mutex);
+		events.push_back(message.message);
+	}
+
+	std::vector<std::string> GetEvents() {
+		std::scoped_lock lock(mutex);
+		return events;
+	}
+};
+
+void RunPreparedSwitch(VideoProvider& provider, agi::fs::path const& output_prefix) {
+	agi::Options options("", R"json({"Provider":{"SceneChange":{"Backend":"scxvid"}}})json",
+						 agi::Options::FLUSH_SKIP);
+	agi::log::LogSink log_sink;
+	config::opt = &options;
+	agi::log::log = &log_sink;
+	auto reset_globals = agi::make_scope_exit([] {
+		config::opt = nullptr;
+		agi::log::log = nullptr;
+	});
+	auto emitter = std::make_unique<BackendLog>();
+	auto *backend_log = emitter.get();
+	log_sink.Subscribe(std::move(emitter));
+	auto *preference = options.Get("Provider/SceneChange/Backend");
+
+	auto prepare = [&](std::string const& expected_token) {
+		auto request = provider.PrepareSceneChangeKeyframes();
+		if (!request)
+			throw std::runtime_error("SceneChange keyframe preparation is unavailable");
+		if (request->GetCacheToken() != expected_token)
+			throw std::runtime_error("prepared SceneChange request has an unexpected cache token");
+		return *request;
+	};
+	auto run = [&](scenechange::KeyframeRequest const& request, std::string const& expected_token,
+				   std::string const& expected_backend, std::string const& label) {
+		auto output_path = output_prefix;
+		output_path += "." + label + ".kf.txt";
+		if (agi::fs::Exists(output_path))
+			throw std::runtime_error("prepared-switch requires fresh output paths");
+		if (request.GetCacheToken() != expected_token)
+			throw std::runtime_error("prepared SceneChange request changed its cache token");
+
+		auto const event_count = backend_log->GetEvents().size();
+		Progress progress;
+		provider.GenerateSceneChangeKeyframes(request, output_path, &progress);
+		progress.Validate(provider.GetFrameCount());
+		auto const events = backend_log->GetEvents();
+		if (events.size() != event_count + 1 || events.back() != "Scanning scene changes with backend: " + expected_backend)
+			throw std::runtime_error("real SceneChange scanner did not use the prepared backend");
+
+		auto keyframes = agi::keyframe::Load(output_path);
+		if (keyframes.empty() || keyframes.front() < 0 || keyframes.back() >= provider.GetFrameCount() || !std::ranges::is_sorted(keyframes) || std::ranges::adjacent_find(keyframes) != keyframes.end())
+			throw std::runtime_error("prepared SceneChange output is not a nonempty ordered frame list");
+
+		std::cout << "scenario=" << label << '\n';
+		std::cout << "preference-at-execution=" << preference->GetString() << '\n';
+		std::cout << "request-cache-token=" << request.GetCacheToken() << '\n';
+		std::cout << "scanner-event=" << events.back() << '\n';
+		std::cout << "frames=" << provider.GetFrameCount() << '\n';
+		PrintKeyframes(keyframes);
+		return keyframes;
+	};
+
+	auto const prepared_scxvid = prepare("scxvid");
+	preference->SetString("wwxd");
+	auto const scxvid_keyframes = run(prepared_scxvid, "scxvid", "scxvid", "scxvid-prepared");
+	auto const fresh_wwxd = prepare("wwxd");
+	auto const wwxd_keyframes = run(fresh_wwxd, "wwxd", "wwxd-provider", "wwxd-fresh");
+
+	auto const prepared_wwxd = prepare("wwxd");
+	preference->SetString("scxvid");
+	if (run(prepared_wwxd, "wwxd", "wwxd-provider", "wwxd-prepared") != wwxd_keyframes)
+		throw std::runtime_error("prepared WWXD scan differs from a fresh WWXD scan");
+	auto const fresh_scxvid = prepare("scxvid");
+	if (run(fresh_scxvid, "scxvid", "scxvid", "scxvid-fresh") != scxvid_keyframes)
+		throw std::runtime_error("fresh scxvid scan differs from a prepared scxvid scan");
+	std::cout << "prepared-switch=passed\n";
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
 	if (argc < 3 || argc > 6) {
 		std::cerr << "usage: scenechange-provider-smoke <video> <output.kf.txt> "
-			"[expected-frames] [scxvid|wwxd|wwxd-provider] [cancel-at]\n";
+					 "[expected-frames] [scxvid|wwxd|wwxd-provider] [cancel-at]\n"
+					 "       scenechange-provider-smoke <video> <output-prefix> --prepared-switch\n";
 		return 2;
 	}
 
@@ -92,7 +186,12 @@ int main(int argc, char **argv) {
 			video_path, {}, "LsmasNative", nullptr, {}, size_t{0});
 		if (!provider || provider->GetDecoderName() != "LsmasNative")
 			throw std::runtime_error("LsmasNative video provider did not open");
-		if (!provider->CanGenerateSceneChangeKeyframes())
+		if (argc == 4 && std::string_view(argv[3]) == "--prepared-switch") {
+			RunPreparedSwitch(*provider, output_path);
+			return 0;
+		}
+		auto const request = provider->PrepareSceneChangeKeyframes();
+		if (!request)
 			throw std::runtime_error("SceneChange keyframe generation is unavailable");
 
 		std::string expected_backend = argc >= 5 ? argv[4] : "scxvid";
@@ -105,7 +204,7 @@ int main(int argc, char **argv) {
 		// argv is the independent source; provider token is the system under test.
 		std::string const expected_cache_token =
 			expected_backend == "scxvid" ? "scxvid" : "wwxd";
-		std::string const cache_token = provider->GetSceneChangeKeyframeCacheToken();
+		std::string const cache_token = request->GetCacheToken();
 		if (cache_token != expected_cache_token)
 			throw std::runtime_error("selected SceneChange backend returned an incompatible cache token");
 
@@ -120,7 +219,7 @@ int main(int argc, char **argv) {
 		Progress progress(cancel_at);
 		bool canceled = false;
 		try {
-			provider->GenerateSceneChangeKeyframes(output_path, &progress);
+			provider->GenerateSceneChangeKeyframes(*request, output_path, &progress);
 		}
 		catch (agi::UserCancelException const&) {
 			canceled = true;

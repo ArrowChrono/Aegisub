@@ -156,38 +156,7 @@ void LogFallback(Api::Backend skipped, Api::Backend selected) {
 	}
 }
 
-std::string DescribeLibraryStatus(agi::native::CachedLibrary& library) {
-	// Prefer a successful load over a stale error string.
-	if (library.IsAvailable()) {
-		auto const path = library.GetLoadedLibrary();
-		return path.empty() ? "loaded" : ("loaded (" + path + ")");
-	}
-	auto const error = library.GetLoadError();
-	if (!error.empty())
-		return error;
-	return "not loaded";
-}
-
 } // namespace
-
-std::string FormatProviderLoadStatus() {
-	return "xvid '" + std::string(kScxvidLibraryName) + "': "
-		+ DescribeLibraryStatus(scxvid_provider_library)
-		+ "; wwxd '" + std::string(kWwxdLibraryName) + "': "
-		+ DescribeLibraryStatus(wwxd_provider_library);
-}
-
-std::string FormatUnavailableBackendMessage() {
-	bool const any_loaded =
-		scxvid_provider_library.IsAvailable() || wwxd_provider_library.IsAvailable();
-	std::string message = any_loaded
-		? "No SceneChange backend is compatible with this video "
-			"(scxvid requires even dimensions; check Provider/SceneChange/Backend preference)."
-		: "No SceneChange provider libraries are available.";
-	message += " ";
-	message += FormatProviderLoadStatus();
-	return message;
-}
 
 BackendSelection SelectBackendForDimensions(
 	int32_t width,

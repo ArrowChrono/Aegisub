@@ -66,6 +66,7 @@
 #include <exception>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 
 namespace {
 bool transient_font_environment_matches(std::shared_ptr<const TransientFontSet> const& left, std::shared_ptr<const TransientFontSet> const& right) {
@@ -801,13 +802,12 @@ bool Project::DoLoadVideo(agi::fs::path const& path, aegisub::video_session_ops:
 	keyframes = opened_video.keyframes;
 	video_provider->SetSubtitlesTimecodes(timecodes);
 #ifdef WITH_SCENECHANGE
-	// One provider selection for capability + cache path (avoid double select).
-	std::string scenechange_cache_token;
+	std::optional<scenechange::KeyframeRequest> scenechange_request;
 	if (video_provider->GetDecoderName() == "LsmasNative")
-		scenechange_cache_token = video_provider->GetSceneChangeKeyframeCacheToken();
-	can_generate_scene_change_keyframes = !scenechange_cache_token.empty();
-	bool scenechange_keyframes_loaded =
-		TryLoadSceneChangeKeyframes(path, true, scenechange_cache_token);
+		scenechange_request = video_provider->PrepareSceneChangeKeyframes();
+	can_generate_scene_change_keyframes = scenechange_request.has_value();
+	bool scenechange_keyframes_loaded = scenechange_request &&
+										TryLoadSceneChangeKeyframes(path, true, *scenechange_request);
 #else
 	bool scenechange_keyframes_loaded = false;
 #endif
@@ -899,18 +899,12 @@ void Project::CloseTimecodes() {
 
 #ifdef WITH_SCENECHANGE
 bool Project::TryLoadSceneChangeKeyframes(agi::fs::path const& video_path,
-	bool prompt_if_missing,
-	std::string const& cache_token) {
+										  bool prompt_if_missing,
+										  scenechange::KeyframeRequest const& request) {
 	if (!video_provider || video_provider->GetDecoderName() != "LsmasNative")
 		return false;
 
-	auto token = cache_token;
-	if (token.empty())
-		token = video_provider->GetSceneChangeKeyframeCacheToken();
-	if (token.empty())
-		return false;
-
-	auto cache_path = GetSceneChangeKeyframeCacheFilename(video_path, token);
+	auto cache_path = GetSceneChangeKeyframeCacheFilename(video_path, request.GetCacheToken());
 	if (agi::fs::FileExists(cache_path)) {
 		try {
 			DoLoadKeyframes(cache_path);
@@ -938,10 +932,11 @@ bool Project::TryLoadSceneChangeKeyframes(agi::fs::path const& video_path,
 	if (!prompt_if_missing || !CanGenerateSceneChangeKeyframes())
 		return false;
 
-	return PromptAndGenerateSceneChangeKeyframes(cache_path, false);
+	return PromptAndGenerateSceneChangeKeyframes(request, cache_path, false);
 }
 
-bool Project::PromptAndGenerateSceneChangeKeyframes(agi::fs::path const& cache_path, bool cache_exists) {
+bool Project::PromptAndGenerateSceneChangeKeyframes(scenechange::KeyframeRequest const& request,
+													agi::fs::path const& cache_path, bool cache_exists) {
 	if (!video_provider || !CanGenerateSceneChangeKeyframes())
 		return false;
 
@@ -957,8 +952,8 @@ bool Project::PromptAndGenerateSceneChangeKeyframes(agi::fs::path const& cache_p
 		return false;
 
 	try {
-		video_provider->GenerateSceneChangeKeyframes(cache_path,
-			GetProgressRunner("Generating keyframes", "Scanning scene changes"));
+		video_provider->GenerateSceneChangeKeyframes(request, cache_path,
+													 GetProgressRunner("Generating keyframes", "Scanning scene changes"));
 		RecordSceneChangeKeyframeCache(cache_path, video_file);
 		CleanSceneChangeKeyframeCache();
 		DoLoadKeyframes(cache_path);
@@ -986,12 +981,12 @@ void Project::ReloadSceneChangeKeyframes() {
 	if (video_provider->GetDecoderName() != "LsmasNative")
 		return;
 
-	auto const cache_token = video_provider->GetSceneChangeKeyframeCacheToken();
-	can_generate_scene_change_keyframes = !cache_token.empty();
+	auto const request = video_provider->PrepareSceneChangeKeyframes();
+	can_generate_scene_change_keyframes = request.has_value();
 
 	// Preference Apply must not prompt or start a full-file scan. Only adopt an
 	// existing backend-specific cache; generation stays on the menu command.
-	if (TryLoadSceneChangeKeyframes(video_file, false, cache_token))
+	if (request && TryLoadSceneChangeKeyframes(video_file, false, *request))
 		return;
 
 	// Drop only SceneChange-sourced keyframes that no longer match the selected
@@ -1010,12 +1005,12 @@ bool Project::GenerateSceneChangeKeyframes() {
 	if (video_file.empty() || !video_provider || !CanGenerateSceneChangeKeyframes())
 		return false;
 
-	auto const cache_token = video_provider->GetSceneChangeKeyframeCacheToken();
-	if (cache_token.empty())
+	auto const request = video_provider->PrepareSceneChangeKeyframes();
+	if (!request)
 		return false;
 
-	auto cache_path = GetSceneChangeKeyframeCacheFilename(video_file, cache_token);
-	return PromptAndGenerateSceneChangeKeyframes(cache_path, agi::fs::FileExists(cache_path));
+	auto cache_path = GetSceneChangeKeyframeCacheFilename(video_file, request->GetCacheToken());
+	return PromptAndGenerateSceneChangeKeyframes(*request, cache_path, agi::fs::FileExists(cache_path));
 #else
 	return false;
 #endif

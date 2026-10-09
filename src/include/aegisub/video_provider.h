@@ -35,6 +35,7 @@
 #pragma once
 
 #include "../../source_frame.h"
+#include "../../scenechange_native_api.h"
 #include "video_color_metadata.h"
 
 #include <libaegisub/exception.h>
@@ -42,6 +43,7 @@
 #include <libaegisub/vfr.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -154,11 +156,10 @@ public:
 	/// Does the file which this provider is reading have an audio track?
 	virtual bool HasAudio() const { return false; }
 
-	virtual bool CanGenerateSceneChangeKeyframes() const { return false; }
-	/// Cache-key token for SceneChange keyframe files (for example "scxvid" / "wwxd").
-	/// Empty when SceneChange generation is unavailable for this provider.
-	virtual std::string GetSceneChangeKeyframeCacheToken() const { return {}; }
-	virtual void GenerateSceneChangeKeyframes(agi::fs::path const& output_path, agi::ProgressSink *ps) {
+	[[nodiscard]] virtual std::optional<scenechange::KeyframeRequest> PrepareSceneChangeKeyframes() const { return {}; }
+	virtual void GenerateSceneChangeKeyframes(scenechange::KeyframeRequest const& request,
+											  agi::fs::path const& output_path, agi::ProgressSink *ps) {
+		(void)request;
 		(void)output_path;
 		(void)ps;
 		throw VideoProviderError("This video provider cannot generate SceneChange keyframes.");
