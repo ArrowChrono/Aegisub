@@ -9,15 +9,14 @@ using System.Diagnostics;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Automation;
 using Aegisub.GuiAutomation.Driver;
 
-if (args.Length != 4 || args[3] is not ("cancel" or "publication" or "publication-cancel"))
+if (args.Length != 4 || args[3] is not ("cancel" or "publication" or "publication-cancel" or "ownership"))
 {
-    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/scenechange-cache-native.cs -- EXE VIDEO ARTIFACTS cancel|publication|publication-cancel");
+    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/scenechange-cache-native.cs -- EXE VIDEO ARTIFACTS cancel|publication|publication-cancel|ownership");
     return 2;
 }
 try { return PrivateDesktop.Run(args, Path.GetFullPath(args[2]), isolation => new Scenario(args, isolation).Run()); }
@@ -25,7 +24,8 @@ catch (Exception error) { Console.Error.WriteLine(error); return 1; }
 
 sealed class Scenario(string[] args, PrivateDesktop isolation)
 {
-    readonly string exe = Path.GetFullPath(args[0]), video = Path.GetFullPath(args[1]), artifacts = Path.GetFullPath(args[2]);
+    readonly string exe = Path.GetFullPath(args[0]), artifacts = Path.GetFullPath(args[2]);
+    readonly string video = args[3] == "ownership" ? Path.GetFullPath(Path.Combine(args[2], Path.GetFileName(args[1]))) : Path.GetFullPath(args[1]);
     readonly List<object> checks = [];
     static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
     Process? app;
@@ -37,6 +37,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
     public int Run()
     {
         Directory.CreateDirectory(artifacts); isolation.RecordDriver();
+        if (args[3] == "ownership") File.Copy(args[1], video);
         using var log = new StreamWriter(Path.Combine(artifacts, "driver.log")) { AutoFlush = true };
         Console.SetOut(log); Console.SetError(log);
         using var watchdog = new Timer(_ => {
@@ -48,17 +49,14 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         }, null, 180_000, Timeout.Infinite);
         File.Copy("tests/gui-automation/scenechange-cache-native.cs", Path.Combine(artifacts, "producer.cs"));
         Write("inputs.json", new {
-            executable_sha256 = Hash(exe), video_sha256 = Hash(video), scenario = args[3], backend = "wwxd",
-            runtime_dlls = Directory.GetFiles(Path.Combine(Path.GetDirectoryName(exe)!, "runtimes"), "*.dll", SearchOption.AllDirectories)
-                .Select(path => new { path = Path.GetRelativePath(Path.GetDirectoryName(exe)!, path), sha256 = Hash(path) }),
-            sources = new[] { "src/project.cpp", "src/async_video_provider.cpp", "src/video_provider_lsmasnative.cpp", "libaegisub/common/keyframe.cpp" }
-                .Select(path => new { path, sha256 = Hash(path) }),
+            scenario = args[3], backend = "wwxd",
             private_desktop = true, global_input = false, clipboard = false, total_timeout_seconds = 180
         });
         try
         {
-            Start(); GenerateAndReuse(); StageSentinel();
-            if (args[3] == "cancel") Cancel(); else Publication(args[3] == "publication-cancel");
+            Start(); GenerateAndReuse();
+            if (args[3] == "ownership") Ownership();
+            else { StageSentinel(); if (args[3] == "cancel") Cancel(); else Publication(args[3] == "publication-cancel"); }
             Write("result.json", new { passed = true, checks }); return 0;
         }
         catch (Exception error)
@@ -72,7 +70,6 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         finally { if (app is not null) { isolation.Stop(app); app.Dispose(); } }
     }
 
-    static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
     void Write(string file, object value) => File.WriteAllText(Path.Combine(artifacts, file), JsonSerializer.Serialize(value, Json));
     bool Check(bool value, string description)
     {
@@ -107,13 +104,21 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
     void Click(nint parent, string label)
     {
         var control = Control(parent, label); isolation.VerifyWindow(control, app!);
+        if (!Native.IsWindowEnabled(control)) throw new InvalidOperationException("Cannot click a disabled native button: " + label);
         Action("button", label); ObservedWindowsCommand.PostButtonClick(control, app!.Id);
     }
-    void Command(string label)
+    void Command(string label) => Menu("Video", label);
+    void Menu(string menu, string label)
     {
         isolation.VerifyWindow(main, app!);
-        var id = ObservedWindowsCommand.FindMenuCommand(main, app!.Id, "Video", label);
-        Action("menu", "Video/" + label); ObservedWindowsCommand.PostMenuCommand(main, app.Id, id);
+        long enabledSince = 0;
+        Wait(() => {
+            if (!Native.IsWindowEnabled(main)) { enabledSince = 0; return false; }
+            if (enabledSince == 0) enabledSince = Stopwatch.GetTimestamp();
+            return Stopwatch.GetElapsedTime(enabledSince).TotalMilliseconds >= 100;
+        }, "Native main window is stably enabled before menu dispatch");
+        var id = ObservedWindowsCommand.FindMenuCommand(main, app!.Id, menu, label);
+        Action("menu", menu + "/" + label); ObservedWindowsCommand.PostMenuCommand(main, app.Id, id);
     }
     void Capture(nint window, string label)
     {
@@ -198,7 +203,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         Directory.CreateDirectory(Path.Combine(profile, "user"));
         File.WriteAllText(Path.Combine(profile, "user", "config.json"), """
             {"Subtitle":{"Use STC":false},"Video":{"Provider":"LsmasNative","Open Audio":false},"Provider":{"SceneChange":{"Backend":"wwxd"}},"App":{"First Start":false,"Language":"en_US","Auto":{"Backup":false,"Check For Updates":false,"Load Linked Files":0,"Save":false,"Save on Every Change":false}}}
-            """);
+            """.Replace("\"Load Linked Files\":0", "\"Load Linked Files\":" + (args[3] == "ownership" ? 1 : 0)));
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", root }) start.ArgumentList.Add(arg);
         app = isolation.Start(start, args[3]);
@@ -221,17 +226,147 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             Require(document.RootElement.EnumerateArray().Any(entry => entry.GetProperty("keyframes").GetString() == Path.GetFileName(cache)
                 && entry.GetProperty("video_name").GetString() == Path.GetFileName(video)), "Manifest identifies generated cache and source video");
         Snapshot("initial");
-        var cacheHash = Hash(cache); var manifestHash = Hash(manifest);
+        var cacheBytes = File.ReadAllBytes(cache); var manifestBytes = File.ReadAllBytes(manifest);
         Command("Close Video"); Wait(() => Native.IsWindowEnabled(main), "Video closed");
         OpenVideo();
         Wait(() => Window("Generate keyframes?") != 0 || (Native.IsWindowEnabled(main) && Progress() == 0), "Reopening video completed", 30);
         Require(Window("Generate keyframes?") == 0, "Reopening reuses cache without asking to regenerate");
         Require(generated.SequenceEqual(Export("reopened-memory")), "Reopening restores the complete cached keyframe list");
-        Require(Hash(cache) == cacheHash && Hash(manifest) == manifestHash, "Cache reuse preserves cache and manifest bytes");
+        Require(File.ReadAllBytes(cache).SequenceEqual(cacheBytes) && File.ReadAllBytes(manifest).SequenceEqual(manifestBytes), "Cache reuse preserves cache and manifest bytes");
         Command("Show Video Details"); nint details = 0;
         Wait(() => (details = Window("Video Details")) != 0, "Native Video Details opened");
         Require(Children(details).Any(h => Text(h) == "LsmasNative"), "Actual loaded decoder is LsmasNative");
         Capture(details, "decoder"); Click(details, "OK"); Wait(() => !Windows().Contains(details), "Video Details dismissed");
+    }
+    AutomationElement[] Elements(nint window) => AutomationElement.FromHandle(window).FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>().ToArray();
+    string Backend()
+    {
+        using var config = JsonDocument.Parse(File.ReadAllText(Path.Combine(artifacts, "host", "profile", "user", "config.json")));
+        return config.RootElement.GetProperty("Provider").GetProperty("SceneChange").GetProperty("Backend").GetString()!;
+    }
+    void SwitchBackend(string backend, string label)
+    {
+        var previous = Backend(); Require(previous != backend, "Preferences switch changes backend: " + label);
+        Menu("View", "Options..."); nint dialog = 0;
+        Wait(() => (dialog = Window("Preferences")) != 0, "Preferences opened");
+        var advanced = Elements(dialog).Single(e => e.Current.ControlType == ControlType.TreeItem && e.Current.Name == "Advanced");
+        ((ExpandCollapsePattern)advanced.GetCurrentPattern(ExpandCollapsePattern.Pattern)).Expand();
+        var page = advanced.FindFirst(TreeScope.Children, new PropertyCondition(AutomationElement.NameProperty, "Video"));
+        ((SelectionItemPattern)page.GetCurrentPattern(SelectionItemPattern.Pattern)).Select();
+        nint grid = 0;
+        Wait(() => {
+            grid = (nint)(Elements(dialog).SingleOrDefault(e => e.Current.Name == "wxPropertyGrid" && e.Current.NativeWindowHandle != 0)?.Current.NativeWindowHandle ?? 0);
+            return grid != 0;
+        }, "Advanced Video property grid is ready");
+        isolation.VerifyWindow(grid, app!);
+        var gridPath = Path.Combine(artifacts, label + "-grid.png"); ScreenCapture.SaveWindowPng(grid, gridPath);
+        using (var bitmap = new System.Drawing.Bitmap(gridPath))
+        {
+            var x = bitmap.Width * 3 / 4; var y = bitmap.Height - 10;
+            while (y > 30 && bitmap.GetPixel(x, y).R > 245 && bitmap.GetPixel(x, y).G > 245 && bitmap.GetPixel(x, y).B > 245) --y;
+            Require(y > 30, "Rendered final backend row has an observable lower border: " + label);
+            Write(label + "-locator.json", new { grid_width = bitmap.Width, grid_height = bitmap.Height, click_x = x, click_y = y - 10, previous_backend = previous });
+            Native.ClickAt(grid, x, y - 10);
+        }
+        AutomationElement? combo = null;
+        Wait(() => (combo = Elements(dialog).SingleOrDefault(e => e.Current.Name == "wxOwnerDrawnComboBox" && e.Current.NativeWindowHandle != 0)) is not null, "SceneChange backend editor appeared");
+        var comboHandle = (nint)combo!.Current.NativeWindowHandle; isolation.VerifyWindow(comboHandle, app!);
+        Capture(dialog, label + "-current");
+        Native.ClickAt(comboHandle, (int)combo.Current.BoundingRectangle.Width - 8, (int)combo.Current.BoundingRectangle.Height / 2);
+        nint popup = 0;
+        Wait(() => (popup = Windows().SingleOrDefault(h => Text(h) == "panel" && Children(h).Any(c => Text(c) == "wxVListBox"))) != 0, "Actual backend choices popup appeared");
+        var list = Children(popup).Single(h => Text(h) == "wxVListBox"); isolation.VerifyWindow(list, app!);
+        Wait(() => Native.Height(popup) >= combo.Current.BoundingRectangle.Height * 2.5, "Backend popup has expanded to all three actual choices");
+        Capture(popup, label + "-choices");
+        Native.PostKey(comboHandle, backend == "scxvid" ? 0x26 : 0x28); Native.PostKey(comboHandle, 0x0D);
+        var apply = Control(dialog, "Apply");
+        Wait(() => Native.IsWindowEnabled(apply), "Backend selection creates a pending Preferences change");
+        Capture(dialog, label + "-selected"); Click(dialog, "Apply");
+        Wait(() => {
+            if (Window("Generate keyframes?") != 0 || Progress() != 0) throw new InvalidOperationException("Backend Apply unexpectedly prompted or scanned scene changes");
+            return !Native.IsWindowEnabled(apply) && Backend() == backend;
+        }, "Real Preferences Apply persists the selected backend without generation");
+        Require(Backend() == backend, "Actual persisted backend after native Apply is " + backend + ": " + label);
+        Capture(dialog, label + "-applied"); Click(dialog, "Cancel");
+        Wait(() => !Windows().Contains(dialog) && Native.IsWindowEnabled(main), "Preferences closed after Apply");
+    }
+    string SaveAss(string label)
+    {
+        var path = Path.Combine(artifacts, label + ".ass");
+        Menu("File", "Save Subtitles as..."); FileDialog("Save subtitles file", path);
+        Wait(() => File.Exists(path) && !Text(main).StartsWith('*'), "Native ASS Save As completed: " + label);
+        return path;
+    }
+    bool OwnershipState(string label, int[] expected, string expectedFile)
+    {
+        var actual = Export(label + "-memory"); var ass = SaveAss(label);
+        var reference = File.ReadAllLines(ass).SingleOrDefault(line => line.StartsWith("Keyframes File: ", StringComparison.Ordinal))?[16..] ?? "";
+        var resolved = reference.Length == 0 ? "" : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(ass)!, reference));
+        Write(label + "-ownership.json", new { expected_keyframes = expected, actual_keyframes = actual, keyframes_file = reference, expected_file = expectedFile.Length == 0 ? "" : Path.GetRelativePath(artifacts, expectedFile) });
+        var memory = Check(actual.SequenceEqual(expected), label + ": full in-memory keyframe vector retains the expected owner");
+        var owner = Check(string.Equals(resolved, expectedFile, StringComparison.OrdinalIgnoreCase), label + ": native ASS preserves the expected Keyframes File reference");
+        return memory && owner;
+    }
+    static void WriteKeyframes(string path, int[] frames)
+        => File.WriteAllText(path, "# keyframe format v1\nfps 0\n" + string.Join('\n', frames) + "\n", new UTF8Encoding(false));
+    void OpenKeyframes(string path)
+    {
+        Command("Open Keyframes..."); FileDialog("Open keyframes file", path);
+    }
+    void Ownership()
+    {
+        var wwxd = cache;
+        SwitchBackend("scxvid", "prepare-scxvid");
+        Command("Generate Scene Change Keyframes..."); Confirm(false, "prepare-scxvid");
+        Require(!Complete("prepare-scxvid"), "Second backend cache is prepared by real SceneChange generation");
+        var scxvid = Directory.GetFiles(Path.GetDirectoryName(cache)!, "*_scxvid.kf.txt").Single();
+        Require(Parse(scxvid).Length >= 4, "Real scxvid generation produced a multi-scene cache");
+        int[] wwxdFrames = [0, 17, 83, 301], scxvidFrames = [0, 23, 137, 503], linkedFrames = [0, 11, 47, 257];
+        WriteKeyframes(wwxd, wwxdFrames); WriteKeyframes(scxvid, scxvidFrames);
+        var wwxdBytes = File.ReadAllBytes(wwxd); var scxvidBytes = File.ReadAllBytes(scxvid); var manifestBytes = File.ReadAllBytes(manifest);
+        File.Copy(wwxd, Path.Combine(artifacts, "prepared-wwxd.kf.txt")); File.Copy(scxvid, Path.Combine(artifacts, "prepared-scxvid.kf.txt")); File.Copy(manifest, Path.Combine(artifacts, "prepared-manifest.json"));
+        SwitchBackend("wwxd", "prepare-wwxd");
+        Require(OwnershipState("prepared-wwxd", wwxdFrames, wwxd), "Setup selects the known WWXD cache through a real backend change");
+
+        var manual = Path.Combine(artifacts, "manual.kf.txt"); WriteKeyframes(manual, Sentinel); OpenKeyframes(manual);
+        Require(OwnershipState("manual-before", Sentinel, manual), "Manual external keyframes are natively loaded before switching");
+        SwitchBackend("scxvid", "manual-to-scxvid");
+        var manualPreserved = OwnershipState("manual-after", Sentinel, manual);
+
+        var linked = Path.Combine(artifacts, "linked.kf.txt"); WriteKeyframes(linked, linkedFrames);
+        var fixture = Path.Combine(artifacts, "linked-fixture.ass");
+        var lines = File.ReadAllLines(Path.Combine(artifacts, "manual-before.ass"));
+        File.WriteAllLines(fixture, lines.Select(line => line.StartsWith("Keyframes File: ", StringComparison.Ordinal) ? "Keyframes File: linked.kf.txt" : line), new UTF8Encoding(true));
+        Menu("File", "Open Subtitles..."); FileDialog("Open subtitles file", fixture);
+        Require(OwnershipState("linked-before", linkedFrames, linked), "Real ASS Open automatically loads its associated external keyframes");
+        SwitchBackend("wwxd", "linked-to-wwxd");
+        var linkedPreserved = OwnershipState("linked-after", linkedFrames, linked);
+
+        Command("Close Keyframes"); var defaults = Export("provider-default-memory");
+        Require(defaults.Length > 0 && !defaults.SequenceEqual(scxvidFrames), "Provider defaults are nonempty and distinguishable from cached sentinels");
+        Require(OwnershipState("provider-default-before", defaults, ""), "Close Keyframes restores provider defaults and clears ownership path");
+        SwitchBackend("scxvid", "default-to-scxvid");
+        var defaultRefreshed = OwnershipState("provider-default-after", scxvidFrames, scxvid);
+        SwitchBackend("wwxd", "scenechange-to-wwxd");
+        var sceneChanged = OwnershipState("scenechange-hit", wwxdFrames, wwxd);
+        var unchanged = Check(File.ReadAllBytes(wwxd).SequenceEqual(wwxdBytes) && File.ReadAllBytes(scxvid).SequenceEqual(scxvidBytes)
+            && File.ReadAllBytes(manifest).SequenceEqual(manifestBytes), "Cache-hit ownership switches preserve both cache files and the complete manifest bytes");
+        File.Copy(wwxd, Path.Combine(artifacts, "before-miss-wwxd.kf.txt")); File.Copy(scxvid, Path.Combine(artifacts, "before-miss-scxvid.kf.txt"));
+        File.Copy(manifest, Path.Combine(artifacts, "before-miss-manifest.json"));
+        using var beforeManifest = JsonDocument.Parse(manifestBytes);
+        var wwxdEntry = beforeManifest.RootElement.EnumerateArray().Single(e => e.GetProperty("keyframes").GetString() == Path.GetFileName(wwxd)).Clone();
+        var removed = Path.Combine(artifacts, "scxvid-cache-removed-for-miss.kf.txt"); File.Move(scxvid, removed);
+        bool missDefault, missPreserved;
+        try {
+            SwitchBackend("scxvid", "scenechange-miss");
+            missDefault = OwnershipState("scenechange-miss", defaults, "");
+            missPreserved = Check(!File.Exists(scxvid) && File.ReadAllBytes(wwxd).SequenceEqual(wwxdBytes), "Cache miss does not generate a new target cache or alter the other backend cache");
+            using var afterManifest = JsonDocument.Parse(File.ReadAllBytes(manifest));
+            missPreserved &= Check(afterManifest.RootElement.EnumerateArray().Any(e => e.GetProperty("keyframes").GetString() == Path.GetFileName(wwxd) && JsonElement.DeepEquals(e, wwxdEntry)), "Cache miss retains the unremoved backend's manifest entry");
+            File.Copy(manifest, Path.Combine(artifacts, "after-miss-manifest.json"));
+        }
+        finally { File.Move(removed, scxvid); }
+        Require(manualPreserved && linkedPreserved && defaultRefreshed && sceneChanged && missDefault && unchanged && missPreserved, "Backend changes respect manual, linked, provider-default, and SceneChange keyframe ownership");
     }
     void StageSentinel()
     {
@@ -246,22 +381,22 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         foreach (var pair in new[] { (cache, "cache.kf.txt"), (manifest, "manifest.json") })
             if (File.Exists(pair.Item1)) File.Copy(pair.Item1, Path.Combine(artifacts, label + "-" + pair.Item2), true);
         Write(label + "-state.json", new {
-            cache_exists = File.Exists(cache), cache_sha256 = File.Exists(cache) ? Hash(cache) : null,
-            manifest_exists = File.Exists(manifest), manifest_sha256 = File.Exists(manifest) ? Hash(manifest) : null,
+            cache_exists = File.Exists(cache), cache_copy = File.Exists(cache) ? label + "-cache.kf.txt" : null,
+            manifest_exists = File.Exists(manifest), manifest_copy = File.Exists(manifest) ? label + "-manifest.json" : null,
             cache_files = Directory.GetFiles(Path.GetDirectoryName(manifest)!).Select(Path.GetFileName).Order().ToArray()
         });
     }
-    bool Preserved(string label, string cacheHash, string manifestHash)
+    bool Preserved(string label, byte[] cacheBytes, byte[] manifestBytes)
     {
         Snapshot(label);
-        var bytes = Check(File.Exists(cache) && Hash(cache) == cacheHash, label + ": existing cache bytes are preserved");
-        var metadata = Check(File.Exists(manifest) && Hash(manifest) == manifestHash, label + ": manifest bytes are preserved");
+        var bytes = Check(File.Exists(cache) && File.ReadAllBytes(cache).SequenceEqual(cacheBytes), label + ": existing cache bytes are preserved");
+        var metadata = Check(File.Exists(manifest) && File.ReadAllBytes(manifest).SequenceEqual(manifestBytes), label + ": manifest bytes are preserved");
         var memory = Check(Export(label + "-memory").SequenceEqual(Sentinel), label + ": current in-memory keyframes are preserved");
         return bytes && metadata && memory;
     }
     void Cancel()
     {
-        var cacheHash = Hash(cache); var manifestHash = Hash(manifest);
+        var cacheBytes = File.ReadAllBytes(cache); var manifestBytes = File.ReadAllBytes(manifest);
         Command("Generate Scene Change Keyframes..."); var progress = Confirm(true, "cancel");
         nint gauge = 0; long position = 0;
         Wait(() => {
@@ -277,9 +412,9 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         Write("cancel-click-progress.json", new { value = clickPosition, maximum = 300, cancel_enabled = true });
         Click(progress, "Cancel");
         var error = Complete("cancel");
-        var preserved = Preserved("after-cancel", cacheHash, manifestHash);
+        var preserved = Preserved("after-cancel", cacheBytes, manifestBytes);
         Require(!error && preserved, "Cancellation is not a publication failure and preserves the last usable cache transaction");
-        Retry("cancel-retry", cacheHash, manifestHash);
+        Retry("cancel-retry", cacheBytes, manifestBytes);
     }
     void CancelPublication(nint progress)
     {
@@ -313,7 +448,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
     }
     void Publication(bool cancelDuringPublication)
     {
-        var cacheHash = Hash(cache); var manifestHash = Hash(manifest);
+        var cacheBytes = File.ReadAllBytes(cache); var manifestBytes = File.ReadAllBytes(manifest);
         using (var blocker = new FileStream(cache, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             Write("publication-lock.json", new { access = "Read", share = "Read", allows_readers = true, allows_replace_or_delete = false });
@@ -322,29 +457,32 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             Command("Generate Scene Change Keyframes..."); var progress = Confirm(true, "blocked");
             if (cancelDuringPublication) CancelPublication(progress);
             var error = Complete("blocked");
-            var preserved = Preserved("after-blocked", cacheHash, manifestHash);
+            var preserved = Preserved("after-blocked", cacheBytes, manifestBytes);
             var reported = Check(error, cancelDuringPublication
                 ? "Publication failure remains an explicit Error generating keyframes even when the progress runner is cancelled"
                 : "Blocked replacement reports an explicit Error generating keyframes rather than success");
             var cleaned = Check(!Directory.GetFiles(Path.GetDirectoryName(cache)!).Any(path => Path.GetFileName(path).Contains("_tmp_", StringComparison.Ordinal)), "Failed keyframe publication removes its unpublished temporary file");
             Require(reported && preserved && cleaned, "Failed publication preserves cache, manifest, and active keyframes");
         }
-        Retry("unlocked-retry", cacheHash, manifestHash);
+        Retry("unlocked-retry", cacheBytes, manifestBytes);
     }
-    void Retry(string label, string cacheHash, string manifestHash)
+    void Retry(string label, byte[] cacheBytes, byte[] manifestBytes)
     {
         Command("Generate Scene Change Keyframes..."); Confirm(true, label);
         Require(!Complete(label), "A new user-requested generation succeeds after the prior operation");
         Snapshot("after-" + label);
-        Require(Parse(cache).SequenceEqual(generated) && Hash(cache) != cacheHash, "Retry replaces recognizable old bytes with actual SceneChange output");
+        Require(Parse(cache).SequenceEqual(generated) && !File.ReadAllBytes(cache).SequenceEqual(cacheBytes), "Retry replaces recognizable old bytes with actual SceneChange output");
         Require(Export(label + "-memory").SequenceEqual(generated), "Retry publishes the complete new keyframes into current memory");
-        Require(Hash(manifest) == manifestHash, "Retry retains the correct existing manifest identity");
+        Require(File.ReadAllBytes(manifest).SequenceEqual(manifestBytes), "Retry retains the correct existing manifest identity");
     }
 }
 
 static class Native
 {
     delegate bool Callback(nint window, nint data);
+    [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(nint window, out Rect rect);
+    public static int Height(nint window) { if (!GetWindowRect(window, out var rect)) throw new Win32Exception(Marshal.GetLastPInvokeError()); return rect.Bottom - rect.Top; }
     [DllImport("user32.dll")] static extern bool EnumChildWindows(nint parent, Callback callback, nint data);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(nint window);
@@ -353,6 +491,8 @@ static class Native
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")] static extern nint SendMessage(nint window, uint message, nint wp, nint lp, uint flags, uint timeout, out nint result);
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)] static extern nint SendText(nint window, uint message, nint wp, string lp, uint flags, uint timeout, out nint result);
     public static nint[] Children(nint parent) { List<nint> found = []; Callback callback = (h, _) => { found.Add(h); return true; }; EnumChildWindows(parent, callback, 0); GC.KeepAlive(callback); return found.ToArray(); }
+    public static void PostKey(nint window, int key) { if (!PostMessage(window, 0x100, key, 1) || !PostMessage(window, 0x101, key, unchecked((int)0xC0000001))) throw new InvalidOperationException("Native local key failed"); }
+    public static void ClickAt(nint window, int x, int y) { var point = (nint)(x | y << 16); if (!PostMessage(window, 0x201, 1, point) || !PostMessage(window, 0x202, 0, point)) throw new InvalidOperationException("Native local mouse click failed"); }
     public static long Send(nint window, uint message) { if (SendMessage(window, message, 0, 0, 0x22, 1000, out var result) == 0) throw new TimeoutException("Native progress message"); return result.ToInt64(); }
     public static void Post(nint window, uint message) { if (!PostMessage(window, message, 0, 0)) throw new InvalidOperationException("Native button click failed"); }
     public static void SetText(nint window, string value) { if (SendText(window, 0xC, 0, value, 0x22, 1000, out _) == 0) throw new TimeoutException("Native file name entry"); }

@@ -34,6 +34,7 @@ dotnet build tests/gui-automation/scenechange-cache-native.cs -o build-dir/artif
 dotnet run --file tests/gui-automation/scenechange-cache-native.cs -- build-dir/RelWithDebInfo/Aegisub.exe build-dir/artifacts/scenechange-fixture/scenes-long.mkv build-dir/artifacts/scenechange-cancel cancel
 dotnet run --file tests/gui-automation/scenechange-cache-native.cs -- build-dir/RelWithDebInfo/Aegisub.exe build-dir/artifacts/scenechange-fixture/scenes-long.mkv build-dir/artifacts/scenechange-publication publication
 dotnet run --file tests/gui-automation/scenechange-cache-native.cs -- build-dir/RelWithDebInfo/Aegisub.exe build-dir/artifacts/scenechange-fixture/scenes-long.mkv build-dir/artifacts/scenechange-publication-cancel publication-cancel
+dotnet run --file tests/gui-automation/scenechange-cache-native.cs -- build-dir/RelWithDebInfo/Aegisub.exe build-dir/artifacts/scenechange-fixture/scenes-long.mkv build-dir/artifacts/scenechange-ownership ownership
 ```
 
 Each invocation has a 180-second total watchdog and the supervisor has a
@@ -47,7 +48,7 @@ release of the lock is a separate user operation, not a test retry.
 
 ## Shared setup and independent observations
 
-All modes use a fresh isolated profile with `Video/Provider=LsmasNative`,
+All modes use a fresh isolated profile initially configured with `Video/Provider=LsmasNative`,
 `Provider/SceneChange/Backend=wwxd`, and automatic audio opening disabled.
 
 1. Open the real video through **Video → Open Video...** and accept the
@@ -62,6 +63,8 @@ All modes use a fresh isolated profile with `Video/Provider=LsmasNative`,
    calls `Touch` for cache eviction accounting.
 4. Open **Show Video Details** and require its actual decoder field to be
    `LsmasNative`, rather than trusting configuration alone.
+The transaction modes (`cancel`, `publication`, and `publication-cancel`) then:
+
 5. Replace the generated cache bytes with a legal, recognizable existing
    keyframe list `[0, 7, 31, 101]`, then load that file through **Open Keyframes...**.
    Export it to prove the active in-memory list is the sentinel. Require the
@@ -151,10 +154,68 @@ publication window has a bounded 75-second wait. This mode targets the actual
 replacement retry window rather than choosing a fixed delay or retrying a scene
 until the timing happens to work.
 
+## `ownership`: preserve external keyframes across backend changes
+
+The ownership profile enables automatic linked-file loading at startup and
+copies the input media into its fresh artifact directory alongside all generated
+ASS files. Linked media and keyframe references therefore use local basenames,
+not machine-specific absolute paths or parent-directory traversal. It
+prepares both WWXD and SCXVID caches with real generation, then replaces their
+contents with two distinct, valid keyframe vectors. A third vector identifies
+manual external keyframes and a fourth identifies ASS-associated external
+keyframes. Both external files use the `.kf.txt` suffix but reside outside the
+SceneChange cache directory, so extension alone cannot establish cache ownership.
+The real Preferences **Advanced → Video → SceneChange backend**
+control and **Apply** perform every backend change; the test never writes a
+running application's option value or invokes the reload callback directly.
+
+The property grid exposes no UIA property rows. The driver captures its rendered
+layout, locates the final backend row's lower border, and clicks inside that
+value cell using only local messages to the verified private-desktop grid HWND.
+It records the actual editor and the fully expanded three-choice popup. A
+native selection must enable Apply; Apply must persist the requested backend.
+The preferences handler must complete without showing a generation confirmation
+or progress dialog. The enabled main-window check uses a bounded stable interval
+so a brief file-dialog-to-indexing transition cannot dispatch a command into a
+disabled frame.
+
+Each ownership assertion exports the **entire current in-memory vector** through
+Save Keyframes and saves the current project through native ASS Save As. The
+saved `Keyframes File` reference is resolved relative to that saved ASS and
+compared with the expected owner, including an absent/empty reference for the
+provider default. Disk cache existence alone is not the ownership oracle.
+
+- **Manual external:** Open a separate keyframe file through the native command,
+  then Apply another backend with an existing matching cache. Its vector and
+  external file reference must remain unchanged.
+- **ASS-associated external:** Open a real ASS fixture referring to a different
+  external keyframe file, verify automatic linked-file loading, then Apply a
+  backend with an existing matching cache. The associated vector and reference
+  must remain unchanged.
+- **Provider default:** Close Keyframes and verify both the real provider vector
+  and an empty reference. Applying a backend with a matching cache must refresh
+  the vector and reference from that cache.
+- **SceneChange-owned:** Changing backend must select the matching cache without
+  scanning. Move only the target cache in this test's private profile to its
+  artifact directory to create a miss; the next Apply must restore the provider
+  vector and clear the reference without prompting or generating. Before creating
+  this miss, compare both cache files and the full manifest byte-for-byte with
+  the retained originals. During the miss, require no newly generated target
+  cache and preserve the other backend cache and manifest entry. Retain the actual
+  manifest without requiring the deliberately removed entry to survive legitimate
+  asynchronous pruning; restore the moved test-owned file afterward.
+
+Independent ownership failures are recorded before the final combined verdict,
+so a manual-file failure does not hide the linked-file or default/cache-owned
+results. Setup, UI operations, and precondition failures still abort immediately.
+The mode retains before/after keyframe files, native saved ASS files, manifest
+copies, vectors, and preference screenshots. It does not collect source, media,
+executable, or runtime hash inventories; behavior comparisons use actual bytes
+and complete vectors.
 ## Artifacts and scope
 
 Artifacts include `result.json` with individual checks, `driver.log`, the exact
-producer source, executable/video/source/runtime-DLL hashes, backend selection,
+producer source, scenario/backend configuration,
 action records, supervisor/process/private-desktop identity evidence, the
 isolated host profile and its actual cache/manifest, full before/after snapshots,
 native window/control JSON, TaskDialog UIA text, PNGs of confirmations and
@@ -162,9 +223,9 @@ generation boundaries, cancellation gauge samples, publication-cancel timing
 and control state, lock semantics, and native
 keyframe exports. Failed runs return nonzero and preserve their observations.
 
-These scenarios verify WWXD-backed cache publication, reuse, cancellation,
+The transaction scenarios verify WWXD-backed cache publication, reuse, cancellation,
 recoverable Windows replacement failure, and GUI-visible state. They do not
-claim coverage of other SceneChange backends, every media format, cache eviction
+claim exhaustive coverage of other SceneChange backends, every media format, cache eviction
 limits, power loss, or unrelated video/audio/grid behavior. The initial detector
 result is used for transaction comparison rather than as an independent oracle
 for the quality of the scene-detection algorithm.

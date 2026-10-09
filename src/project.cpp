@@ -984,6 +984,9 @@ void Project::ReloadSceneChangeKeyframes() {
 	auto const request = video_provider->PrepareSceneChangeKeyframes();
 	can_generate_scene_change_keyframes = request.has_value();
 
+	if (!keyframes_file.empty() && !IsSceneChangeKeyframeCachePath(keyframes_file))
+		return;
+
 	// Preference Apply must not prompt or start a full-file scan. Only adopt an
 	// existing backend-specific cache; generation stays on the menu command.
 	if (request && TryLoadSceneChangeKeyframes(video_file, false, *request))
