@@ -28,6 +28,7 @@
 #include "selection_controller.h"
 #include "shift_times_input.h"
 #include "shift_times_history.h"
+#include "shift_times_plan.h"
 #include "subs_controller.h"
 #include "timeedit_ctrl.h"
 
@@ -42,7 +43,6 @@
 #include <libaegisub/cajun/reader.h>
 
 #include <filesystem>
-#include <limits>
 #include <stdexcept>
 #include <wx/dialog.h>
 #include <wx/listbox.h>
@@ -76,7 +76,6 @@ class DialogShiftTimes final : public wxDialog {
 	void SaveHistory(std::vector<std::pair<int, int>> shifted_blocks, int amount);
 	void LoadHistory();
 	void Process(wxCommandEvent&);
-	int Shift(int initial_time, int shift, bool by_time, agi::vfr::Time type);
 
 	void OnClear(wxCommandEvent&);
 	void OnByTime(wxCommandEvent&);
@@ -351,9 +350,6 @@ void DialogShiftTimes::Process(wxCommandEvent&) {
 	bool reverse = shift_backward->GetValue();
 	bool by_time = shift_by_time->GetValue();
 
-	bool start = type != 2;
-	bool end = type != 1;
-
 	auto const& sel = core.selectionController->GetSelectedSet();
 
 	int shift = 0;
@@ -377,62 +373,32 @@ void DialogShiftTimes::Process(wxCommandEvent&) {
 	else
 		return;
 
-	int block_start = 0;
-	std::vector<std::pair<int, int>> shifted_blocks;
-	struct PendingShift {
-		AssDialogue *line;
-		agi::Time start;
-		agi::Time end;
-	};
-	std::vector<PendingShift> pending;
+	std::vector<aegisub::ShiftTimesLine> snapshot;
+	std::vector<AssDialogue *> lines;
+	for (auto& line : core.ass->Events) {
+		snapshot.push_back({.start = line.Start, .end = line.End, .selected = sel.count(&line) != 0});
+		lines.push_back(&line);
+	}
+	aegisub::ShiftTimesPlan plan;
 	try {
-		for (auto& line : core.ass->Events) {
-			if (!sel.count(&line)) {
-				if (block_start) {
-					shifted_blocks.emplace_back(block_start, line.Row);
-					block_start = 0;
-				}
-				if (mode == 1) continue;
-				if (mode == 2 && shifted_blocks.empty()) continue;
-			}
-			else if (!block_start)
-				block_start = line.Row + 1;
-
-			pending.push_back({.line = &line, .start = line.Start, .end = line.End});
-			if (start)
-				pending.back().start = Shift(line.Start, shift, by_time, agi::vfr::START);
-			if (end)
-				pending.back().end = Shift(line.End, shift, by_time, agi::vfr::END);
-		}
+		plan = aegisub::PrepareShiftTimes(snapshot, {.amount = shift, .mode = mode, .fields = type, .by_time = by_time}, fps);
 	}
 	catch (std::overflow_error const&) {
 		wxMessageBox(_("The shifted time is outside the supported range. No subtitles were changed."), _("Shift Times"), wxOK | wxICON_ERROR, this);
 		return;
 	}
 
-	if (block_start)
-		shifted_blocks.emplace_back(block_start, core.ass->Events.back().Row + 1);
-
-	for (auto const& change : pending) {
-		change.line->Start = change.start;
-		change.line->End = change.end;
+	for (auto const& change : plan.edits) {
+		lines[change.row]->Start = change.start;
+		lines[change.row]->End = change.end;
 	}
 
 	core.ass->Commit(from_wx(_("shifting")), AssFile::COMMIT_DIAG_TIME);
 
-	SaveHistory(std::move(shifted_blocks), amount);
+	SaveHistory(std::move(plan.selected_blocks), amount);
 	Close();
 }
 
-int DialogShiftTimes::Shift(int initial_time, int shift, bool by_time, agi::vfr::Time type) {
-	int64_t const shifted = static_cast<int64_t>(shift) + (by_time ? initial_time : fps.CheckedFrameAtTime(initial_time, type));
-	if (shifted < std::numeric_limits<int>::min() || shifted > std::numeric_limits<int>::max())
-		throw std::overflow_error("Shift is outside the supported range");
-	if (by_time)
-		return static_cast<int>(shifted);
-	else
-		return fps.CheckedTimeAtFrame(shifted, type);
-}
 }
 
 void ShowShiftTimesDialog(agi::Context *c) {
