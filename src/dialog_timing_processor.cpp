@@ -37,6 +37,7 @@
 #include "include/aegisub/context_ui.h"
 #include "libresrc/libresrc.h"
 #include "options.h"
+#include "timing_processor_preferences.h"
 #include "project.h"
 #include "selection_controller.h"
 #include "utils.h"
@@ -126,10 +127,10 @@ inline wxTextCtrl *make_ctrl(wxStaticBoxSizer *sizer, wxString const& desc, int 
 	return make_ctrl(sizer->GetStaticBox()->GetParent(), sizer, desc, value, cb, tooltip);
 }
 
-wxCheckBox *make_check(wxStaticBoxSizer *sizer, wxString const& desc, const char *opt, wxString const& tooltip) {
+wxCheckBox *make_check(wxStaticBoxSizer *sizer, wxString const& desc, bool initial, wxString const& tooltip) {
 	wxCheckBox *cb = new wxCheckBox(sizer->GetStaticBox()->GetParent(), -1, desc);
 	cb->SetToolTip(tooltip);
-	cb->SetValue(OPT_GET(opt)->GetBool());
+	cb->SetValue(initial);
 	sizer->Add(cb, wxSizerFlags().Border(wxRIGHT).Expand());
 	return cb;
 }
@@ -143,15 +144,15 @@ DialogTimingProcessor::DialogTimingProcessor(agi::Context *c)
 
 	d.SetIcon(GETICON(timing_processor_toolbutton_16));
 
-	// Read options
-	leadIn = OPT_GET("Tool/Timing Post Processor/Lead/IN")->GetInt();
-	leadOut = OPT_GET("Tool/Timing Post Processor/Lead/OUT")->GetInt();
-	beforeStart = OPT_GET("Tool/Timing Post Processor/Threshold/Key Start Before")->GetInt();
-	beforeEnd = OPT_GET("Tool/Timing Post Processor/Threshold/Key End Before")->GetInt();
-	afterStart = OPT_GET("Tool/Timing Post Processor/Threshold/Key Start After")->GetInt();
-	afterEnd = OPT_GET("Tool/Timing Post Processor/Threshold/Key End After")->GetInt();
-	adjGap = OPT_GET("Tool/Timing Post Processor/Threshold/Adjacent Gap")->GetInt();
-	adjOverlap = OPT_GET("Tool/Timing Post Processor/Threshold/Adjacent Overlap")->GetInt();
+	auto const preferences = aegisub::LoadTimingProcessorPreferences(*config::opt);
+	leadIn = preferences.lead_in_ms;
+	leadOut = preferences.lead_out_ms;
+	beforeStart = preferences.key_start_before_ms;
+	afterStart = preferences.key_start_after_ms;
+	beforeEnd = preferences.key_end_before_ms;
+	afterEnd = preferences.key_end_after_ms;
+	adjGap = preferences.adjacent_gap_ms;
+	adjOverlap = preferences.adjacent_overlap_ms;
 
 	// Styles box
 	auto LeftSizer = new wxStaticBoxSizer(wxVERTICAL,&d,_("Apply to styles"));
@@ -167,20 +168,20 @@ DialogTimingProcessor::DialogTimingProcessor(agi::Context *c)
 	// Options box
 	auto optionsSizer = new wxStaticBoxSizer(wxHORIZONTAL,&d,_("Options"));
 	onlySelection = new wxCheckBox(&d,-1,_("Affect &selection only"));
-	onlySelection->SetValue(OPT_GET("Tool/Timing Post Processor/Only Selection")->GetBool());
-	optionsSizer->Add(onlySelection,1,wxALL,0);
+	onlySelection->SetValue(preferences.only_selection);
+	optionsSizer->Add(onlySelection, 1, wxALL, 0);
 
 	// Lead-in/out box
 	auto LeadSizer = new wxStaticBoxSizer(wxHORIZONTAL, &d, _("Lead-in/Lead-out"));
 
 	hasLeadIn = make_check(LeadSizer, _("Add lead &in:"),
-		"Tool/Timing Post Processor/Enable/Lead/IN",
-		_("Enable adding of lead-ins to lines"));
+						   preferences.lead_in_enabled,
+						   _("Enable adding of lead-ins to lines"));
 	make_ctrl(LeadSizer, wxEmptyString, &leadIn, hasLeadIn, _("Lead in to be added, in milliseconds"));
 
 	hasLeadOut = make_check(LeadSizer, _("Add lead &out:"),
-		"Tool/Timing Post Processor/Enable/Lead/OUT",
-		_("Enable adding of lead-outs to lines"));
+							preferences.lead_out_enabled,
+							_("Enable adding of lead-outs to lines"));
 	make_ctrl(LeadSizer, wxEmptyString, &leadOut, hasLeadOut, _("Lead out to be added, in milliseconds"));
 
 	LeadSizer->AddStretchSpacer(1);
@@ -188,8 +189,8 @@ DialogTimingProcessor::DialogTimingProcessor(agi::Context *c)
 	// Adjacent subs sizer
 	auto AdjacentSizer = new wxStaticBoxSizer(wxHORIZONTAL, &d, _("Make adjacent subtitles continuous"));
 	adjsEnable = make_check(AdjacentSizer, _("&Enable"),
-		"Tool/Timing Post Processor/Enable/Adjacent",
-		_("Enable snapping of subtitles together if they are within a certain distance of each other"));
+							preferences.adjacent_enabled,
+							_("Enable snapping of subtitles together if they are within a certain distance of each other"));
 
 	auto adjBoxes = new wxBoxSizer(wxHORIZONTAL);
 	make_ctrl(&d, adjBoxes, _("Max gap:"), &adjGap, adjsEnable,
@@ -197,7 +198,7 @@ DialogTimingProcessor::DialogTimingProcessor(agi::Context *c)
 	make_ctrl(&d, adjBoxes, _("Max overlap:"), &adjOverlap, adjsEnable,
 		_("Maximum overlap between the end and start time for two subtitles to be made continuous, in milliseconds"));
 
-	adjacentBias = new wxSlider(&d, -1, mid<int>(0, OPT_GET("Tool/Timing Post Processor/Adjacent Bias")->GetDouble() * 100, 100), 0, 100);
+	adjacentBias = new wxSlider(&d, -1, mid<int>(0, preferences.adjacent_bias * 100, 100), 0, 100);
 	adjacentBias->SetToolTip(_("Sets how to set the adjoining of lines. If set totally to left, it will extend or shrink start time of the second line; if totally to right, it will extend or shrink the end time of the first line."));
 
 	auto adjSliderSizer = new wxBoxSizer(wxHORIZONTAL);
@@ -216,8 +217,8 @@ DialogTimingProcessor::DialogTimingProcessor(agi::Context *c)
 
 	keysEnable = new wxCheckBox(&d, -1, _("E&nable"));
 	keysEnable->SetToolTip(_("Enable snapping of subtitles to nearest keyframe, if distance is within threshold"));
-	keysEnable->SetValue(OPT_GET("Tool/Timing Post Processor/Enable/Keyframe")->GetBool());
-	KeyframesFlexSizer->Add(keysEnable,0,wxRIGHT|wxEXPAND,10);
+	keysEnable->SetValue(preferences.keyframes_enabled);
+	KeyframesFlexSizer->Add(keysEnable, 0, wxRIGHT | wxEXPAND, 10);
 
 	// Keyframes are only available if timecodes are loaded
 	bool keysAvailable = !core.project->Keyframes().empty() && core.project->Timecodes().IsLoaded();
@@ -304,21 +305,22 @@ void DialogTimingProcessor::UpdateControls() {
 
 void DialogTimingProcessor::OnApply(wxCommandEvent &) {
 	d.TransferDataFromWindow();
-	// Save settings
-	OPT_SET("Tool/Timing Post Processor/Lead/IN")->SetInt(leadIn);
-	OPT_SET("Tool/Timing Post Processor/Lead/OUT")->SetInt(leadOut);
-	OPT_SET("Tool/Timing Post Processor/Threshold/Key Start Before")->SetInt(beforeStart);
-	OPT_SET("Tool/Timing Post Processor/Threshold/Key Start After")->SetInt(afterStart);
-	OPT_SET("Tool/Timing Post Processor/Threshold/Key End Before")->SetInt(beforeEnd);
-	OPT_SET("Tool/Timing Post Processor/Threshold/Key End After")->SetInt(afterEnd);
-	OPT_SET("Tool/Timing Post Processor/Threshold/Adjacent Gap")->SetInt(adjGap);
-	OPT_SET("Tool/Timing Post Processor/Threshold/Adjacent Overlap")->SetInt(adjOverlap);
-	OPT_SET("Tool/Timing Post Processor/Adjacent Bias")->SetDouble(adjacentBias->GetValue() / 100.0);
-	OPT_SET("Tool/Timing Post Processor/Enable/Lead/IN")->SetBool(hasLeadIn->IsChecked());
-	OPT_SET("Tool/Timing Post Processor/Enable/Lead/OUT")->SetBool(hasLeadOut->IsChecked());
-	if (keysEnable->IsEnabled()) OPT_SET("Tool/Timing Post Processor/Enable/Keyframe")->SetBool(keysEnable->IsChecked());
-	OPT_SET("Tool/Timing Post Processor/Enable/Adjacent")->SetBool(adjsEnable->IsChecked());
-	OPT_SET("Tool/Timing Post Processor/Only Selection")->SetBool(onlySelection->IsChecked());
+	aegisub::SaveTimingProcessorPreferences(*config::opt,
+											{.lead_in_ms = leadIn,
+											 .lead_out_ms = leadOut,
+											 .key_start_before_ms = beforeStart,
+											 .key_start_after_ms = afterStart,
+											 .key_end_before_ms = beforeEnd,
+											 .key_end_after_ms = afterEnd,
+											 .adjacent_gap_ms = adjGap,
+											 .adjacent_overlap_ms = adjOverlap,
+											 .adjacent_bias = adjacentBias->GetValue() / 100.0,
+											 .lead_in_enabled = hasLeadIn->IsChecked(),
+											 .lead_out_enabled = hasLeadOut->IsChecked(),
+											 .keyframes_enabled = keysEnable->IsChecked(),
+											 .adjacent_enabled = adjsEnable->IsChecked(),
+											 .only_selection = onlySelection->IsChecked()},
+											keysEnable->IsEnabled());
 
 	try {
 		Process();
