@@ -303,8 +303,11 @@ void DialogTimingProcessor::UpdateControls() {
 	ApplyButton->Enable(any_checked && (hasLeadIn->IsChecked() || hasLeadOut->IsChecked() || keysEnable->IsChecked() || adjsEnable->IsChecked()));
 }
 
-void DialogTimingProcessor::OnApply(wxCommandEvent &) {
-	d.TransferDataFromWindow();
+void DialogTimingProcessor::OnApply(wxCommandEvent&) {
+	if (!d.TransferDataFromWindow()) {
+		wxMessageBox(_("Timing values must be nonnegative integers. No subtitles were changed."), _("Invalid timing"), wxOK | wxICON_ERROR, &d);
+		return;
+	}
 	aegisub::SaveTimingProcessorPreferences(*config::opt,
 											{.lead_in_ms = leadIn,
 											 .lead_out_ms = leadOut,
