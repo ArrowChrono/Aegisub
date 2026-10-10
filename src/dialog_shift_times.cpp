@@ -33,7 +33,6 @@
 
 #include <libaegisub/ass/time.h>
 #include <libaegisub/fs.h>
-#include <libaegisub/io.h>
 #include <libaegisub/log.h>
 #include <libaegisub/path.h>
 #include <libaegisub/signal.h>
@@ -41,7 +40,6 @@
 
 #include <libaegisub/cajun/elements.h>
 #include <libaegisub/cajun/reader.h>
-#include <libaegisub/cajun/writer.h>
 
 #include <filesystem>
 #include <wx/dialog.h>
@@ -311,7 +309,7 @@ void DialogShiftTimes::SaveHistory(std::vector<std::pair<int, int>> shifted_bloc
 	if (history.size() > 50)
 		history.resize(50);
 	try {
-		agi::JsonWriter::Write(aegisub::EncodeShiftHistory(history), agi::io::Save(history_filename).Get());
+		aegisub::WriteShiftHistory(history_filename, history);
 	}
 	catch (agi::fs::FileSystemError const& e) {
 		LOG_E("dialog_shift_times/save_history") << e.GetMessage();

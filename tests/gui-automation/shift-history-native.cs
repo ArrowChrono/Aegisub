@@ -86,6 +86,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             var recovered = JsonNode.Parse(File.ReadAllText(HistoryPath()))!.AsArray();
             Require(recovered.Count == 1 && recovered[0]!["amount"]!.GetValue<string>() == "0:00:01.23", "Explicit Clear restores history writing with one canonical accepted record");
             NormalExit();
+            LockedHistory();
             File.WriteAllText(Path.Combine(artifacts, "result.json"), JsonSerializer.Serialize(new { passed = true, checks }, Json));
             return 0;
         }
@@ -132,6 +133,91 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
     }
     string HistoryPath() => Path.Combine(profile, "user", "shift_history.json");
     string initialHistory = "";
+    void LockedHistory()
+    {
+        phase = "locked-history";
+        var before = File.ReadAllBytes(HistoryPath());
+        File.WriteAllBytes(Path.Combine(artifacts, "before-locked-history.json"), before);
+        Start();
+        bool warned = false, exactText = false, taskDialog = false;
+        bool unchanged;
+        string[] temporaryFiles;
+        using (var historyLock = new FileStream(HistoryPath(), FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            Open();
+            Require(Send(historyList, 0x18B) == 1, "Existing valid history remains readable while replacement is locked");
+            EnterShift(); Capture("locked-history");
+            var old = dialog;
+            Action("button", "OK/history-replacement-locked");
+            ObservedWindowsCommand.PostButtonClick(Control("OK"), app!.Id);
+            Wait(() => {
+                var warning = Windows().SingleOrDefault(h => Text(h) == "Shift history");
+                if (warning != 0)
+                {
+                    Require(!warned, "Final history commit failure shows only one save-error notification");
+                    Dump("save-error-controls");
+                    ScreenCapture.SaveWindowPng(warning, Path.Combine(artifacts, "save-error.png"));
+                    var accessible = AutomationElement.FromHandle(warning).FindAll(TreeScope.Descendants, Condition.TrueCondition).Cast<AutomationElement>()
+                        .Select(e => new { name = e.Current.Name, control_type = e.Current.ControlType.ProgrammaticName, automation_id = e.Current.AutomationId }).ToArray();
+                    File.WriteAllText(Path.Combine(artifacts, "save-error-accessibility.json"), JsonSerializer.Serialize(accessible, Json));
+                    exactText = accessible.Any(e => e.control_type == "ControlType.Text" && e.name == "Subtitles were shifted, but shift history could not be saved.");
+                    taskDialog = PrivateDesktop.ClassName(warning) == "#32770" && Children(warning).Any(h => PrivateDesktop.ClassName(h) == "DirectUIHWND");
+                    var ok = Children(warning).Single(h => Text(h).Replace("&", "") == "OK");
+                    isolation.VerifyWindow(ok, app!);
+                    Send(warning, 0x466, 1);
+                    warned = true;
+                    return false;
+                }
+                return !Windows().Contains(old);
+            }, "Locked history replacement finishes with a dismissible save-error notification");
+            dialog = 0;
+            var after = File.ReadAllBytes(HistoryPath());
+            File.WriteAllBytes(Path.Combine(artifacts, "after-locked-history.json"), after);
+            unchanged = after.SequenceEqual(before);
+            temporaryFiles = Directory.GetFiles(Path.GetDirectoryName(HistoryPath())!, "shift_history_tmp*.json").Select(Path.GetFileName).ToArray()!;
+            var actual = SaveAs("after-locked-apply");
+            Require(actual.SequenceEqual(LiteralLockedExpected()), "Failed history replacement preserves the exact full ASS shift without rollback, including all unrelated fields and metadata");
+        }
+        NormalExit();
+        File.WriteAllText(Path.Combine(artifacts, "locked-history-observations.json"), JsonSerializer.Serialize(new { warned, exactText, taskDialog, unchanged, temporaryFiles }, Json));
+        Require(unchanged, "Failed history replacement leaves the previous history byte-for-byte unchanged");
+        Require(warned && exactText && taskDialog, "Actual wx TaskDialog shows the exact history save-error text");
+        Require(temporaryFiles.Length == 0, "Failed history replacement cleans every shift history temporary file");
+    }
+    string[] LiteralLockedExpected()
+    {
+        var literal = $$"""
+            [Script Info]
+            {{baseline[1]}}
+            ; http://www.aegisub.org/
+            Title: Native Timing Preferences E2E
+            Original Script: metadata sentinel café 世界
+            ScriptType: v4.00+
+            PlayResX: 640
+            PlayResY: 480
+            WrapStyle: 2
+            ScaledBorderAndShadow: yes
+
+            [Aegisub Project Garbage]
+
+            [V4+ Styles]
+            Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+            Style: Default,Arial,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+            Style: Alternate,Arial,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+            Style: Third,Arial,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1
+
+            [Events]
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+            Dialogue: 1,0:00:08.77,0:00:12.34,Default,one,11,12,13,fx-one,{\i1}café, 世界
+            Comment: 9,0:00:08.87,0:00:10.50,Alternate,comment,91,92,93,sentinel,{\b1}untouched 😀
+            Dialogue: 2,0:00:18.77,0:00:22.56,Alternate,two,21,22,23,fx-two,{\bord3}second
+            Dialogue: 3,0:00:28.77,0:00:32.78,Third,three,31,32,33,fx-three,third 😀
+            Dialogue: 4,0:00:38.77,0:00:42.90,Default,four,41,42,43,fx-four,{\b1}fourth{\b0}
+            """;
+        var expected = literal.Replace("\r", "").Split('\n');
+        File.WriteAllLines(Path.Combine(artifacts, "expected-locked-apply.ass"), expected, new UTF8Encoding(true));
+        return expected;
+    }
     void Open()
     {
         Command("Timing", "Shift Times...");

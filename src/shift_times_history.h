@@ -2,6 +2,8 @@
 
 #include <libaegisub/ass/time.h>
 #include <libaegisub/cajun/elements.h>
+#include <libaegisub/cajun/writer.h>
+#include <libaegisub/io.h>
 
 #include <charconv>
 #include <limits>
@@ -154,5 +156,18 @@ inline json::Array EncodeShiftHistory(ShiftHistory const& history) {
 		result.emplace_back(std::move(object));
 	}
 	return result;
+}
+
+inline void WriteShiftHistory(agi::fs::path const& filename, ShiftHistory const& history) {
+	auto encoded = EncodeShiftHistory(history);
+	agi::io::Save output(filename);
+	try {
+		agi::JsonWriter::Write(encoded, output.Get());
+		output.Close();
+	}
+	catch (...) {
+		output.Cancel();
+		throw;
+	}
 }
 }

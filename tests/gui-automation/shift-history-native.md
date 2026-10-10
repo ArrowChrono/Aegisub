@@ -35,9 +35,25 @@ Clear must remove it; reopening must have no warning/stale entries. Applying
 again must produce one valid record and exactly another 1230ms shift. All normal
 exits and final full-ASS comparisons are mandatory.
 
+A final process opens the recovered, valid history while a read-only shared
+handle (`FileAccess.Read`, `FileShare.Read`) denies replacement but still permits
+loading. Applying the same shift must show the actual wx Windows TaskDialog with
+the exact text `Subtitles were shifted, but shift history could not be saved.`
+The driver observes its OK button and dismisses it using the window-local
+TDM_CLICK_BUTTON command. The old history must remain byte-for-byte unchanged,
+every `shift_history_tmp*.json` file must be cleaned, and the process must exit
+normally. A literal full-ASS oracle verifies all five shifted event rows, styles
+and metadata without rollback; only the generated build-version comment comes
+from the current baseline. The lock remains held until both history and subtitle
+artifacts have been inspected.
+
 Artifacts contain result.json, driver.log, actions.ndjson, native control
 inventories, current PNGs, complete baseline/actual/expected ASS files, history,
 profile and normal-startup evidence. There is no source/executable hash manifest.
+The locked-history phase also retains before/after history bytes, a full expected
+ASS file, save-error native/accessibility inventories, PNG and
+locked-history-observations.json. TaskDialog content is read through UI Automation
+because its DirectUI text does not have a native child window.
 
 History double-click is not dynamically covered by this scenario. wx MSW's
 GetMessagePos hit test rejects inactive-desktop messages lacking actual cursor
