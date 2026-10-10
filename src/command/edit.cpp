@@ -421,6 +421,7 @@ AssDialogue *paste_over(wxWindow *parent, std::vector<bool>& pasteOverOptions, A
 
 // The tag-writing and position helpers moved to subtitle_edit_ops so both hosts
 // edit overrides through one implementation of reset shadowing and targeting.
+using aegisub::subtitle_edit_ops::CaptureOverridePosition;
 using aegisub::subtitle_edit_ops::CharacterPos;
 using aegisub::subtitle_edit_ops::NormalizePos;
 using aegisub::subtitle_edit_ops::ParsedLine;
@@ -433,27 +434,15 @@ void update_lines(const agi::Context *c, std::string const& undo_msg, Func&& f) 
 	const auto active_line = core.selectionController->GetActiveLine();
 	const int sel_start = core.textSelectionController->GetSelectionStart();
 	const int sel_end = core.textSelectionController->GetSelectionEnd();
-	const int norm_sel_start = NormalizePos(active_line->Text, sel_start);
-	const int norm_sel_end = NormalizePos(active_line->Text, sel_end);
-	const size_t sel_start_chars = CharacterPos(active_line->Text, sel_start);
-	const size_t sel_end_chars = CharacterPos(active_line->Text, sel_end);
+	auto const start_position = CaptureOverridePosition(active_line->Text, sel_start);
+	auto const end_position = CaptureOverridePosition(active_line->Text, sel_end);
 	int active_sel_shift = 0;
 
 	for (const auto line : core.selectionController->GetSelectedSet()) {
-		int line_sel_start = sel_start;
-		int line_sel_end = sel_end;
-		int line_norm_sel_start = norm_sel_start;
-		int line_norm_sel_end = norm_sel_end;
-		if (line != active_line) {
-			auto start = RemapPosForLine(line, sel_start_chars);
-			auto end = RemapPosForLine(line, sel_end_chars);
-			line_sel_start = start.raw;
-			line_sel_end = end.raw;
-			line_norm_sel_start = start.plain;
-			line_norm_sel_end = end.plain;
-		}
+		auto const start = start_position.ForLine(*line, line == active_line);
+		auto const end = end_position.ForLine(*line, line == active_line);
 
-		int shift = f(line, line_sel_start, line_sel_end, line_norm_sel_start, line_norm_sel_end);
+		int shift = f(line, start.raw, end.raw, start.plain, end.plain);
 		if (line == active_line)
 			active_sel_shift = shift;
 	}
@@ -511,8 +500,7 @@ PreparedColorEdit PrepareColorEdit(agi::Context *c, ColorEditTarget target) {
 	const auto active_line = core.selectionController->GetActiveLine();
 	const int sel_start = core.textSelectionController->GetSelectionStart();
 	const int sel_end = core.textSelectionController->GetSelectionEnd();
-	const int norm_sel_start = NormalizePos(active_line->Text, sel_start);
-	const size_t sel_start_chars = CharacterPos(active_line->Text, sel_start);
+	auto const start_position = CaptureOverridePosition(active_line->Text, sel_start);
 
 	PreparedColorEdit edit;
 	edit.target = target;
@@ -526,13 +514,9 @@ PreparedColorEdit PrepareColorEdit(agi::Context *c, ColorEditTarget target) {
 		return aegisub::ass_style_resolution::ResolveResetStyle(*core.ass, std::string(name));
 	};
 	for (auto line : core.selectionController->GetSelectedSet()) {
-		int line_sel_start = sel_start;
-		int line_norm_sel_start = norm_sel_start;
-		if (line != active_line) {
-			auto start = RemapPosForLine(line, sel_start_chars);
-			line_sel_start = start.raw;
-			line_norm_sel_start = start.plain;
-		}
+		auto const start = start_position.ForLine(*line, line == active_line);
+		int const line_sel_start = start.raw;
+		int const line_norm_sel_start = start.plain;
 
 		AssStyle const* const style = core.ass->GetStyle(line->Style);
 		AssStyle const& event_style = style ? *style : fallback_style;

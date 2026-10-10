@@ -317,6 +317,15 @@ struct SelectionPos {
 
 SelectionPos RemapPosForLine(AssDialogue *line, std::size_t chars);
 
+struct OverridePosition {
+	SelectionPos original;
+	std::size_t characters;
+
+	[[nodiscard]] SelectionPos ForLine(AssDialogue& line, bool active_line) const;
+};
+
+[[nodiscard]] OverridePosition CaptureOverridePosition(std::string const& text, int raw_pos);
+
 int ToggleStyleTag(
 	AssDialogue& line,
 	AssStyle const& event_style,

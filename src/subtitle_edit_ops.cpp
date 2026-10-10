@@ -1287,6 +1287,16 @@ SelectionPos RemapPosForLine(AssDialogue *line, size_t chars) {
 	return {.raw = DenormalizePos(line->Text, plain), .plain = plain};
 }
 
+SelectionPos OverridePosition::ForLine(AssDialogue& line, bool active_line) const {
+	return active_line ? original : RemapPosForLine(&line, characters);
+}
+
+OverridePosition CaptureOverridePosition(std::string const& text, int raw_pos) {
+	return {
+		.original = {.raw = raw_pos, .plain = NormalizePos(text, raw_pos)},
+		.characters = CharacterPos(text, raw_pos)};
+}
+
 int ToggleStyleTag(
 	AssDialogue& line,
 	AssStyle const& event_style,

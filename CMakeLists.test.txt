@@ -341,6 +341,7 @@ if(GTEST_FOUND)
         tests/tests/subtitle_format_ttxt.cpp
         tests/tests/subtitle_grid_query_service.cpp
         tests/tests/subtitle_edit_ops.cpp
+        tests/tests/override_position.cpp
         tests/tests/subtitle_editor_ops.cpp
         tests/tests/subtitle_grid_ops.cpp
         tests/tests/subtitle_grid_selection_policy.cpp
