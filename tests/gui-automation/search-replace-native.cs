@@ -1,5 +1,6 @@
 #:property TargetFramework=net10.0-windows
 #:property UseWPF=true
+#:property UseWindowsForms=true
 #:property ImplicitUsings=enable
 #:property Nullable=enable
 #:property PublishAot=false
@@ -17,7 +18,7 @@ using System.Windows.Automation;
 
 if (args.Length != 3)
 {
-    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/search-replace-native.cs -- EXE ARTIFACTS filters|atomic|zero");
+    Console.Error.WriteLine("Usage: dotnet run --file tests/gui-automation/search-replace-native.cs -- EXE ARTIFACTS filters|atomic|zero|grouped");
     return 2;
 }
 try { return PrivateDesktop.Run(args, Path.GetFullPath(args[1]), isolation => new Scenario(args, isolation).Run()); }
@@ -38,9 +39,9 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         Directory.CreateDirectory(artifacts); isolation.RecordDriver();
         using var log = new StreamWriter(Path.Combine(artifacts, "driver.log")) { AutoFlush = true };
         Console.SetOut(log); Console.SetError(log);
-        using var watchdog = new Timer(_ => { try { if (app is not null) isolation.Stop(app); } finally { Environment.Exit(124); } }, null, 180_000, Timeout.Infinite);
+        using var watchdog = new System.Threading.Timer(_ => { try { if (app is not null) isolation.Stop(app); } finally { Environment.Exit(124); } }, null, 180_000, Timeout.Infinite);
         File.Copy("tests/gui-automation/search-replace-native.cs", Path.Combine(artifacts, "producer.cs"));
-        var sources = new[] { "src/search_replace_engine.cpp", "src/search_replace_engine.h", "src/subtitle_matcher.cpp", "src/subtitle_matcher.h" };
+        var sources = new[] { "src/search_replace_engine.cpp", "src/search_replace_engine.h", "src/subtitle_matcher.cpp", "src/subtitle_matcher.h", "src/subtitle_match_report.cpp", "src/subtitle_match_report.h", "src/dialog_search_results.cpp", "src/dialog_search_results.h" };
         File.WriteAllText(Path.Combine(artifacts, "inputs.json"), JsonSerializer.Serialize(new {
             executable_sha256 = Hash(exe), scenario = args[2], sources = sources.Select(path => new { path, sha256 = Hash(path) }),
             private_desktop = true, global_input = false, clipboard = false, total_timeout_seconds = 180
@@ -50,6 +51,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             if (args[2] == "filters") { Filters(true); Filters(false); NonTextFilter(); }
             else if (args[2] == "atomic") Atomic();
             else if (args[2] == "zero") ZeroWidth();
+            else if (args[2] == "grouped") Grouped();
             else throw new ArgumentException("Unknown scenario");
             File.WriteAllText(Path.Combine(artifacts, "result.json"), JsonSerializer.Serialize(new { passed = true, checks }, Json));
             return 0;
@@ -147,7 +149,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         if (app is not null) { isolation.Stop(app); app.Dispose(); app = null; }
         main = dialog = editor = 0;
     }
-    void Start(string name, bool comment = false, string? lateText = null, string? firstText = null)
+    void Start(string name, bool comment = false, string? lateText = null, string? firstText = null, string? secondText = null)
     {
         Stop(); phase = name;
         var root = Path.Combine(artifacts, "host-" + ++launch); var profile = Path.Combine(root, "profile");
@@ -183,6 +185,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             "Dialogue: 4,0:00:04.00,0:00:05.00,Default,sentinel,0041,0042,0043,fx,unchanged sentinel"
         };
         if (firstText is not null) events[0] = events[0][..(events[0].LastIndexOf(',') + 1)] + firstText;
+        if (secondText is not null) events[1] = events[1][..(events[1].LastIndexOf(',') + 1)] + secondText;
         if (lateText is not null) events[^1] = events[^1][..(events[^1].LastIndexOf(',') + 1)] + lateText;
         File.WriteAllText(fixture, header + "\n" + string.Join('\n', events) + "\n", new UTF8Encoding(true));
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
@@ -223,6 +226,156 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         return File.ReadAllLines(path).Where(s => s.StartsWith("Dialogue:") || s.StartsWith("Comment:")).ToArray();
     }
     void Next(long start, long end) { Click("Find next"); Selected(start, end); }
+    sealed record HighlightRow(int Top, int Bottom, int[] Starts, int[] Ends);
+    sealed record ResultView(nint Window, HighlightRow[] Original, HighlightRow[] Replacement, string[] Lines);
+    static HighlightRow[] HighlightRows(System.Drawing.Bitmap bitmap, int colour, (int Top, int Bottom)[] rowBounds)
+    {
+        var rows = new List<HighlightRow>();
+        foreach (var bounds in rowBounds)
+        {
+            int top = -1, bottom = -1, bestCount = 0;
+            int[] bestStarts = [], bestEnds = [];
+            for (var y = Math.Max(0, bounds.Top); y < Math.Min(bitmap.Height, bounds.Bottom); ++y)
+            {
+                var starts = new List<int>(); var ends = new List<int>();
+                var inside = false; var count = 0;
+                for (var x = 0; x <= bitmap.Width; ++x)
+                {
+                    var marked = x < bitmap.Width && bitmap.GetPixel(x, y).ToArgb() == colour;
+                    if (marked) { ++count; if (!inside) starts.Add(x); }
+                    else if (inside) ends.Add(x);
+                    inside = marked;
+                }
+                if (count == 0) continue;
+                if (top < 0) top = y;
+                bottom = y;
+                if (count > bestCount) { bestCount = count; bestStarts = starts.ToArray(); bestEnds = ends.ToArray(); }
+            }
+            if (top >= 0) rows.Add(new(top, bottom, bestStarts, bestEnds));
+        }
+        return rows.ToArray();
+    }
+    ResultView ObserveResults(string label, bool replacement = true)
+    {
+        var title = replacement ? "Replace results" : "Search results";
+        nint results = 0;
+        Wait(() => { results = Windows().SingleOrDefault(h => Text(h) == title); return results != 0; }, title);
+        isolation.VerifyWindow(results, app!);
+        Native.Resize(results, 1320, 520);
+        Thread.Sleep(180);
+        var path = Path.Combine(artifacts, phase + "-" + label);
+        var capture = ScreenCapture.SaveWindowPng(results, path + ".png");
+        using var bitmap = new System.Drawing.Bitmap(path + ".png");
+        var root = AutomationElement.FromHandle(results);
+        var windowBounds = root.Current.BoundingRectangle;
+        var accessible = root.FindAll(TreeScope.Descendants, Condition.TrueCondition)
+            .Cast<AutomationElement>().Select(e => new { name = e.Current.Name, control_type = e.Current.ControlType.ProgrammaticName, bounds = e.Current.BoundingRectangle }).ToArray();
+        var rowBounds = accessible.Where(e => e.control_type == ControlType.ListItem.ProgrammaticName).Select(e => (
+            Top: (int)Math.Floor((e.bounds.Top - windowBounds.Top) * bitmap.Height / windowBounds.Height),
+            Bottom: (int)Math.Ceiling((e.bounds.Bottom - windowBounds.Top) * bitmap.Height / windowBounds.Height))).ToArray();
+        var original = HighlightRows(bitmap, System.Drawing.Color.FromArgb(255, 184, 108).ToArgb(), rowBounds);
+        var replaced = HighlightRows(bitmap, System.Drawing.Color.FromArgb(126, 220, 150).ToArgb(), rowBounds);
+        File.WriteAllText(path + ".json", JsonSerializer.Serialize(new {
+            capture, original_highlight_rows = original, replacement_highlight_rows = replaced,
+            native_text = Children(results).Select(Text).ToArray(), window_bounds = windowBounds.ToString(),
+            accessible = accessible.Select(e => new { e.name, e.control_type, bounds = e.bounds.ToString() }),
+            text_verification = "Saved ASS and editor are machine-checked; custom-rendered column strings require PNG review."
+        }, Json));
+        Dump(label + "-native");
+        return new(results, original, replaced, accessible.Where(e => e.control_type == ControlType.ListItem.ProgrammaticName).Select(e => e.name).ToArray());
+    }
+    void ResultStatus(nint results, string expected)
+    {
+        var labels = Children(results).Select(Text).ToArray();
+        Require(labels.Contains(expected), "Result status: " + expected + " (observed " + string.Join(" / ", labels.Where(t => t.Contains("match") || t.Contains("edited"))) + ")");
+    }
+    void HighlightCounts(ResultView view, int[] original, int[] replacement)
+    {
+        Require(view.Original.Select(r => r.Starts.Length).SequenceEqual(original), "Rendered orange highlight segments per result row: " + string.Join(",", original));
+        Require(view.Replacement.Select(r => r.Starts.Length).SequenceEqual(replacement), "Rendered green highlight segments per result row: " + string.Join(",", replacement));
+    }
+    void ResultLines(ResultView view, params string[] expected)
+    {
+        Require(view.Lines.SequenceEqual(expected), "Accessible result subtitle line numbers: " + string.Join(",", expected));
+    }
+    void ActivateResult(ResultView view, int index)
+    {
+        var row = view.Original[index];
+        var frame = Native.Bounds(view.Window);
+        var x = frame.Left + row.Starts[0] + 1;
+        var y = frame.Top + (row.Top + row.Bottom) / 2;
+        var target = Children(view.Window).Where(h => Native.Bounds(h).Contains(x, y))
+            .OrderBy(h => Native.Bounds(h).Area).First();
+        isolation.VerifyWindow(target, app!);
+        var point = Native.ClientPoint(target, x, y);
+        Native.Post(target, 0x201, 1, point); Native.Post(target, 0x202, 0, point);
+        Native.Post(target, 0x203, 1, point); Native.Post(target, 0x202, 0, point);
+        Thread.Sleep(180);
+    }
+    void CloseResults(nint results)
+    {
+        ObservedWindowsCommand.PostButtonClick(Control(results, "Close"), app!.Id);
+        Wait(() => !Windows().Contains(results), "Results closed");
+    }
+    void Grouped()
+    {
+        const string first = "{\\i1}前😀 x ééé x", second = "次 café ééé x";
+        Start("grouped-unicode", firstText: first, secondText: second);
+        var before = SaveAs("original");
+        Query("x|ééé", "界", true); Check("Skip Comments", true); Click("Replace all");
+        var view = ObserveResults("replaced");
+        HighlightCounts(view, [3, 2], [3, 2]); ResultLines(view, "1", "2"); ResultStatus(view.Window, "5 matches were replaced.");
+        var after = Save("replaced");
+        Require(after[0].EndsWith("{\\i1}前😀 界 界 界") && after[1].EndsWith("次 café 界 界") && after.Skip(2).SequenceEqual(before.Skip(2)), "Mixed-length Unicode regex replacement saves complete final lines and untouched sentinels");
+        ActivateResult(view, 1); Require(Text(editor) == "次 café 界 界", "Second grouped result navigates to its own subtitle"); Selected(10, 13);
+        ActivateResult(view, 0); Require(Text(editor) == "{\\i1}前😀 界 界 界", "First grouped result navigates to complete replaced text"); Selected(13, 16);
+        Command("Undo"); Require(Save("undo").SequenceEqual(before), "One Undo restores every original subtitle");
+        view = ObserveResults("undo"); HighlightCounts(view, [3, 2], [3, 2]); ResultLines(view, "1", "2"); ResultStatus(view.Window, "5 matches found.");
+        ActivateResult(view, 1); Require(Text(editor) == second, "Undo restores the second result's original text"); Selected(10, 16);
+        ActivateResult(view, 0); Require(Text(editor) == first, "Undo restores the first result's original text"); Selected(13, 14);
+        Send(editor, 0xB1, 0, -1); Native.ReplaceSelection(editor, "edited historical row");
+        Wait(() => Text(main).StartsWith('*'), "Native editor change commits");
+        var edited = Save("edited"); Require(edited[0].EndsWith("edited historical row") && edited[1] == before[1], "Manual edit changes only the active subtitle");
+        var stale = ObserveResults("edited"); HighlightCounts(stale, [2], [2]); ResultLines(stale, "1", "2"); ResultStatus(stale.Window, "5 matches found.  (one row re-edited)");
+        ActivateResult(view, 1); Require(Text(editor) == second, "Unedited grouped result remains navigable"); Selected(10, 16);
+        ActivateResult(view, 0); Require(Text(editor) == second, "Re-edited grouped result cannot navigate using stale coordinates"); Selected(10, 16);
+        CloseResults(view.Window);
+        Query("x|ééé", "", true); Click("Find all");
+        var found = ObserveResults("find-remains-per-match", false); HighlightCounts(found, [1, 1], []); ResultLines(found, "2", "2"); ResultStatus(found.Window, "2 matches found.");
+
+        Start("grouped-deletion", firstText: first, secondText: second);
+        Query("x|ééé", "", true); Check("Skip Comments", true); Click("Replace all");
+        view = ObserveResults("replaced"); HighlightCounts(view, [3, 2], [1, 1]); ResultLines(view, "1", "2"); ResultStatus(view.Window, "5 matches were replaced.");
+        Require(view.Replacement[0].Ends[0] - view.Replacement[0].Starts[0] > view.Replacement[1].Ends[0] - view.Replacement[1].Starts[0], "Three adjacent deletion markers form a wider merged green region than two");
+        after = Save("replaced"); Require(after[0].EndsWith("{\\i1}前😀   ") && after[1].EndsWith("次 café  "), "Deletion reports show complete lines after every deletion");
+        ActivateResult(view, 0); Selected(13, 13);
+
+        Start("grouped-separated-deletion", firstText: "{\\i1}前😀 x / ééé / x !", secondText: "次 café ééé / x !");
+        Query("x|ééé", "", true); Check("Skip Comments", true); Click("Replace all");
+        view = ObserveResults("replaced"); HighlightCounts(view, [3, 2], [3, 2]); ResultLines(view, "1", "2"); ResultStatus(view.Window, "5 matches were replaced.");
+        after = Save("replaced"); Require(after[0].EndsWith("{\\i1}前😀  /  /  !") && after[1].EndsWith("次 café  /  !"), "Separated deletion markers retain every visible separator and suffix");
+        ActivateResult(view, 0); Selected(13, 13);
+
+        Start("grouped-zero-width", firstText: "前😀 x x", secondText: "次 é x");
+        Query("$", "", true); Check("Skip Comments", true); Style("Other"); Click("Find all");
+        found = ObserveResults("find-line-end", false); HighlightCounts(found, [1], []); ResultLines(found, "2"); ResultStatus(found.Window, "One match found.");
+        ActivateResult(found, 0); Require(Text(editor) == "次 é x", "End-of-line Find All navigates to its filtered subtitle"); Selected(8, 8); CloseResults(found.Window);
+        Query("(?=x)|$", "", true); Click("Find all");
+        found = ObserveResults("find-interior-and-line-end", false); HighlightCounts(found, [1, 1], []); ResultLines(found, "2", "2"); ResultStatus(found.Window, "2 matches found.");
+        ActivateResult(found, 0); Selected(7, 7); ActivateResult(found, 1); Selected(8, 8); CloseResults(found.Window);
+        Query("(?=x)|$", "界", true); Click("Replace all");
+        view = ObserveResults("replaced"); HighlightCounts(view, [2], [2]); ResultLines(view, "2"); ResultStatus(view.Window, "2 matches were replaced.");
+        after = Save("replaced"); Require(after[0].EndsWith("前😀 x x") && after[1].EndsWith("次 é 界x界") && after[2].EndsWith("needle sentinel") && after[3].EndsWith("unchanged sentinel"), "Zero-width insertions honor style and comment filters and preserve every insertion");
+        ActivateResult(view, 0); Require(Text(editor) == "次 é 界x界", "Zero-width grouped result navigates to its filtered subtitle"); Selected(7, 10);
+        Command("Undo"); view = ObserveResults("undo"); ActivateResult(view, 0); Require(Text(editor) == "次 é x", "Undo restores zero-width original line"); Selected(7, 7);
+        File.WriteAllText(Path.Combine(artifacts, "visual-review.json"), JsonSerializer.Serialize(new {
+            required_review = "Review every grouped PNG: line numbers, full Context/Replaced line, and ordered Match/Replacement fragments. Pixel assertions verify visible row/segment counts, not glyph semantics.",
+            unicode_columns = new[] {
+                new { line = 1, match = "x | ééé | x", replacement = "界 | 界 | 界", context = first, replaced_line = "{\\i1}前😀 界 界 界" },
+                new { line = 2, match = "ééé | x", replacement = "界 | 界", context = second, replaced_line = "次 café 界 界" }
+            }
+        }, Json));
+    }
     void ZeroWidth()
     {
         Start("zero-basic", firstText: "aa"); Query("(?=a)", "", true);
@@ -286,7 +439,18 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
 
 static class Native
 {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect
+    {
+        public int Left, Top, Right, Bottom;
+        public readonly long Area => (long)(Right - Left) * (Bottom - Top);
+        public readonly bool Contains(int x, int y) => x >= Left && x < Right && y >= Top && y < Bottom;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct Point { public int X, Y; }
     delegate bool Callback(nint window, nint data);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(nint window, out Rect rect);
+    [DllImport("user32.dll")] static extern bool ScreenToClient(nint window, ref Point point);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] static extern bool EnumChildWindows(nint parent, Callback callback, nint data);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(nint window);
@@ -294,7 +458,11 @@ static class Native
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")] static extern nint SendMessage(nint window, uint message, nint wp, nint lp, uint flags, uint timeout, out nint result);
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode)] static extern nint SendText(nint window, uint message, nint wp, string lp, uint flags, uint timeout, out nint result);
     public static nint[] Children(nint parent) { List<nint> found = []; Callback callback = (h, _) => { found.Add(h); return true; }; EnumChildWindows(parent, callback, 0); GC.KeepAlive(callback); return found.ToArray(); }
+    public static Rect Bounds(nint window) { if (!GetWindowRect(window, out var rect)) throw new InvalidOperationException("Native window bounds unavailable"); return rect; }
+    public static long ClientPoint(nint window, int x, int y) { var point = new Point { X = x, Y = y }; if (!ScreenToClient(window, ref point)) throw new InvalidOperationException("Native coordinate conversion failed"); return (ushort)point.X | ((long)(ushort)point.Y << 16); }
+    public static void Resize(nint window, int width, int height) { if (!SetWindowPos(window, 0, 0, 0, width, height, 0x16)) throw new InvalidOperationException("Native result resize failed"); }
     public static long Send(nint window, uint message, long wp, long lp) { if (SendMessage(window, message, (nint)wp, (nint)lp, 0x22, 1000, out var result) == 0) throw new TimeoutException("Native control message"); return result.ToInt64(); }
     public static void SetText(nint window, string value) { if (SendText(window, 0xC, 0, value, 0x22, 1000, out _) == 0) throw new TimeoutException("Native text entry"); }
+    public static void ReplaceSelection(nint window, string value) { if (SendText(window, 0xC2, 1, value, 0x22, 1000, out _) == 0) throw new TimeoutException("Native replacement text entry"); }
     public static void Post(nint window, uint message, long wp, long lp) { if (!PostMessage(window, message, (nint)wp, (nint)lp)) throw new InvalidOperationException("Native message post failed"); }
 }

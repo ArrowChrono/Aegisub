@@ -25,6 +25,7 @@
 #include <wx/utils.h>
 
 #include <algorithm>
+#include <span>
 #include <unordered_map>
 
 namespace {
@@ -55,80 +56,57 @@ enum class HighlightKind {
 	Replacement
 };
 
-wxString highlighted_value(std::string const& text, std::size_t byte_start,
-                           std::size_t byte_end, bool active) {
-	byte_start = std::min(byte_start, text.size());
-	byte_end = std::clamp(byte_end, byte_start, text.size());
-
-	wxString const prefix = to_wx(text.substr(0, byte_start));
-	wxString const marked = to_wx(text.substr(byte_start, byte_end - byte_start));
-	wxString const full = to_wx(text);
-	return wxString::Format(wxS("%d:%llu:%llu:"), active ? 1 : 0,
-		static_cast<unsigned long long>(prefix.length()),
-		static_cast<unsigned long long>(marked.length())) + full;
+wxVariant highlighted_value(std::string const& text,
+							std::span<std::pair<std::size_t, std::size_t> const> ranges,
+							bool active) {
+	wxVariant value;
+	value.NullList();
+	value.Append(to_wx(text));
+	if (active) {
+		std::size_t byte_pos = 0;
+		std::size_t char_pos = 0;
+		for (auto const& [start, end] : ranges) {
+			char_pos += to_wx(text.substr(byte_pos, start - byte_pos)).length();
+			auto const length = to_wx(text.substr(start, end - start)).length();
+			value.Append(wxULongLong(char_pos));
+			value.Append(wxULongLong(length));
+			byte_pos = end;
+			char_pos += length;
+		}
+	}
+	return value;
 }
 
 class HighlightedTextRenderer final : public wxDataViewCustomRenderer {
 	wxString text;
-	std::size_t highlight_start = 0;
-	std::size_t highlight_length = 0;
-	bool highlight_active = false;
+	std::vector<std::pair<std::size_t, std::size_t>> highlights;
 	wxColour highlight_colour;
 
-public:
+	public:
 	explicit HighlightedTextRenderer(HighlightKind kind)
-	: wxDataViewCustomRenderer(wxS("string"), wxDATAVIEW_CELL_INERT,
-	                           wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL)
-	, highlight_colour(kind == HighlightKind::Original
-		? wxColour(255, 184, 108)
-		: wxColour(126, 220, 150))
-	{
+		: wxDataViewCustomRenderer(wxS("list"), wxDATAVIEW_CELL_INERT,
+								   wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL),
+		  highlight_colour(kind == HighlightKind::Original
+							   ? wxColour(255, 184, 108)
+							   : wxColour(126, 220, 150)) {
 		EnableEllipsize(wxELLIPSIZE_END);
 	}
 
 	bool SetValue(wxVariant const& var) override {
-		wxString rest = var.GetString();
-		if (!rest.Contains(':')) {
-			text = std::move(rest);
-			highlight_active = false;
-			return true;
+		auto const& values = var.GetList();
+		auto it = values.begin();
+		text = (*it++)->GetString();
+		highlights.clear();
+		while (it != values.end()) {
+			auto const start = (*it++)->GetULongLong().GetValue();
+			auto const length = (*it++)->GetULongLong().GetValue();
+			highlights.emplace_back(start, length);
 		}
-
-		wxString const active = rest.BeforeFirst(':');
-		rest = rest.AfterFirst(':');
-		if (!rest.Contains(':')) {
-			text = var.GetString();
-			highlight_active = false;
-			return true;
-		}
-
-		wxString const start = rest.BeforeFirst(':');
-		rest = rest.AfterFirst(':');
-		if (!rest.Contains(':')) {
-			text = var.GetString();
-			highlight_active = false;
-			return true;
-		}
-
-		wxString const length = rest.BeforeFirst(':');
-		text = rest.AfterFirst(':');
-
-		unsigned long long parsed_start = 0;
-		unsigned long long parsed_length = 0;
-		if (!start.ToULongLong(&parsed_start) || !length.ToULongLong(&parsed_length)) {
-			text = var.GetString();
-			highlight_active = false;
-			return true;
-		}
-
-		highlight_start = std::min<std::size_t>(parsed_start, text.length());
-		highlight_length = std::min<std::size_t>(parsed_length, text.length() - highlight_start);
-		highlight_active = active == wxS("1");
 		return true;
 	}
 
 	bool Render(wxRect rect, wxDC *dc, int state) override {
-		if (highlight_active) {
+		for (auto const& [highlight_start, highlight_length] : highlights) {
 			int const prefix_width = GetTextExtent(text.Left(highlight_start)).x;
 			int marked_width = GetTextExtent(text.Mid(highlight_start, highlight_length)).x;
 			if (marked_width == 0) {
@@ -151,14 +129,21 @@ public:
 		return true;
 	}
 
-	wxSize GetSize() const override {
-		if (!text.empty())
-			return GetTextExtent(text);
+	[[nodiscard]] wxSize GetSize() const override {
 		auto const view = GetView();
+		if (!text.empty()) {
+			auto size = GetTextExtent(text);
+			if (!highlights.empty() && highlights.back().first == text.length() && highlights.back().second == 0)
+				size.x += view ? view->FromDIP(3) : 3;
+			return size;
+		}
 		return view ? view->FromDIP(wxSize(80, 20)) : wxSize(80, 20);
 	}
 
 	bool GetValue(wxVariant&) const override { return false; }
+#if wxUSE_ACCESSIBILITY
+	[[nodiscard]] wxString GetAccessibleDescription() const override { return text; }
+#endif
 };
 }
 
@@ -197,14 +182,15 @@ public:
 				value = wxEmptyString;
 				return;
 			case 6:
-				value = highlighted_value(hit.replaced_line, hit.match_start,
-					hit.match_start + hit.replacement.size(), !hit.per_hit_stale);
+				value = highlighted_value(hit.replaced_line, hit.replacement_ranges, !hit.per_hit_stale);
 				return;
 			default: value = wxEmptyString; return;
 		}
 
+		std::pair const range(hit.match_start, hit.match_end);
 		value = highlighted_value(hit.line_text ? *hit.line_text : std::string(),
-			hit.match_start, hit.match_end, !hit.per_hit_stale);
+								  owner->has_replacement ? std::span(hit.original_ranges) : std::span(&range, 1),
+								  !hit.per_hit_stale);
 	}
 
 	bool SetValueByRow(wxVariant const&, unsigned, unsigned) override { return false; }
@@ -365,35 +351,40 @@ DialogSearchResults::DialogSearchResults(agi::Context *context, SearchReplaceSet
 , is_replace_report(true)
 , settings(std::move(settings))
 {
-	hits.reserve(replacements.size());
 	for (auto& hit : replacements) {
-		DisplayHit d;
-		d.line_id = hit.line_id;
-		d.row = hit.row;
-		d.start_time = std::move(hit.start_time);
-		d.style = std::move(hit.style);
-		d.matched = std::move(hit.matched);
-		// Compute replaced_line before move()-ing line_text/replacement out of
-		// `hit` — ReplacedLineText reads both.
-		d.replaced_line = aegisub::subtitle_match_report::ReplacedLineText(hit);
-		d.line_text = hit.line_text;
-		// Pre-replacement text is what an undo would restore, so it is the
-		// "original" this report reconciles against.
-		d.original_line_text = hit.line_text;
-		d.replacement = std::move(hit.replacement);
-		d.field = hit.field;
-		d.match_start = hit.start;
-		d.match_end = hit.end;
-		// Pre-replacement offsets index into original_line_text (the pre-edit
-		// field text). Freeze them so a post-edit reconcile can restore.
-		d.original_match_start = hit.start;
-		d.original_match_end = hit.end;
-		// Text has already been rewritten; jump into the post-edit range until
-		// an undo restores the pre-replacement field (see TryReconcile...).
-		d.jump_start = hit.new_start;
-		d.jump_end = hit.new_end;
-		hits.push_back(std::move(d));
+		if (hits.empty() || hits.back().line_id != hit.line_id) {
+			DisplayHit d;
+			d.line_id = hit.line_id;
+			d.row = hit.row;
+			d.start_time = std::move(hit.start_time);
+			d.style = std::move(hit.style);
+			d.line_text = hit.line_text;
+			d.original_line_text = hit.line_text;
+			d.field = hit.field;
+			d.match_start = hit.start;
+			d.match_end = hit.end;
+			d.original_match_start = hit.start;
+			d.original_match_end = hit.end;
+			d.jump_start = hit.new_start;
+			d.jump_end = hit.new_end;
+			hits.push_back(std::move(d));
+		}
+
+		auto& d = hits.back();
+		std::size_t const last = d.original_ranges.empty() ? 0 : d.original_ranges.back().second;
+		d.replaced_line.append(*hit.line_text, last, hit.start - last);
+		d.replaced_line.append(hit.replacement);
+		if (!d.original_ranges.empty()) {
+			d.matched += " | ";
+			d.replacement += " | ";
+		}
+		d.matched += hit.matched;
+		d.replacement += hit.replacement;
+		d.original_ranges.emplace_back(hit.start, hit.end);
+		d.replacement_ranges.emplace_back(hit.new_start, hit.new_end);
 	}
+	for (auto& hit : hits)
+		hit.replaced_line.append(*hit.line_text, hit.original_ranges.back().second, std::string::npos);
 	InitCommon(true);
 }
 
@@ -427,9 +418,13 @@ void DialogSearchResults::UpdateStatusBar() {
 	// longer resolve, and both report shapes surface greyed historical rows.
 	int usable = 0;
 	int greyed = 0;
+	int total = 0;
 	for (auto const& hit : hits) {
-		if (hit.per_hit_stale) ++greyed;
-		else ++usable;
+		if (hit.per_hit_stale)
+			++greyed;
+		else
+			++usable;
+		total += is_replace_report ? static_cast<int>(hit.original_ranges.size()) : 1;
 	}
 
 	// The two report shapes state different things:
@@ -440,7 +435,6 @@ void DialogSearchResults::UpdateStatusBar() {
 	//    is still true). It must not shrink to 0 when the user later edits a
 	//    replaced row; that would read as "the replacement was rolled back",
 	//    which it was not. So it uses the total hit count.
-	int const total = static_cast<int>(hits.size());
 	// Replace reports never re-match a row after it is edited, so per-hit stale
 	// means only that the historical replacement row was re-edited. Do not use
 	// that flag to reduce a purported live-match count after Replace All is
@@ -543,8 +537,6 @@ bool DialogSearchResults::TryReconcileAfterDocumentRebuild() {
 			hit.line_text = hit.original_line_text;
 			hit.match_start = hit.original_match_start;
 			hit.match_end = hit.original_match_end;
-			hit.matched = hit.original_line_text->substr(
-				hit.original_match_start, hit.original_match_end - hit.original_match_start);
 			hit.jump_start = hit.original_match_start;
 			hit.jump_end = hit.original_match_end;
 			hit.per_hit_stale = false;

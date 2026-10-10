@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace agi { struct Context; }
@@ -41,9 +42,9 @@ class DialogSearchResults final : public wxDialog {
 		/// offsets are valid again) even after edits re-pointed `line_text`.
 		std::shared_ptr<std::string const> original_line_text;
 		std::string replacement;
-		/// Full field text as it would read if only this hit's replacement were
-		/// applied (per-hit isolated view, matches the Replacement column).
 		std::string replaced_line;
+		std::vector<std::pair<std::size_t, std::size_t>> original_ranges;
+		std::vector<std::pair<std::size_t, std::size_t>> replacement_ranges;
 		SearchReplaceSettings::Field field = SearchReplaceSettings::Field::TEXT;
 		/// Byte range in `line_text` (pre-replacement for replace reports).
 		/// Mutable: a recompute moves these to the live match's offsets so
@@ -54,8 +55,7 @@ class DialogSearchResults final : public wxDialog {
 		/// `original_line_text`. Never mutated by a recompute. After an undo
 		/// returns the live field to the original text, these are the only
 		/// valid offsets again, so TryReconcileAfterDocumentRebuild restores
-		/// match_start/match_end/jump_*/matched from them. Freezing both the
-		/// text and the offsets is what keeps reconcile's substr in range.
+		/// match_start/match_end/jump_* from them.
 		std::size_t original_match_start = 0;
 		std::size_t original_match_end = 0;
 		/// Range used for jump; post-replacement while the edit still applies,
