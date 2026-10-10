@@ -969,6 +969,8 @@ void SubsEditBox::UpdateFields(int type, bool repopulate_lists) {
 #endif
 			{
 				edit_ctrl_tc->SetValue(to_wx(line->Text));
+				auto *selection = c->GetCore().textSelectionController.get();
+				selection->SetSelection(selection->GetSelectionStart(), selection->GetSelectionEnd());
 			}
 		}
 		{

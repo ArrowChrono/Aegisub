@@ -115,43 +115,41 @@ void TextSelectionController::SetInsertionPoint(long position) {
 
 void TextSelectionController::SetSelection(long start, long end) {
 	changing = true;
-	if (selection_start != start || selection_end != end) {
-		selection_start = start;
-		selection_end = end;
-		if (ctrl_te) {
-			long tmp_start = -1, tmp_end = -1;
+	selection_start = start;
+	selection_end = end;
+	if (ctrl_te) {
+		long tmp_start = -1, tmp_end = -1;
 #ifdef WITH_WXSTC
-			if (use_stc) {
-				tmp_start = start;
-				tmp_end = end;
-			}
-			else {
+		if (use_stc) {
+			tmp_start = start;
+			tmp_end = end;
+		}
+		else {
 #endif
 				// Convert UTF-8 position to wxTextEdit position
-				long last_position = ctrl_te->GetLastPosition();
-				for (long pos = 0; pos < last_position; ++pos) {
-					size_t pos_utf8 = ctrl_te->GetRange(0, pos).utf8_str().length();
-					if (tmp_start == -1 && pos_utf8 >= start) {
-						tmp_start = pos;
-					}
-					if (tmp_end == -1 && pos_utf8 >= end) {
-						tmp_end = pos;
-					}
-					if (tmp_start != -1 && tmp_end != -1) {
-						break;
-					}
+			long last_position = ctrl_te->GetLastPosition();
+			for (long pos = 0; pos < last_position; ++pos) {
+				size_t pos_utf8 = ctrl_te->GetRange(0, pos).utf8_str().length();
+				if (tmp_start == -1 && pos_utf8 >= start) {
+					tmp_start = pos;
 				}
-				if (tmp_start == -1) {
-					tmp_start = last_position;
+				if (tmp_end == -1 && pos_utf8 >= end) {
+					tmp_end = pos;
 				}
-				if (tmp_end == -1) {
-					tmp_end = last_position;
+				if (tmp_start != -1 && tmp_end != -1) {
+					break;
 				}
-#ifdef WITH_WXSTC
 			}
-#endif
-			ctrl_te->SetSelection(tmp_start, tmp_end);
+			if (tmp_start == -1) {
+				tmp_start = last_position;
+			}
+			if (tmp_end == -1) {
+				tmp_end = last_position;
+			}
+#ifdef WITH_WXSTC
 		}
+#endif
+		ctrl_te->SetSelection(tmp_start, tmp_end);
 	}
 	changing = false;
 	AnnounceSelectionChanged();
