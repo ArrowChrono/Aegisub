@@ -185,6 +185,10 @@ BaseGrid::BaseGrid(wxWindow* parent, agi::Context *context)
 
 		OPT_SUB("Subtitle/Grid/Highlight Subtitles in Frame", &BaseGrid::OnHighlightVisibleChange, this),
 		OPT_SUB("Subtitle/Grid/Hide Overrides", [&](agi::OptionValue const&) { Refresh(false); }),
+		OPT_SUB("Subtitle/Grid/Show Folding Column", [this] {
+			SetColumnWidths();
+			Refresh(false);
+		}),
 		OPT_SUB("Subtitle/Character Counter/Show Decimal CPS", &BaseGrid::UpdateStyle, this),
 	});
 
@@ -377,7 +381,7 @@ void BaseGrid::UpdateMaps(bool remeasure_columns, bool preserve_anchor) {
 	}
 
 	UpdateDisplayMap(preserve_anchor);
-	if (remeasure_columns)
+	if (remeasure_columns || measured_fold_column_width != FoldColumnWidth())
 		SetColumnWidths();
 }
 
@@ -394,6 +398,8 @@ int BaseGrid::DisplayRow(int source_row) const {
 }
 
 int BaseGrid::FoldColumnWidth() const {
+	if (!OPT_GET("Subtitle/Grid/Show Folding Column")->GetBool() || context->GetCore().ass->Folding().Groups().empty())
+		return 0;
 	return FromDIP(20);
 }
 
@@ -558,6 +564,7 @@ void BaseGrid::OnPaint(wxPaintEvent &) {
 	w = layout.grid_width;
 	h = layout.client_height;
 	const int nDraw = layout.rows_to_draw;
+	int const fold_column_width = FoldColumnWidth();
 
 	// Find which columns and visible rows need to be repainted
 	std::vector<char> paint_columns;
@@ -579,7 +586,7 @@ void BaseGrid::OnPaint(wxPaintEvent &) {
 			last_dirty_row = std::max(last_dirty_row, mid(0, last, nDraw - 1));
 		}
 
-		int x = FoldColumnWidth();
+		int x = fold_column_width;
 		for (size_t i : agi::util::range(columns.size())) {
 			int width = columns[i]->Width();
 			if (width && updrect.x < x + width && updrect.x + updrect.width > x) {
@@ -617,7 +624,7 @@ void BaseGrid::OnPaint(wxPaintEvent &) {
 	if (has_dirty_rows) {
 		int const top = (first_dirty_row + 1) * lineHeight;
 		int const height = (last_dirty_row - first_dirty_row + 1) * lineHeight + 1;
-		painter->FillRectangle(0, top, FoldColumnWidth() + columns[0]->Width(), height,
+		painter->FillRectangle(0, top, fold_column_width + columns[0]->Width(), height,
 							   from_wx(row_colors.LeftCol.GetColour()));
 	}
 
@@ -648,7 +655,7 @@ void BaseGrid::OnPaint(wxPaintEvent &) {
 		painter->FillRectangle(0, 0, w, lineHeight,
 			from_wx(row_colors.Header.GetColour()));
 
-		int x = FoldColumnWidth();
+		int x = fold_column_width;
 		for (size_t i : agi::util::range(columns.size())) {
 			if (paint_columns[i])
 				paint_text(columns[i]->Header(), x, 0, i);
@@ -659,7 +666,7 @@ void BaseGrid::OnPaint(wxPaintEvent &) {
 	}
 
 	// Paint the rows
-	const int grid_x = FoldColumnWidth() + columns[0]->Width();
+	const int grid_x = fold_column_width + columns[0]->Width();
 
 	int const projected_lines = nDraw;
 	auto projected_window = QueryGridWindow(
@@ -723,9 +730,9 @@ void BaseGrid::OnPaint(wxPaintEvent &) {
 			painter->SetTextColor(text_standard);
 
 		// Draw text
-		int x = FoldColumnWidth();
+		int x = fold_column_width;
 		int y = (i + 1) * lineHeight;
-		if (projected_row) {
+		if (projected_row && fold_column_width) {
 			auto const& folding = context->GetCore().ass->Folding();
 			auto const *group = folding.GroupAt(projected_row->row_index);
 			if (group && group->start == projected_row->row_index) {
@@ -750,7 +757,7 @@ void BaseGrid::OnPaint(wxPaintEvent &) {
 	if (paint_header || has_dirty_rows) {
 		int minH = paint_header ? 0 : (first_dirty_row + 1) * lineHeight;
 		int maxH = has_dirty_rows ? (last_dirty_row + 2) * lineHeight : lineHeight;
-		int x = FoldColumnWidth();
+		int x = fold_column_width;
 		painter->DrawLine(x, minH, x, maxH, grid_line_color);
 		for (auto const& column : columns) {
 			x += column->Width();
@@ -1228,6 +1235,10 @@ void BaseGrid::OnContextMenu(wxContextMenuEvent &evt) {
 	}
 	else {
 		wxMenu menu;
+		auto *fold_column = menu.AppendCheckItem(wxID_ANY, _("Folding column"),
+												 _("Show folding controls when the subtitle file contains fold groups"));
+		fold_column->Check(OPT_GET("Subtitle/Grid/Show Folding Column")->GetBool());
+		menu.Bind(wxEVT_MENU, [](wxCommandEvent& event) { OPT_SET("Subtitle/Grid/Show Folding Column")->SetBool(event.IsChecked()); }, fold_column->GetId());
 		for (size_t i : agi::util::range(columns.size())) {
 			if (columns[i]->CanHide())
 				menu.Append(MENU_SHOW_COL + i, columns[i]->Description(), wxEmptyString, wxITEM_CHECK)->Check(columns[i]->Visible());
@@ -1484,7 +1495,8 @@ void BaseGrid::SetColumnWidths() {
 	}
 
 	text_refresh_rects.clear();
-	int x = FoldColumnWidth();
+	measured_fold_column_width = FoldColumnWidth();
+	int x = measured_fold_column_width;
 
 	if (!width_helper)
 		width_helper = agi::make_unique<WidthHelper>();

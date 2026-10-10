@@ -118,6 +118,7 @@ class BaseGrid final : public wxWindow {
 	std::vector<bool> columns_visible;
 
 	std::vector<wxRect> text_refresh_rects;
+	int measured_fold_column_width = 0;
 
 	bool refresh_on_idle = false;
 	bool full_refresh_on_idle = false;

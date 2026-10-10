@@ -1636,6 +1636,14 @@ msgstr "移除活动行所在的折叠组，但不删除字幕"
 msgid "clear fold group"
 msgstr "清除折叠组"
 
+#: ../src/base_grid.cpp:1238
+msgid "Folding column"
+msgstr "折叠栏"
+
+#: ../src/base_grid.cpp:1239
+msgid "Show folding controls when the subtitle file contains fold groups"
+msgstr "有分组时显示折叠按钮栏"
+
 #: ../src/command/grid.cpp:248 ../src/command/grid.cpp:249
 msgid "Expand All Fold Groups"
 msgstr "展开全部折叠组"

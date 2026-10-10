@@ -200,6 +200,14 @@ msgstr ""
 msgid "toggle subtitle group"
 msgstr ""
 
+#: ../src/base_grid.cpp:1238
+msgid "Folding column"
+msgstr ""
+
+#: ../src/base_grid.cpp:1239
+msgid "Show folding controls when the subtitle file contains fold groups"
+msgstr ""
+
 #: ../src/command/app.cpp:57
 msgid "&About"
 msgstr ""
