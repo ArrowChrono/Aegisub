@@ -325,6 +325,7 @@ if(GTEST_FOUND)
         tests/tests/selection_anchor.cpp
         tests/tests/selection_navigation_history.cpp
         tests/tests/shift_times_input.cpp
+        tests/tests/shift_times_history.cpp
         tests/tests/signals.cpp
         tests/tests/single_choice_layout.cpp
         tests/tests/spline.cpp
