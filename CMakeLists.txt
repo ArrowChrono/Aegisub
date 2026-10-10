@@ -889,6 +889,7 @@ set(AEGISUB_CORE_SOURCES
     src/subtitle_grid_folding.cpp
     src/subtitle_grid_selection_policy.cpp
     src/subtitle_timing_ops.cpp
+    src/timing_processor_plan.cpp
     # Controllers / context / services
     # context.cpp currently also constructs ContextUiState/DialogManager, so it
     # remains with the wx executable until core/UI construction is split.

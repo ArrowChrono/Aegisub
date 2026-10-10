@@ -38,6 +38,7 @@
 #include "libresrc/libresrc.h"
 #include "options.h"
 #include "timing_processor_preferences.h"
+#include "timing_processor_plan.h"
 #include "project.h"
 #include "selection_controller.h"
 #include "utils.h"
@@ -46,9 +47,7 @@
 #include <libaegisub/ass/time.h>
 
 #include <algorithm>
-#include <cstdint>
 #include <functional>
-#include <limits>
 #include <stdexcept>
 #include <vector>
 #include <wx/button.h>
@@ -334,10 +333,14 @@ void DialogTimingProcessor::OnApply(wxCommandEvent&) {
 			_("Invalid timing"), wxOK | wxICON_ERROR | wxCENTER, &d);
 		return;
 	}
+	catch (std::invalid_argument const&) {
+		wxMessageBox(_("Timing settings are invalid or keyframe references are unavailable. No subtitles were changed."), _("Invalid timing"), wxOK | wxICON_ERROR, &d);
+		return;
+	}
 	d.EndModal(0);
 }
 
-std::vector<AssDialogue*> DialogTimingProcessor::SortDialogues() {
+std::vector<AssDialogue *> DialogTimingProcessor::SortDialogues() {
 	std::set<boost::flyweight<std::string>> styles;
 	for (size_t i = 0; i < StyleList->GetCount(); ++i) {
 		if (StyleList->IsChecked(i))
@@ -381,107 +384,43 @@ std::vector<AssDialogue*> DialogTimingProcessor::SortDialogues() {
 	return sorted;
 }
 
-static int get_closest_kf(std::vector<int> const& kf, int frame) {
-	const auto pos = std::upper_bound(kf.begin(), kf.end(), frame);
-	// Return last keyframe if this is after the last one
-	if (pos == end(kf)) return kf.back();
-	// *pos is greater than frame, and *(pos - 1) is less than or equal to frame
-	return (pos == begin(kf) || *pos - frame < frame - *(pos - 1)) ? *pos : *(pos - 1);
-}
-
-template <class Iter, class Field>
-static int safe_time(Iter begin, Iter end, AssDialogue *comp, int64_t initial, Field field, int64_t const& (*cmp)(int64_t const&, int64_t const&)) {
-	// Compare to every previous line (yay for O(n^2)!) to see if it's OK to add lead-in
-	for (; begin != end; ++begin) {
-		// If the line doesn't already collide with this line, extend it only
-		// to the edge of the line
-		if (!comp->CollidesWith(*begin))
-			initial = cmp(initial, static_cast<int>((*begin)->*field));
-	}
-	if (initial < std::numeric_limits<int>::min() || initial > std::numeric_limits<int>::max())
-		throw std::overflow_error("Timing processor lead-in/out exceeds the time range");
-	return static_cast<int>(initial);
-}
-
 void DialogTimingProcessor::Process() {
 	std::vector<AssDialogue *> original = SortDialogues();
 	if (original.empty())
 		return;
 
-	std::vector<AssDialogue> pending;
-	std::vector<AssDialogue *> sorted;
-	pending.reserve(original.size());
-	sorted.reserve(original.size());
-	for (auto line : original) {
-		pending.emplace_back(static_cast<AssDialogueBase const&>(*line));
-		sorted.push_back(&pending.back());
-	}
+	std::vector<aegisub::TimingProcessorLine> ordered_lines;
+	ordered_lines.reserve(original.size());
+	for (auto line : original)
+		ordered_lines.push_back({.start = line->Start, .end = line->End});
 
-	// Add lead-in/out
-	if (hasLeadIn->IsChecked() && leadIn) {
-		for (size_t i = 0; i < sorted.size(); ++i)
-			sorted[i]->Start = safe_time(sorted.rend() - i, sorted.rend(),
-										 sorted[i], static_cast<int64_t>(static_cast<int>(sorted[i]->Start)) - leadIn,
-										 &AssDialogue::End, &std::max<int64_t>);
-	}
-
-	if (hasLeadOut->IsChecked() && leadOut) {
-		for (size_t i = 0; i < sorted.size(); ++i)
-			sorted[i]->End = safe_time(sorted.begin() + i + 1, sorted.end(),
-									   sorted[i], static_cast<int64_t>(static_cast<int>(sorted[i]->End)) + leadOut,
-									   &AssDialogue::Start, &std::min<int64_t>);
-	}
-
-	// Make adjacent
-	if (adjsEnable->IsChecked()) {
-		double bias = adjacentBias->GetValue() / 100.0;
-
-		for (size_t i = 1; i < sorted.size(); ++i) {
-			AssDialogue *prev = sorted[i - 1];
-			AssDialogue *cur = sorted[i];
-
-			// Raw millisecond values are used in this step instead of the typical centisecond.
-			// In this step, we need to distinguish between gap and overlap, as they have different thresholds.
-			// A small gap / overlap less than 1 centisecond may not be distinguishable using rounded centisecond values.
-			int dist = cur->Start.GetMillisecond() - prev->End.GetMillisecond();
-			if ((dist < 0 && -dist <= adjOverlap) || (dist > 0 && dist <= adjGap)) {
-				int setPos = prev->End.GetMillisecond() + int(dist * bias + 0.5);
-				cur->Start = setPos;
-				prev->End = setPos;
-			}
-		}
-	}
-
-	// Keyframe snapping
-	if (keysEnable->IsChecked()) {
+	aegisub::TimingProcessorParameters parameters{
+		.lead_in_ms = leadIn,
+		.lead_out_ms = leadOut,
+		.adjacent_gap_ms = adjGap,
+		.adjacent_overlap_ms = adjOverlap,
+		.adjacent_bias_percent = adjacentBias->GetValue(),
+		.key_start_before_ms = beforeStart,
+		.key_start_after_ms = afterStart,
+		.key_end_before_ms = beforeEnd,
+		.key_end_after_ms = afterEnd,
+		.lead_in_enabled = hasLeadIn->IsChecked(),
+		.lead_out_enabled = hasLeadOut->IsChecked(),
+		.adjacent_enabled = adjsEnable->IsChecked(),
+		.keyframes_enabled = keysEnable->IsChecked()};
+	std::vector<int> keyframes;
+	agi::vfr::Framerate timecodes;
+	if (parameters.keyframes_enabled) {
 		auto core = c->GetCore();
-		std::vector<int> kf = core.project->Keyframes();
-		auto fps = core.project->Timecodes();
+		keyframes = core.project->Keyframes();
+		timecodes = core.project->Timecodes();
 		if (auto provider = core.project->VideoProvider())
-			kf.push_back(provider->GetFrameCount() - 1);
-
-		for (AssDialogue *cur : sorted) {
-			// Get start/end frames
-			int startF = fps.FrameAtTime(cur->Start, agi::vfr::START);
-			int endF = fps.FrameAtTime(cur->End, agi::vfr::END);
-
-			// Get closest for start
-			int closest = get_closest_kf(kf, startF);
-			int time = fps.TimeAtFrame(closest, agi::vfr::START);
-			if ((closest > startF && time - cur->Start <= beforeStart) || (closest < startF && cur->Start - time <= afterStart))
-				cur->Start = time;
-
-			// Get closest for end
-			closest = get_closest_kf(kf, endF) - 1;
-			time = fps.TimeAtFrame(closest, agi::vfr::END);
-			if ((closest > endF && time - cur->End <= beforeEnd) || (closest < endF && cur->End - time <= afterEnd))
-				cur->End = time;
-		}
+			keyframes.push_back(provider->GetFrameCount() - 1);
 	}
-
+	auto pending = aegisub::PrepareTimingProcessor(ordered_lines, parameters, timecodes, keyframes);
 	for (size_t i = 0; i < original.size(); ++i) {
-		original[i]->Start = sorted[i]->Start;
-		original[i]->End = sorted[i]->End;
+		original[i]->Start = pending[i].start;
+		original[i]->End = pending[i].end;
 	}
 	c->GetCore().ass->Commit(from_wx(_("timing processor")), AssFile::COMMIT_DIAG_TIME);
 }
