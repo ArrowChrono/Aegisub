@@ -1265,7 +1265,20 @@ int DenormalizePos(std::string const& text, int pos) {
 }
 
 size_t CharacterPos(std::string const& text, int pos) {
-	auto clamped = std::max(0, std::min<int>(pos, static_cast<int>(text.size())));
+	auto clamped = static_cast<size_t>(std::clamp(pos, 0, static_cast<int>(text.size())));
+	for (size_t start = 0; start < clamped;) {
+		auto const open = text.find('{', start);
+		if (open >= clamped)
+			break;
+		auto const close = text.find('}', open);
+		if (close == std::string::npos)
+			break;
+		if (clamped <= close) {
+			clamped = open;
+			break;
+		}
+		start = close + 1;
+	}
 	return agi::CharacterCount(text.begin(), text.begin() + clamped, agi::IGNORE_BLOCKS);
 }
 

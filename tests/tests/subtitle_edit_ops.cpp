@@ -8,6 +8,36 @@
 #include <utility>
 #include <vector>
 
+TEST(subtitle_edit_ops, character_position_ignores_complete_blocks_at_interior_carets) {
+	using aegisub::subtitle_edit_ops::CharacterPos;
+	for (int pos = 3; pos <= 13; ++pos) {
+		SCOPED_TRACE(pos);
+		EXPECT_EQ(3u, CharacterPos("ABC{\\b1}{\\i1}DEF", pos));
+	}
+	EXPECT_EQ(4u, CharacterPos("ABC{\\b1}{\\i1}DEF", 14));
+	EXPECT_EQ(2u, CharacterPos("\xe4\xb8\xad\xf0\x9f\x98\x80{\\b1}{\\i1}\xc3\xa9Z", 15));
+	EXPECT_EQ(1u, CharacterPos("\xe4\xb8\xad{\\b1}{\\i1}\xf0\x9f\x98\x80\xc3\xa9", 11));
+	EXPECT_EQ(1u, CharacterPos("A{x{y}B", 5));
+}
+
+TEST(subtitle_edit_ops, character_position_preserves_graphemes_literals_and_clamping) {
+	using aegisub::subtitle_edit_ops::CharacterPos;
+	EXPECT_EQ(1u, CharacterPos("e\xcc\x81{\\b1}Z", 6));
+	EXPECT_EQ(2u, CharacterPos("e{\\b1}\xcc\x81", 8));
+	EXPECT_EQ(1u, CharacterPos("\\{\\b1}Z", 4));
+	EXPECT_EQ(5u, CharacterPos("ABC{\\b1", 5));
+	EXPECT_EQ(7u, CharacterPos("ABC{\\b1", 100));
+	EXPECT_EQ(0u, CharacterPos("ABC{\\b1}", -1));
+	EXPECT_EQ(0u, CharacterPos("", 100));
+	EXPECT_EQ(6u, CharacterPos("ABC{\\b1}{\\i1}DEF", 100));
+
+	AssDialogue shorter;
+	shorter.Text = "{\\i1}X";
+	auto const mapped = aegisub::subtitle_edit_ops::RemapPosForLine(&shorter, 2);
+	EXPECT_EQ(1, mapped.plain);
+	EXPECT_EQ(6, mapped.raw);
+}
+
 namespace {
 
 struct edit_fixture {
