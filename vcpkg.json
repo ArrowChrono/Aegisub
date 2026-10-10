@@ -8,6 +8,7 @@
     "boost-flyweight",
     "boost-gil",
     "boost-interprocess",
+    "boost-multiprecision",
     {
       "name": "boost-locale",
       "features": [

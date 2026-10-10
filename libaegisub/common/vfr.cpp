@@ -25,17 +25,26 @@
 
 #include <algorithm>
 #include <boost/interprocess/streams/bufferstream.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
 #include <cmath>
 #include <functional>
 #include <iterator>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <utility>
 
 namespace {
 static const int64_t default_denominator = 1000000000;
 using agi::line_iterator;
 using namespace agi::vfr;
+using boost::multiprecision::int256_t;
+
+int checked_int(int256_t const& value) {
+	if (value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max())
+		throw std::overflow_error("Frame/time conversion is outside the supported range");
+	return value.convert_to<int>();
+}
 
 /// @brief Verify that timecodes monotonically increase
 /// @param timecodes List of timecodes to check
@@ -285,6 +294,51 @@ int Framerate::TimeAtFrame(int frame, Time type) const {
 	}
 
 	return timecodes[frame];
+}
+
+int Framerate::CheckedFrameAtTime(int64_t ms, Time type) const {
+	auto exact = [this](int256_t const& time) -> int256_t {
+		if (time < 0)
+			return (time * numerator / denominator - 999) / 1000;
+		if (time > timecodes.back()) {
+			int256_t const unit = int256_t(1000) * denominator;
+			return ((time + 1) * numerator - last - numerator / 2 + (unit - 1)) / unit + timecodes.size() - 2;
+		}
+		auto const it = std::ranges::lower_bound(timecodes.rbegin(), timecodes.rend(), time.convert_to<int>(), std::greater<>());
+		return int256_t(std::distance(it, timecodes.rend())) - 1;
+	};
+	int256_t const time = ms;
+	if (type == START)
+		return checked_int(exact(time - 1) + 1);
+	if (type == END)
+		return checked_int(exact(time - 1));
+	return checked_int(exact(time));
+}
+
+int Framerate::CheckedTimeAtFrame(int64_t frame, Time type) const {
+	if (numerator == 0)
+		return 0;
+	auto exact = [this](int256_t const& frame) -> int256_t {
+		if (frame < 0)
+			return frame * denominator * 1000 / numerator;
+		if (frame >= timecodes.size()) {
+			int256_t const frames_past_end = frame - timecodes.size() + 1;
+			return (frames_past_end * 1000 * denominator + last + numerator / 2) / numerator;
+		}
+		return timecodes[frame.convert_to<size_t>()];
+	};
+	int256_t const current = frame;
+	if (type == START) {
+		int256_t const prev = exact(current - 1);
+		int256_t const cur = exact(current);
+		return checked_int(prev + (cur - prev + 1) / 2);
+	}
+	if (type == END) {
+		int256_t const cur = exact(current);
+		int256_t const next = exact(current + 1);
+		return checked_int(cur + (next - cur + 1) / 2);
+	}
+	return checked_int(exact(current));
 }
 
 void Framerate::SmpteAtFrame(int frame, int *h, int *m, int *s, int *f) const {

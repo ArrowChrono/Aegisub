@@ -150,6 +150,9 @@ public:
 	/// results for all frame numbers
 	int TimeAtFrame(int frame, Time type = EXACT) const;
 
+	[[nodiscard]] int CheckedFrameAtTime(int64_t ms, Time type = EXACT) const;
+	[[nodiscard]] int CheckedTimeAtFrame(int64_t frame, Time type = EXACT) const;
+
 	/// @brief Get the components of the SMPTE timecode for the given time
 	/// @param[out] h Hours component
 	/// @param[out] m Minutes component

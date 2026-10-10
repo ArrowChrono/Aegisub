@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <stdexcept>
 
 #include <main.h>
 #include <util.h>
@@ -64,6 +65,72 @@ TEST(lagi_vfr, fps_description_rational_vs_double) {
 TEST(lagi_vfr, constructors_bad_cfr) {
 	EXPECT_THROW(Framerate(-1.), InvalidFramerate);
 	EXPECT_THROW(Framerate(1000.1), InvalidFramerate);
+}
+
+TEST(lagi_vfr, checked_conversions_preserve_rounding_and_v1_phase) {
+	for (auto const& fps : {Framerate(25.), Framerate(30000, 1001),
+							Framerate({0, 40, 100, 160, 240}), Framerate({0, 0, 1}),
+							Framerate("data/vfr/in/v1_assume_int.txt")}) {
+		for (auto mode : {EXACT, START, END}) {
+			for (int frame : {-100, -1, 0, 1, 2, 10, 11, 12, 10000})
+				EXPECT_EQ(fps.TimeAtFrame(frame, mode), fps.CheckedTimeAtFrame(frame, mode));
+			for (int ms : {-100001, -1000, -1, 0, 1, 39, 40, 41, 100, 240, 367, 407, 100000})
+				EXPECT_EQ(fps.FrameAtTime(ms, mode), fps.CheckedFrameAtTime(ms, mode));
+		}
+	}
+	auto const v1 = Framerate("data/vfr/in/v1_assume_int.txt");
+	EXPECT_EQ(367, v1.CheckedTimeAtFrame(11));
+	EXPECT_EQ(407, v1.CheckedTimeAtFrame(12));
+	EXPECT_EQ(387, v1.CheckedTimeAtFrame(12, START));
+	EXPECT_EQ(427, v1.CheckedTimeAtFrame(12, END));
+	EXPECT_EQ(-20, v1.CheckedTimeAtFrame(0, START));
+}
+
+TEST(lagi_vfr, checked_conversions_allow_large_intermediate_products) {
+	auto const fps = Framerate(25.);
+	EXPECT_EQ(400000000, fps.CheckedTimeAtFrame(10000000));
+	EXPECT_EQ(-400000000, fps.CheckedTimeAtFrame(-10000000));
+	EXPECT_EQ(10000000, fps.CheckedFrameAtTime(400000000));
+	EXPECT_EQ(-10000000, fps.CheckedFrameAtTime(-400000000));
+	EXPECT_EQ(53687091, fps.CheckedFrameAtTime(INT_MAX));
+	EXPECT_EQ(-53687092, fps.CheckedFrameAtTime(INT_MIN));
+	EXPECT_EQ(2147483640, fps.CheckedTimeAtFrame(53687091));
+	EXPECT_EQ(2147483620, fps.CheckedTimeAtFrame(53687091, START));
+	EXPECT_THROW(static_cast<void>(fps.CheckedTimeAtFrame(53687091, END)), std::overflow_error);
+	EXPECT_THROW(static_cast<void>(fps.CheckedTimeAtFrame(-53687092)), std::overflow_error);
+}
+
+TEST(lagi_vfr, checked_midpoints_only_require_final_result_to_fit) {
+	auto const fps = Framerate(1000.);
+	EXPECT_EQ(INT_MIN, fps.CheckedFrameAtTime(INT_MIN, START));
+	EXPECT_THROW(static_cast<void>(fps.CheckedFrameAtTime(INT_MIN, END)), std::overflow_error);
+	EXPECT_EQ(INT_MAX, fps.CheckedFrameAtTime(INT_MAX));
+	EXPECT_EQ(INT_MIN, fps.CheckedTimeAtFrame(INT_MIN, START));
+	EXPECT_EQ(INT_MIN, fps.CheckedTimeAtFrame(int64_t{INT_MIN} - 1, END));
+	EXPECT_EQ(INT_MAX, fps.CheckedTimeAtFrame(INT_MAX, START));
+	EXPECT_THROW(static_cast<void>(fps.CheckedTimeAtFrame(INT_MAX, END)), std::overflow_error);
+	EXPECT_THROW(static_cast<void>(fps.CheckedFrameAtTime(int64_t{INT_MAX} + 1)), std::overflow_error);
+	EXPECT_THROW(static_cast<void>(fps.CheckedTimeAtFrame(int64_t{INT_MAX} + 1)), std::overflow_error);
+}
+
+TEST(lagi_vfr, checked_conversions_cover_full_int64_inputs_and_rational_rates) {
+	auto const max = std::numeric_limits<int64_t>::max();
+	auto const min = std::numeric_limits<int64_t>::min();
+	auto const fps = Framerate(max, max);
+	EXPECT_EQ(1000, fps.CheckedTimeAtFrame(1));
+	EXPECT_EQ(-1000, fps.CheckedTimeAtFrame(-1));
+	for (auto mode : {EXACT, START, END}) {
+		EXPECT_THROW(static_cast<void>(fps.CheckedTimeAtFrame(max, mode)), std::overflow_error);
+		EXPECT_THROW(static_cast<void>(fps.CheckedTimeAtFrame(min, mode)), std::overflow_error);
+		EXPECT_THROW(static_cast<void>(fps.CheckedFrameAtTime(max, mode)), std::overflow_error);
+		EXPECT_THROW(static_cast<void>(fps.CheckedFrameAtTime(min, mode)), std::overflow_error);
+		EXPECT_EQ(0, Framerate().CheckedTimeAtFrame(min, mode));
+		EXPECT_EQ(0, Framerate().CheckedTimeAtFrame(max, mode));
+	}
+	auto const slow = Framerate(1, max);
+	EXPECT_EQ(0, slow.CheckedFrameAtTime(max));
+	EXPECT_EQ(-1, slow.CheckedFrameAtTime(min));
+	EXPECT_THROW(static_cast<void>(slow.CheckedTimeAtFrame(1)), std::overflow_error);
 }
 
 TEST(lagi_vfr, constructors_bad_timecodes) {
