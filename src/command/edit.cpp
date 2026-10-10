@@ -419,324 +419,13 @@ AssDialogue *paste_over(wxWindow *parent, std::vector<bool>& pasteOverOptions, A
 	return old_line;
 }
 
-struct parsed_line {
-	AssDialogue *line;
-	std::vector<std::unique_ptr<AssDialogueBlock>> blocks;
-	/// True once set_tag has rewritten line->Text. Callers chain set_tag calls by
-	/// advancing the raw position with the returned shift, but that shift only
-	/// covers the tag just written: UpdateText re-serializes every block, so any
-	/// block that does not round-trip byte-identically (a blank between tags is
-	/// dropped, for one) moves the text by more than the shift. Raw positions are
-	/// therefore only exact before the first rewrite.
-	bool text_rewritten = false;
-
-	parsed_line(AssDialogue *line) : line(line), blocks(line->ParseTags()) { }
-	parsed_line(parsed_line&& r) = default;
-
-	/// ParseTags() block index in effect at a raw dialogue-text caret position.
-	/// This uses the raw position so a caret inside an override reads that block,
-	/// while a caret immediately before a following block remains left-biased.
-	int block_for_read(int raw_pos) const {
-		return FindDialogueBlockForRead(blocks, raw_pos);
-	}
-
-	/// Resolve the style a `\r` tag targets: bare `\r` (or empty/unresolved
-	/// name) resets to `event_style`; `\r Name` is resolved through
-	/// `resolve_reset`, falling back to `event_style` when it returns null.
-	/// This is the single source of truth for `\r` target resolution so the two
-	/// scanners below cannot drift apart.
-	static AssStyle const* reset_target(
-		AssOverrideTag const& tag,
-		AssStyle const& event_style,
-		std::function<AssStyle const*(std::string_view)> const& resolve_reset)
-	{
-		std::string name;
-		if (!tag.Params.empty() && !tag.Params.front().omitted &&
-		    !tag.Params.front().empty)
-			name = tag.Params.front().Get<std::string>();
-		if (name.empty() || !resolve_reset)
-			return &event_style;
-		if (auto const* rs = resolve_reset(name))
-			return rs;
-		return &event_style;
-	}
-
-	/// Resolve the base style in effect at `blockn` by scanning backward for
-	/// the nearest `\r`. `event_style` must outlive the returned pointer.
-	AssStyle const* base_style_at(
-		int blockn,
-		AssStyle const& event_style,
-		std::function<AssStyle const*(std::string_view)> const& resolve_reset) const
-	{
-		for (int i = blockn; i >= 0; --i) {
-			auto* ovr = dynamic_cast<AssDialogueBlockOverride*>(blocks[i].get());
-			if (!ovr) continue;
-			for (auto it = ovr->Tags.rbegin(); it != ovr->Tags.rend(); ++it) {
-				if (it->Name == "\\r")
-					return reset_target(*it, event_style, resolve_reset);
-			}
-		}
-		return &event_style;
-	}
-
-	/// Result of a reset-aware override lookup. `tag` is the nearest matching
-	/// override not shadowed by a `\r` between it and the cursor, or null.
-	/// `base` is the fallback style for an absent or empty/invalid override.
-	/// When `tag` is non-null `base` is always the event style: an override
-	/// found before any `\r` means no reset is in effect, and an empty/invalid
-	/// override value falls back to the event baseline (VSFilter semantics —
-	/// `{\rAlt\c}` with an empty `\c` uses the event style, not Alt). `base`
-	/// only reflects a `\r` target when no unshadowed target tag was found.
-	/// `event_style` must outlive the returned pointer.
-	struct ResetAwareLookup {
-		AssOverrideTag const* tag = nullptr;
-		AssStyle const* base = nullptr;
-	};
-
-	/// Scan backward from `blockn` for `tag_name`/`alt`, honouring `\r` reset
-	/// semantics: a target tag found before any `\r` is authoritative and
-	/// returned immediately (with base == event style); a `\r` found before any
-	/// target discards earlier overrides and establishes the fallback style via
-	/// `base`. Use this instead of plain tag lookup when a value must reflect
-	/// `\r` resets (font dialog preview, colour/strikethrough current-state
-	/// reads). `event_style` must outlive the returned pointer.
-	ResetAwareLookup find_tag_with_reset(
-		int blockn,
-		std::string const& tag_name,
-		AssStyle const& event_style,
-		std::function<AssStyle const*(std::string_view)> const& resolve_reset,
-		std::string const& alt = "") const
-	{
-		for (int i = blockn; i >= 0; --i) {
-			auto* ovr = dynamic_cast<AssDialogueBlockOverride*>(blocks[i].get());
-			if (!ovr) continue;
-			for (auto it = ovr->Tags.rbegin(); it != ovr->Tags.rend(); ++it) {
-				if (it->Name == tag_name || it->Name == alt)
-					return { &*it, &event_style };
-				if (it->Name == "\\r")
-					return { nullptr, reset_target(*it, event_style, resolve_reset) };
-			}
-		}
-		return { nullptr, &event_style };
-	}
-
-	/// Resolve the effective scalar value of `tag_name`/`alt` at `blockn`,
-	/// honouring `\r` reset semantics: the override's value if a matching tag is
-	/// found before any `\r`, otherwise `field` of the base style in effect at
-	/// the cursor. `event_style` must outlive the call. Colours need separate
-	/// tag+alpha lookups (ParseOverrideColor clobbers alpha), so callers must use
-	/// find_tag_with_reset directly for colours.
-	template<typename T>
-	T get_value_with_reset(
-		int blockn,
-		T AssStyle::*field,
-		std::string const& tag_name,
-		AssStyle const& event_style,
-		std::function<AssStyle const*(std::string_view)> const& resolve_reset,
-		std::string const& alt = "") const
-	{
-		auto lk = find_tag_with_reset(blockn, tag_name, event_style, resolve_reset, alt);
-		return lk.tag ? lk.tag->Params[0].template Get<T>(lk.base->*field) : lk.base->*field;
-	}
-
-	int block_at_pos(int pos) const {
-		auto const& text = line->Text.get();
-		int n = 0;
-		int max = text.size() - 1;
-		bool in_block = false;
-
-		for (int i = 0; i <= max; ++i) {
-			if (text[i] == '{') {
-				if (!in_block && i > 0 && pos >= 0)
-					++n;
-				in_block = true;
-			}
-			else if (text[i] == '}' && in_block) {
-				in_block = false;
-				if (pos > 0 && (i + 1 == max || text[i + 1] != '{'))
-					n++;
-			}
-			else if (!in_block) {
-				if (--pos == 0)
-					return n + (i < max && text[i + 1] == '{');
-			}
-		}
-
-		return n - in_block;
-	}
-
-	/// Write `tag`+`value` at the block the caret resolves to, replacing any
-	/// same-named tag there. Returns the line's length delta. When
-	/// `written_block` is non-null it receives the block index the tag was
-	/// written into, valid in `blocks` immediately after the call (the parse
-	/// is refreshed when a new override block had to be inserted), so callers
-	/// can locate the tag in the final text without re-resolving a now-stale
-	/// caret position.
-	int set_tag(
-		std::string const& tag,
-		std::string const& value,
-		int norm_pos,
-		int orig_pos,
-		int *written_block = nullptr) {
-		int blockn = block_at_pos(norm_pos);
-
-		// block_at_pos is plain-text-count based, so a caret inside an
-		// override block that directly follows another override block (no
-		// plain text between them) resolves to the earlier block. The raw
-		// position is exact: when it sits inside an override block, that
-		// block is the one the read path (block_for_read) and the user mean,
-		// so prefer it and keep reads and writes on the same block.
-		//
-		// Only while the raw position is still exact, though. Callers that
-		// chain set_tag calls pass orig_pos + shift, which drifts once
-		// UpdateText has re-serialized the line (see text_rewritten), and a
-		// drifted position resolves to a neighbouring override block just as
-		// readily as to the right one. norm_pos is immune to that drift
-		// because re-serialization only changes override text, so fall back
-		// to block_at_pos alone after the first rewrite.
-		if (orig_pos >= 0 && !text_rewritten) {
-			int const raw_blockn = block_for_read(orig_pos);
-			auto valid_override = [&](int index) {
-				return index >= 0 && index < static_cast<int>(blocks.size()) && blocks[index]->GetType() == AssBlockType::OVERRIDE;
-			};
-			if (raw_blockn != blockn && valid_override(raw_blockn) && valid_override(blockn))
-				blockn = raw_blockn;
-		}
-
-		AssDialogueBlockPlain *plain = nullptr;
-		AssDialogueBlockOverride *ovr = nullptr;
-		while (blockn >= 0 && !plain && !ovr) {
-			AssDialogueBlock *block = blocks[blockn].get();
-			switch (block->GetType()) {
-			case AssBlockType::PLAIN:
-				plain = static_cast<AssDialogueBlockPlain *>(block);
-				break;
-			case AssBlockType::DRAWING:
-				--blockn;
-				break;
-			case AssBlockType::COMMENT:
-				--blockn;
-				orig_pos = line->Text.get().rfind('{', orig_pos);
-				break;
-			case AssBlockType::OVERRIDE:
-				ovr = static_cast<AssDialogueBlockOverride*>(block);
-				break;
-			}
-		}
-
-		// If we didn't hit a suitable block for inserting the override just put
-		// it at the beginning of the line
-		if (blockn < 0)
-			orig_pos = 0;
-
-		std::string insert(tag + value);
-		int shift = insert.size();
-		if (plain || blockn < 0) {
-			std::string new_text = line->Text.get();
-			std::string wrapped_insert;
-			wrapped_insert.push_back('{');
-			wrapped_insert.append(insert);
-			wrapped_insert.push_back('}');
-			agi::util::strings::replace_range_inplace(new_text, orig_pos, orig_pos, wrapped_insert);
-			line->Text = std::move(new_text);
-			shift += 2;
-			blocks = line->ParseTags();
-			text_rewritten = true;
-			if (written_block) {
-				// The inserted '{' sits at orig_pos, so the byte after it is
-				// inside the new override block.
-				*written_block = FindDialogueBlockForRead(blocks, orig_pos + 1);
-			}
-		}
-		else {
-			// We've reached here, ovr cannot be null
-			std::string alt;
-			if (tag == "\\c") alt = "\\1c";
-			// Remove old of same
-			bool found = false;
-			for (size_t i = 0; i < ovr->Tags.size(); i++) {
-				std::string const& name = ovr->Tags[i].Name;
-				if (tag == name || alt == name) {
-					shift -= ((std::string)ovr->Tags[i]).size();
-					if (found) {
-						ovr->Tags.erase(ovr->Tags.begin() + i);
-						i--;
-					}
-					else {
-						ovr->Tags[i].Params[0].Set(value);
-						found = true;
-					}
-				}
-			}
-			if (!found)
-				ovr->AddTag(insert);
-
-			line->UpdateText(blocks);
-			text_rewritten = true;
-			if (written_block)
-				*written_block = blockn;
-		}
-
-		return shift;
-	}
-};
-
-int normalize_pos(std::string const& text, int pos) {
-	int plain_len = 0;
-	bool in_block = false;
-
-	for (int i = 0, max = text.size() - 1; i < pos && i <= max; ++i) {
-		if (text[i] == '{')
-			in_block = true;
-		if (!in_block)
-			++plain_len;
-		if (text[i] == '}' && in_block)
-			in_block = false;
-	}
-
-	return plain_len;
-}
-
-int denormalize_pos(std::string const& text, int pos) {
-	if (pos <= 0)
-		return 0;
-
-	int plain_len = 0;
-	bool in_block = false;
-
-	for (int i = 0, max = text.size(); i < max; ++i) {
-		if (text[i] == '{') {
-			in_block = true;
-			continue;
-		}
-		if (text[i] == '}' && in_block) {
-			in_block = false;
-			continue;
-		}
-		if (!in_block) {
-			if (plain_len >= pos)
-				return i;
-			++plain_len;
-		}
-	}
-
-	return text.size();
-}
-
-size_t character_pos(std::string const& text, int pos) {
-	auto clamped = std::max(0, std::min<int>(pos, static_cast<int>(text.size())));
-	return agi::CharacterCount(text.begin(), text.begin() + clamped, agi::IGNORE_BLOCKS);
-}
-
-struct selection_pos {
-	int raw;
-	int plain;
-};
-
-selection_pos remap_pos_for_line(AssDialogue *line, size_t chars) {
-	int plain = static_cast<int>(agi::IndexOfCharacter(line->GetStrippedText(), chars));
-	return { denormalize_pos(line->Text, plain), plain };
-}
+// The tag-writing and position helpers moved to subtitle_edit_ops so both hosts
+// edit overrides through one implementation of reset shadowing and targeting.
+using aegisub::subtitle_edit_ops::CharacterPos;
+using aegisub::subtitle_edit_ops::NormalizePos;
+using aegisub::subtitle_edit_ops::ParsedLine;
+using aegisub::subtitle_edit_ops::RemapPosForLine;
+using aegisub::subtitle_edit_ops::ToggleStyleTag;
 
 template<typename Func>
 void update_lines(const agi::Context *c, std::string const& undo_msg, Func&& f) {
@@ -744,10 +433,10 @@ void update_lines(const agi::Context *c, std::string const& undo_msg, Func&& f) 
 	const auto active_line = core.selectionController->GetActiveLine();
 	const int sel_start = core.textSelectionController->GetSelectionStart();
 	const int sel_end = core.textSelectionController->GetSelectionEnd();
-	const int norm_sel_start = normalize_pos(active_line->Text, sel_start);
-	const int norm_sel_end = normalize_pos(active_line->Text, sel_end);
-	const size_t sel_start_chars = character_pos(active_line->Text, sel_start);
-	const size_t sel_end_chars = character_pos(active_line->Text, sel_end);
+	const int norm_sel_start = NormalizePos(active_line->Text, sel_start);
+	const int norm_sel_end = NormalizePos(active_line->Text, sel_end);
+	const size_t sel_start_chars = CharacterPos(active_line->Text, sel_start);
+	const size_t sel_end_chars = CharacterPos(active_line->Text, sel_end);
 	int active_sel_shift = 0;
 
 	for (const auto line : core.selectionController->GetSelectedSet()) {
@@ -756,8 +445,8 @@ void update_lines(const agi::Context *c, std::string const& undo_msg, Func&& f) 
 		int line_norm_sel_start = norm_sel_start;
 		int line_norm_sel_end = norm_sel_end;
 		if (line != active_line) {
-			auto start = remap_pos_for_line(line, sel_start_chars);
-			auto end = remap_pos_for_line(line, sel_end_chars);
+			auto start = RemapPosForLine(line, sel_start_chars);
+			auto end = RemapPosForLine(line, sel_end_chars);
 			line_sel_start = start.raw;
 			line_sel_end = end.raw;
 			line_norm_sel_start = start.plain;
@@ -778,25 +467,14 @@ void update_lines(const agi::Context *c, std::string const& undo_msg, Func&& f) 
 void toggle_override_tag(const agi::Context *c, bool (AssStyle::*field), const char *tag, std::string const& undo_msg) {
 	auto core = c->GetCore();
 	AssStyle const fallback_style;
-	auto resolve_reset = [&core](std::string_view name) -> AssStyle const* {
+	aegisub::subtitle_edit_ops::ResetStyleResolver const resolve_reset = [&core](std::string_view name) -> AssStyle const* {
 		return aegisub::ass_style_resolution::ResolveResetStyle(*core.ass, std::string(name));
 	};
+	std::string const tag_name(tag);
 	update_lines(c, undo_msg, [&](AssDialogue *line, int sel_start, int sel_end, int norm_sel_start, int norm_sel_end) {
 		AssStyle const* const style = core.ass->GetStyle(line->Style);
 		AssStyle const& event_style = style ? *style : fallback_style;
-
-		parsed_line parsed(line);
-		// Read from the same raw caret location that set_tag will modify.
-		int blockn = parsed.block_for_read(sel_start);
-
-		// Honour \r reset semantics so toggling reads the state that actually
-		// renders at the cursor, not a value shadowed by a preceding \r.
-		bool state = parsed.get_value_with_reset(blockn, field, tag, event_style, resolve_reset);
-
-		int shift = parsed.set_tag(tag, state ? "0" : "1", norm_sel_start, sel_start);
-		if (sel_start != sel_end)
-			parsed.set_tag(tag, state ? "1" : "0", norm_sel_end, sel_end + shift);
-		return shift;
+		return ToggleStyleTag(*line, event_style, resolve_reset, field, tag_name, sel_start, sel_end, norm_sel_start, norm_sel_end);
 	});
 }
 
@@ -813,7 +491,7 @@ struct ColorEditTarget {
 struct PreparedColorEdit {
 	struct LineState {
 		agi::Color color; ///< Effective colour at this line's caret, incl. alpha
-		parsed_line parsed;
+		ParsedLine parsed;
 		int sel_start;      ///< Raw caret position in this line's text
 		int norm_sel_start; ///< Plain-text caret position in this line's text
 	};
@@ -833,8 +511,8 @@ PreparedColorEdit PrepareColorEdit(agi::Context *c, ColorEditTarget target) {
 	const auto active_line = core.selectionController->GetActiveLine();
 	const int sel_start = core.textSelectionController->GetSelectionStart();
 	const int sel_end = core.textSelectionController->GetSelectionEnd();
-	const int norm_sel_start = normalize_pos(active_line->Text, sel_start);
-	const size_t sel_start_chars = character_pos(active_line->Text, sel_start);
+	const int norm_sel_start = NormalizePos(active_line->Text, sel_start);
+	const size_t sel_start_chars = CharacterPos(active_line->Text, sel_start);
 
 	PreparedColorEdit edit;
 	edit.target = target;
@@ -851,7 +529,7 @@ PreparedColorEdit PrepareColorEdit(agi::Context *c, ColorEditTarget target) {
 		int line_sel_start = sel_start;
 		int line_norm_sel_start = norm_sel_start;
 		if (line != active_line) {
-			auto start = remap_pos_for_line(line, sel_start_chars);
+			auto start = RemapPosForLine(line, sel_start_chars);
 			line_sel_start = start.raw;
 			line_norm_sel_start = start.plain;
 		}
@@ -860,7 +538,7 @@ PreparedColorEdit PrepareColorEdit(agi::Context *c, ColorEditTarget target) {
 		AssStyle const& event_style = style ? *style : fallback_style;
 		agi::Color color;
 
-		parsed_line parsed(line);
+		ParsedLine parsed(line);
 		// Read from the same raw caret location that set_tag will modify.
 		int blockn = parsed.block_for_read(line_sel_start);
 
@@ -1310,16 +988,16 @@ struct edit_font final : public Command {
 		auto core = c->GetCore();
 		auto ui = c->GetUI();
 		auto font_model = BuildFontFamilyCatalogUiModel();
-		const parsed_line active(core.selectionController->GetActiveLine());
+		const ParsedLine active(core.selectionController->GetActiveLine());
 		const int active_insertion_point = core.textSelectionController->GetInsertionPoint();
-		const size_t insertion_chars = character_pos(active.line->Text, core.textSelectionController->GetInsertionPoint());
+		const size_t insertion_chars = CharacterPos(active.line->Text, core.textSelectionController->GetInsertionPoint());
 
 		struct line_font_state {
 			FontFaceDialogSelection displayed;
 			bool valid = true;
 		};
 
-		auto font_for_line = [&](parsed_line const& line, int insertion_point) -> line_font_state {
+		auto font_for_line = [&](ParsedLine const& line, int insertion_point) -> line_font_state {
 			// Use the raw caret position so a caret inside an override reads the
 			// same block that set_tag will modify.
 			const int blockn = line.block_for_read(insertion_point);
@@ -1387,8 +1065,8 @@ struct edit_font final : public Command {
 			auto const *active_line = core.selectionController->GetActiveLine();
 			const int sel_start = core.textSelectionController->GetSelectionStart();
 			const int sel_end = core.textSelectionController->GetSelectionEnd();
-			const size_t sel_start_chars = character_pos(active_line->Text, sel_start);
-			const size_t sel_end_chars = character_pos(active_line->Text, sel_end);
+			const size_t sel_start_chars = CharacterPos(active_line->Text, sel_start);
+			const size_t sel_end_chars = CharacterPos(active_line->Text, sel_end);
 
 			auto const& selected_set = core.selectionController->GetSelectedSet();
 			preview_lines.reserve(selected_set.size());
@@ -1400,18 +1078,18 @@ struct edit_font final : public Command {
 				if (line == active_line) {
 					snapshot.sel_start = sel_start;
 					snapshot.sel_end = sel_end;
-					snapshot.norm_sel_start = normalize_pos(line->Text, sel_start);
-					snapshot.norm_sel_end = normalize_pos(line->Text, sel_end);
+					snapshot.norm_sel_start = NormalizePos(line->Text, sel_start);
+					snapshot.norm_sel_end = NormalizePos(line->Text, sel_end);
 					snapshot.insertion_point = active_insertion_point;
 				}
 				else {
-					auto start = remap_pos_for_line(line, sel_start_chars);
-					auto end = remap_pos_for_line(line, sel_end_chars);
+					auto start = RemapPosForLine(line, sel_start_chars);
+					auto end = RemapPosForLine(line, sel_end_chars);
 					snapshot.sel_start = start.raw;
 					snapshot.sel_end = end.raw;
 					snapshot.norm_sel_start = start.plain;
 					snapshot.norm_sel_end = end.plain;
-					snapshot.insertion_point = remap_pos_for_line(line, insertion_chars).raw;
+					snapshot.insertion_point = RemapPosForLine(line, insertion_chars).raw;
 				}
 				preview_lines.push_back(std::move(snapshot));
 			}
@@ -1448,7 +1126,7 @@ struct edit_font final : public Command {
 			    !allow_replace_explicit && !(!permanent && !native_override_permission)) {
 				bool has_conflict = false;
 				for (auto const& snapshot : preview_lines) {
-					parsed_line parsed(snapshot.line);
+					ParsedLine parsed(snapshot.line);
 					auto const current = font_for_line(parsed, snapshot.insertion_point);
 					if ((current.displayed.has_explicit_weight &&
 					     current.displayed.effective_weight != selected.effective_weight) ||
@@ -1576,7 +1254,7 @@ struct edit_font final : public Command {
 
 			for (auto& snapshot : preview_lines) {
 				AssDialogue *line = snapshot.line;
-				parsed_line parsed(line);
+				ParsedLine parsed(line);
 				auto const startfont = font_for_line(parsed, snapshot.insertion_point);
 				auto const variant = variant_for_line(startfont);
 				if (!variant.automatic_variant_reliable)

@@ -3,9 +3,11 @@
 #include "ass_compat.h"
 
 #include <libaegisub/ass/dialogue_parser.h>
+#include <libaegisub/character_count.h>
 #include <libaegisub/string_utils.h>
 
 #include <algorithm>
+#include <ranges>
 #include <string_view>
 #include <utility>
 
@@ -1049,5 +1051,246 @@ std::optional<int> GetTagEndInBlock(
 	if (auto end = GetTagEndInWrittenBlock(blocks, blockn - 1, tag_name, alt_name))
 		return end;
 	return GetTagEndInWrittenBlock(blocks, blockn + 1, tag_name, alt_name);
+}
+
+ParsedLine::ParsedLine(AssDialogue *line) : line(line), blocks(line->ParseTags()) {}
+
+int ParsedLine::block_for_read(int raw_pos) const {
+	return FindDialogueBlockForRead(blocks, raw_pos);
+}
+
+AssStyle const *ParsedLine::reset_target(
+	AssOverrideTag const& tag,
+	AssStyle const& event_style,
+	ResetStyleResolver const& resolve_reset) {
+	std::string name;
+	if (!tag.Params.empty() && !tag.Params.front().omitted &&
+		!tag.Params.front().empty)
+		name = tag.Params.front().Get<std::string>();
+	if (name.empty() || !resolve_reset)
+		return &event_style;
+	if (auto const *rs = resolve_reset(name))
+		return rs;
+	return &event_style;
+}
+
+AssStyle const *ParsedLine::base_style_at(
+	int blockn,
+	AssStyle const& event_style,
+	ResetStyleResolver const& resolve_reset) const {
+	for (int i = blockn; i >= 0; --i) {
+		auto *ovr = dynamic_cast<AssDialogueBlockOverride *>(blocks[i].get());
+		if (!ovr) continue;
+		for (auto const& tag : std::views::reverse(ovr->Tags)) {
+			if (tag.Name == "\\r")
+				return reset_target(tag, event_style, resolve_reset);
+		}
+	}
+	return &event_style;
+}
+
+ParsedLine::ResetAwareLookup ParsedLine::find_tag_with_reset(
+	int blockn,
+	std::string const& tag_name,
+	AssStyle const& event_style,
+	ResetStyleResolver const& resolve_reset,
+	std::string const& alt) const {
+	for (int i = blockn; i >= 0; --i) {
+		auto *ovr = dynamic_cast<AssDialogueBlockOverride *>(blocks[i].get());
+		if (!ovr) continue;
+		for (auto const& tag : std::views::reverse(ovr->Tags)) {
+			if (tag.Name == tag_name || tag.Name == alt)
+				return {.tag = &tag, .base = &event_style};
+			if (tag.Name == "\\r")
+				return {.tag = nullptr, .base = reset_target(tag, event_style, resolve_reset)};
+		}
+	}
+	return {.tag = nullptr, .base = &event_style};
+}
+
+int ParsedLine::block_at_pos(int pos) const {
+	auto const& text = line->Text.get();
+	int n = 0;
+	int max = text.size() - 1;
+	bool in_block = false;
+
+	for (int i = 0; i <= max; ++i) {
+		if (text[i] == '{') {
+			if (!in_block && i > 0 && pos >= 0)
+				++n;
+			in_block = true;
+		}
+		else if (text[i] == '}' && in_block) {
+			in_block = false;
+			if (pos > 0 && (i + 1 == max || text[i + 1] != '{'))
+				n++;
+		}
+		else if (!in_block) {
+			if (--pos == 0)
+				return n + (i < max && text[i + 1] == '{');
+		}
+	}
+
+	return n - in_block;
+}
+
+int ParsedLine::set_tag(
+	std::string const& tag,
+	std::string const& value,
+	int norm_pos,
+	int orig_pos,
+	int *written_block) {
+	int blockn = block_at_pos(norm_pos);
+
+	if (orig_pos >= 0 && !text_rewritten) {
+		int const raw_blockn = block_for_read(orig_pos);
+		auto valid_override = [&](int index) {
+			return index >= 0 && std::cmp_less(index, blocks.size()) && blocks[index]->GetType() == AssBlockType::OVERRIDE;
+		};
+		if (raw_blockn != blockn && valid_override(raw_blockn) && valid_override(blockn))
+			blockn = raw_blockn;
+	}
+
+	AssDialogueBlockPlain *plain = nullptr;
+	AssDialogueBlockOverride *ovr = nullptr;
+	while (blockn >= 0 && !plain && !ovr) {
+		AssDialogueBlock *block = blocks[blockn].get();
+		switch (block->GetType()) {
+			case AssBlockType::PLAIN:
+				plain = static_cast<AssDialogueBlockPlain *>(block);
+				break;
+			case AssBlockType::DRAWING:
+				--blockn;
+				break;
+			case AssBlockType::COMMENT:
+				--blockn;
+				orig_pos = line->Text.get().rfind('{', orig_pos);
+				break;
+			case AssBlockType::OVERRIDE:
+				ovr = static_cast<AssDialogueBlockOverride *>(block);
+				break;
+		}
+	}
+
+	if (blockn < 0)
+		orig_pos = 0;
+
+	std::string insert(tag + value);
+	int shift = insert.size();
+	if (plain || blockn < 0) {
+		std::string new_text = line->Text.get();
+		std::string wrapped_insert;
+		wrapped_insert.push_back('{');
+		wrapped_insert.append(insert);
+		wrapped_insert.push_back('}');
+		agi::util::strings::replace_range_inplace(new_text, orig_pos, orig_pos, wrapped_insert);
+		line->Text = std::move(new_text);
+		shift += 2;
+		blocks = line->ParseTags();
+		text_rewritten = true;
+		if (written_block) {
+			*written_block = FindDialogueBlockForRead(blocks, orig_pos + 1);
+		}
+	}
+	else {
+		std::string alt;
+		if (tag == "\\c") alt = "\\1c";
+		bool found = false;
+		for (size_t i = 0; i < ovr->Tags.size(); i++) {
+			std::string const& name = ovr->Tags[i].Name;
+			if (tag == name || alt == name) {
+				shift -= static_cast<std::string>(ovr->Tags[i]).size();
+				if (found) {
+					ovr->Tags.erase(ovr->Tags.begin() + i);
+					i--;
+				}
+				else {
+					ovr->Tags[i].Params[0].Set(value);
+					found = true;
+				}
+			}
+		}
+		if (!found)
+			ovr->AddTag(insert);
+
+		line->UpdateText(blocks);
+		text_rewritten = true;
+		if (written_block)
+			*written_block = blockn;
+	}
+
+	return shift;
+}
+
+int NormalizePos(std::string const& text, int pos) {
+	int plain_len = 0;
+	bool in_block = false;
+
+	for (int i = 0, max = text.size() - 1; i < pos && i <= max; ++i) {
+		if (text[i] == '{')
+			in_block = true;
+		if (!in_block)
+			++plain_len;
+		if (text[i] == '}' && in_block)
+			in_block = false;
+	}
+
+	return plain_len;
+}
+
+int DenormalizePos(std::string const& text, int pos) {
+	if (pos <= 0)
+		return 0;
+
+	int plain_len = 0;
+	bool in_block = false;
+
+	for (int i = 0, max = text.size(); i < max; ++i) {
+		if (text[i] == '{') {
+			in_block = true;
+			continue;
+		}
+		if (text[i] == '}' && in_block) {
+			in_block = false;
+			continue;
+		}
+		if (!in_block) {
+			if (plain_len >= pos)
+				return i;
+			++plain_len;
+		}
+	}
+
+	return text.size();
+}
+
+size_t CharacterPos(std::string const& text, int pos) {
+	auto clamped = std::max(0, std::min<int>(pos, static_cast<int>(text.size())));
+	return agi::CharacterCount(text.begin(), text.begin() + clamped, agi::IGNORE_BLOCKS);
+}
+
+SelectionPos RemapPosForLine(AssDialogue *line, size_t chars) {
+	int plain = static_cast<int>(agi::IndexOfCharacter(line->GetStrippedText(), chars));
+	return {.raw = DenormalizePos(line->Text, plain), .plain = plain};
+}
+
+int ToggleStyleTag(
+	AssDialogue& line,
+	AssStyle const& event_style,
+	ResetStyleResolver const& resolve_reset,
+	bool AssStyle::*field,
+	std::string const& tag,
+	int raw_sel_start,
+	int raw_sel_end,
+	int norm_sel_start,
+	int norm_sel_end) {
+	ParsedLine parsed(&line);
+	int const blockn = parsed.block_for_read(raw_sel_start);
+	bool const state = parsed.get_value_with_reset(blockn, field, tag, event_style, resolve_reset);
+
+	int const shift = parsed.set_tag(tag, state ? "0" : "1", norm_sel_start, raw_sel_start);
+	if (raw_sel_start != raw_sel_end)
+		parsed.set_tag(tag, state ? "1" : "0", norm_sel_end, raw_sel_end + shift);
+	return shift;
 }
 }

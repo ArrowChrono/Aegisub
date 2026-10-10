@@ -1,10 +1,12 @@
 #pragma once
 
 #include "ass_dialogue.h"
+#include "ass_style.h"
 
 #include <libaegisub/color.h>
 
 #include <cstddef>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -245,4 +247,84 @@ std::optional<int> GetTagEndInWrittenBlock(
 	int blockn,
 	std::string_view tag_name,
 	std::string_view alt_name);
+
+using ResetStyleResolver = std::function<AssStyle const *(std::string_view)>;
+
+struct ParsedLine {
+	AssDialogue *line;
+	std::vector<std::unique_ptr<AssDialogueBlock>> blocks;
+	bool text_rewritten = false;
+
+	ParsedLine(AssDialogue *line);
+	ParsedLine(ParsedLine&& r) = default;
+
+	int block_for_read(int raw_pos) const;
+
+	static AssStyle const *reset_target(
+		AssOverrideTag const& tag,
+		AssStyle const& event_style,
+		ResetStyleResolver const& resolve_reset);
+
+	AssStyle const *base_style_at(
+		int blockn,
+		AssStyle const& event_style,
+		ResetStyleResolver const& resolve_reset) const;
+
+	struct ResetAwareLookup {
+		AssOverrideTag const *tag = nullptr;
+		AssStyle const *base = nullptr;
+	};
+
+	ResetAwareLookup find_tag_with_reset(
+		int blockn,
+		std::string const& tag_name,
+		AssStyle const& event_style,
+		ResetStyleResolver const& resolve_reset,
+		std::string const& alt = "") const;
+
+	template <typename T>
+	T get_value_with_reset(
+		int blockn,
+		T AssStyle::*field,
+		std::string const& tag_name,
+		AssStyle const& event_style,
+		ResetStyleResolver const& resolve_reset,
+		std::string const& alt = "") const {
+		auto lk = find_tag_with_reset(blockn, tag_name, event_style, resolve_reset, alt);
+		return lk.tag ? lk.tag->Params[0].template Get<T>(lk.base->*field) : lk.base->*field;
+	}
+
+	int block_at_pos(int pos) const;
+
+	int set_tag(
+		std::string const& tag,
+		std::string const& value,
+		int norm_pos,
+		int orig_pos,
+		int *written_block = nullptr);
+};
+
+int NormalizePos(std::string const& text, int pos);
+
+int DenormalizePos(std::string const& text, int pos);
+
+std::size_t CharacterPos(std::string const& text, int pos);
+
+struct SelectionPos {
+	int raw;
+	int plain;
+};
+
+SelectionPos RemapPosForLine(AssDialogue *line, std::size_t chars);
+
+int ToggleStyleTag(
+	AssDialogue& line,
+	AssStyle const& event_style,
+	ResetStyleResolver const& resolve_reset,
+	bool AssStyle::*field,
+	std::string const& tag,
+	int raw_sel_start,
+	int raw_sel_end,
+	int norm_sel_start,
+	int norm_sel_end);
 }
