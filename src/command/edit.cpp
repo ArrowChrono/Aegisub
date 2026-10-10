@@ -1316,8 +1316,6 @@ struct edit_font final : public Command {
 
 		struct line_font_state {
 			FontFaceDialogSelection displayed;
-			std::string stored_face_name;
-			bool has_explicit_face_override = false;
 			bool valid = true;
 		};
 
@@ -1349,10 +1347,8 @@ struct edit_font final : public Command {
 			auto const& request = evaluator.Request();
 
 			line_font_state state;
-			state.stored_face_name = request.family;
-			state.has_explicit_face_override = request.has_explicit_family;
 			state.valid = request.valid;
-			state.displayed.face_name = font_model.PreferredName(state.stored_face_name);
+			state.displayed.face_name = request.family;
 			state.displayed.point_size = static_cast<int>(std::lround(request.height));
 			state.displayed.charset = request.charset;
 			state.displayed.effective_weight = request.effective_weight;
@@ -1593,10 +1589,9 @@ struct edit_font final : public Command {
 				};
 
 				if (ShouldWriteFontFace(
-						startfont.stored_face_name,
 						startfont.displayed.face_name,
-						startfont.has_explicit_face_override,
-						selected.face_name))
+						selected.face_name,
+						selected.face_modified))
 					do_set_tag("\\fn", selected.face_name);
 				if (selected.point_size != startfont.displayed.point_size)
 					do_set_tag("\\fs", std::to_string(selected.point_size));

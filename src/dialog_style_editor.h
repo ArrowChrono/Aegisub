@@ -101,7 +101,6 @@ class DialogStyleEditor final : public wxDialog {
 	wxTextCtrl *PreviewText;
 	SubtitlesPreview *SubsPreview;
 	std::shared_ptr<FontFamilyCatalog const> font_catalog;
-	bool prefer_localized_font_names = true;
 	bool compact_vertical_font_list = false;
 	std::unordered_set<FontFamilyId> vertical_capable_family_ids;
 	std::unordered_set<std::string> vertical_capable_bare_names;

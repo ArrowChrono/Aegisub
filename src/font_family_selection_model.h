@@ -48,7 +48,6 @@ struct FontFamilySelectionModel {
 		FontFamilyId family_id,
 		std::string_view face_name) const;
 
-	/// Name to show in the selector and write back when the dialog is accepted.
 	std::string PreferredName(std::string_view stored_name) const;
 
 	/// Resolve a family through the same alias model used by every font UI.

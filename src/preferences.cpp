@@ -446,9 +446,11 @@ void BuildGeneralPage(OptionPage *p) {
 		_("Prefer localized font family names"),
 		"Subtitle/Font/Prefer Localized Family Names");
 	prefer_localized->SetToolTip(_(
-		"When enabled, Style Editor and \\fn selectors display and write the "
-		"system-localized family name. Both Style Editor and the \\fn Select Font "
-		"command use Aegisub's custom font selectors. When disabled, both prefer "
+		"When enabled, font lists in Style Editor and \\fn selectors use the "
+		"system-localized family name. Existing font names are preserved unless "
+		"you edit the name or select a font from the list. Both Style Editor and "
+		"the \\fn Select Font command use Aegisub's custom font selectors. "
+		"When disabled, the lists prefer "
 		"validated English Win32 family "
 		"names, falling back when unavailable (localized catalog name, or the "
 		"enumerator list if the catalog is not ready), for better "

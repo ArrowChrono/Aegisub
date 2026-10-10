@@ -281,9 +281,11 @@ class FontFaceDialog final : public wxDialog {
 	bool syncing_variant = false;
 	bool initial_explicit_weight = false;
 	bool initial_explicit_italic = false;
+	bool face_selected = false;
 	bool family_changed = false;
 	int implicit_base_weight = 400;
 	bool implicit_base_italic = false;
+	std::string initial_face_name;
 	std::string committed_family;
 	std::optional<FontFamilyId> committed_family_id;
 
@@ -604,6 +606,7 @@ class FontFaceDialog final : public wxDialog {
 	}
 
 	void OnFaceUpdate(wxCommandEvent &event) {
+		face_selected |= event.GetEventType() == wxEVT_COMBOBOX;
 		CommitFaceFamilyChange();
 		event.Skip();
 	}
@@ -679,6 +682,7 @@ public:
 		initial.face_name).first.empty())
 	, initial_explicit_weight(initial.has_explicit_weight)
 	, initial_explicit_italic(initial.has_explicit_italic)
+	, initial_face_name(initial.face_name)
 	{
 		if (effective_weight == 400 && initial.bold)
 			effective_weight = 700;
@@ -822,23 +826,19 @@ public:
 		result.underline = underline->GetValue();
 		result.has_explicit_weight = initial_explicit_weight;
 		result.has_explicit_italic = initial_explicit_italic;
+		result.face_modified = face_selected || result.face_name != initial_face_name;
 		result.variant_modified = variant_modified;
 		result.weight_modified = weight_modified;
 		result.italic_modified = italic_modified;
 		result.implicit_variant_pinned = implicit_variant_pinned;
 		result.allow_replace_explicit = allow_replace_explicit->GetValue();
-		if (font_model.catalog && !face_name->SelectedFamilyId() &&
-		    !font_model.ResolveRecord(result.face_name)) {
+		if (result.face_modified && font_model.catalog && !face_name->SelectedFamilyId() &&
+			!font_model.ResolveRecord(result.face_name)) {
 			auto informational = font_model.catalog->ResolveInformationalName(result.face_name);
 			if (informational.family && informational.variant_role != FontVariantRole::Unknown) {
 				auto const *record = font_model.catalog->Find(*informational.family);
 				if (record) {
 					result.selected_family_id = record->id;
-					bool const vertical = !FontFamilyCatalog::SplitVerticalPrefix(result.face_name).first.empty();
-					result.face_name = FontFamilyCatalog::JoinVerticalPrefix(
-						vertical,
-						font_model.catalog->PreferredWriteName(
-							*record, font_model.prefer_localized));
 					result.effective_weight =
 						informational.variant_role == FontVariantRole::Bold ||
 						informational.variant_role == FontVariantRole::BoldItalic ? 700 : 400;

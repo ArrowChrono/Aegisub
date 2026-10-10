@@ -23,6 +23,7 @@ struct FontFaceDialogSelection {
 	bool underline = false;
 	bool has_explicit_weight = false;
 	bool has_explicit_italic = false;
+	bool face_modified = false;
 	bool variant_modified = false;
 	bool weight_modified = false;
 	bool italic_modified = false;

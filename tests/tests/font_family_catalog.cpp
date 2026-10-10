@@ -169,27 +169,31 @@ TEST(font_family_catalog, vertical_prefix_counts_toward_gdi_limit) {
 	EXPECT_TRUE(FontFamilyCatalog::ExceedsGdiFaceNameLimit("@" + thirty_one));
 }
 
-TEST(font_face_selection, writes_displayed_name_for_explicit_alias_but_not_unchanged_inherited_font) {
-	EXPECT_TRUE(ShouldWriteFontFace(
-		"Localized Family", "English Family", true, "English Family"));
+TEST(font_face_selection, writes_font_name_only_when_face_was_modified) {
 	EXPECT_FALSE(ShouldWriteFontFace(
-		"Localized Family", "English Family", false, "English Family"));
-	EXPECT_TRUE(ShouldWriteFontFace(
-		"Arial", "Arial", true, "English Family"));
+		"Localized Family", "English Family", false));
 	EXPECT_FALSE(ShouldWriteFontFace(
-		"English Family", "English Family", true, "English Family"));
+		"Other Family", "English Family", false));
+	EXPECT_FALSE(ShouldWriteFontFace(
+		"@Localized Family", "@English Family", false));
+	EXPECT_TRUE(ShouldWriteFontFace(
+		"Localized Family", "English Family", true));
+	EXPECT_TRUE(ShouldWriteFontFace(
+		"Arial", "English Family", true));
+	EXPECT_FALSE(ShouldWriteFontFace(
+		"English Family", "English Family", true));
+	EXPECT_TRUE(ShouldWriteFontFace(
+		"English Family", "english family", true));
 }
 
-TEST(font_family_selection_model, displayed_name_follows_preference_for_existing_style) {
+TEST(font_family_selection_model, candidate_labels_follow_name_preference) {
 	auto catalog = std::make_shared<FontFamilyCatalog>(
 		std::vector<FontFamilyRecord>{family(1, "Localized Family", "English Family")});
-	FontFamilySelectionModel model;
-	model.catalog = catalog;
 
-	model.prefer_localized = false;
-	EXPECT_EQ("English Family", model.PreferredName("Localized Family"));
-	model.prefer_localized = true;
-	EXPECT_EQ("Localized Family", model.PreferredName("English Family"));
+	auto const english_model = BuildFontFamilySelectionModel(catalog, false);
+	EXPECT_EQ((std::vector<FontFamilyChoice>{{"English Family", 1}}), english_model.choices);
+	auto const localized_model = BuildFontFamilySelectionModel(catalog, true);
+	EXPECT_EQ((std::vector<FontFamilyChoice>{{"Localized Family", 1}}), localized_model.choices);
 }
 
 TEST(font_family_selection_model, selected_choice_id_disambiguates_duplicate_display_aliases) {

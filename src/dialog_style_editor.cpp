@@ -241,7 +241,6 @@ DialogStyleEditor::DialogStyleEditor(wxWindow *parent, AssStyle *style, agi::Con
 , style(style)
 , store(store)
 , font_catalog(font_model.catalog)
-, prefer_localized_font_names(font_model.prefer_localized)
 , compact_vertical_font_list(font_model.UsesCompactVerticalToggle())
 , vertical_capable_family_ids(font_model.vertical_capable_family_ids.begin(),
 	font_model.vertical_capable_family_ids.end())
@@ -396,8 +395,6 @@ DialogStyleEditor::DialogStyleEditor(wxWindow *parent, AssStyle *style, agi::Con
 	BoxStrikeout->SetValue(style->strikeout);
 	OutlineType->SetValue(style->borderstyle == 3);
 	Alignment->SetSelection(AlignToControl(style->alignment));
-	// Fill font face list box
-	FontName->ChangeValue(to_wx(font_model.PreferredName(style->font)));
 	committed_font_family = from_wx(FontName->GetValue());
 	committed_font_family_id = FontName->SelectedFamilyId();
 
