@@ -94,6 +94,7 @@ if(GTEST_FOUND)
         tests/tests/automation_runtime_journal.cpp
         tests/tests/automation_runtime_profile.cpp
         tests/tests/automation_scenario_contract.cpp
+        tests/tests/local_script_references.cpp
         tests/tests/audio_display.cpp
         tests/tests/align_video_fade.cpp
         tests/tests/video_color_pick.cpp
@@ -130,6 +131,7 @@ if(GTEST_FOUND)
         src/automation/automation_debug_session.cpp
         src/automation/automation_lua_runtime.cpp
         src/automation/automation_runtime_journal.cpp
+        src/automation/local_script_references.cpp
         src/audio_display_analysis.cpp
         src/audio_latest_range_scheduler.cpp
         src/audio_display_source.cpp

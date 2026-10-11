@@ -34,6 +34,7 @@
 #include "automation/engine/automation_engine_registry.h"
 #include "automation/automation_live_host.h"
 #include "automation/automation_debug_service.h"
+#include "automation/local_script_references.h"
 #include "compat.h"
 #ifdef WITH_PLUGIN_BRIDGE
 #include "coreclr/dotnet_automation_engine.h"
@@ -1095,29 +1096,20 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 
 		auto autobasefn(OPT_GET("Path/Automation/Base")->GetString());
 
-		for (auto tok : agi::Split(local_scripts, '|')) {
-			auto token = agi::util::strings::trim_copy(agi::str(tok));
-			if (token.empty()) continue;
-			char first_char = token[0];
-			std::string trimmed(token.begin() + 1, token.end());
-
-			agi::fs::path basepath;
-			if (first_char == '~') {
-				basepath = core.subsController->Filename().parent_path();
-			} else if (first_char == '$') {
-				basepath = autobasefn;
-			} else if (first_char == '/') {
-			} else {
+		for (auto const& reference : ParseLocalScriptReferences(local_scripts)) {
+			auto location = ResolveLocalScriptReference(
+				reference, core.subsController->Filename().parent_path(), autobasefn);
+			if (!location) {
 				context->ShowWarning(
 					agi::format(
 						"Automation Script referenced with unknown location specifier character.\n"
 						"Location specifier found: %c\nFilename specified: %s",
-						first_char,
-						trimmed),
+						reference.location,
+						reference.filename),
 					"Automation");
 				continue;
 			}
-			auto sfname = basepath / agi::fs::PathFromString(trimmed);
+			auto const& sfname = location->filename;
 			if (agi::fs::FileExists(sfname)) {
 				bool recognised = false;
 				auto script = Automation4::ScriptFactory::CreateFromFile(sfname, true, &recognised);
@@ -1138,9 +1130,9 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 					agi::format(
 						"Automation Script referenced could not be found.\n"
 						"Filename specified: %c%s\nSearched relative to: %s\nResolved filename: %s",
-						first_char,
-						trimmed,
-						agi::fs::PathToString(basepath),
+						reference.location,
+						reference.filename,
+						agi::fs::PathToString(location->base_directory),
 						agi::fs::PathToString(sfname)),
 					"Automation");
 			}
@@ -1152,36 +1144,13 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 
 	void LocalScriptManager::SaveLoadedList()
 	{
-		// Store Automation script data
-		// Algorithm:
-		// 1. If script filename has Automation Base Path as a prefix, the path is relative to that (ie. "$")
-		// 2. Otherwise try making it relative to the ass filename
-		// 3. If step 2 failed, or absolute path is shorter than path relative to ass, use absolute path ("/")
-		// 4. Otherwise, use path relative to ass ("~")
-		std::string scripts_string;
 		agi::fs::path autobasefn(OPT_GET("Path/Automation/Base")->GetString());
 		auto core = context->GetCore();
-
-		for (auto& script : GetScripts()) {
-			if (!scripts_string.empty())
-				scripts_string += "|";
-
-			auto const scriptfn = script->GetFilename();
-			auto const scriptfn_str = agi::fs::PathToString(scriptfn);
-			auto const autobase_rel = core.path->MakeRelative(scriptfn, autobasefn);
-			auto const assfile_rel = core.path->MakeRelative(scriptfn, "?script");
-			auto const autobase_rel_str = agi::fs::PathToGenericString(autobase_rel);
-			auto const assfile_rel_str = agi::fs::PathToGenericString(assfile_rel);
-
-			if (autobase_rel_str.size() <= scriptfn_str.size() && autobase_rel_str.size() <= assfile_rel_str.size()) {
-				scripts_string += "$" + autobase_rel_str;
-			} else if (assfile_rel_str.size() <= scriptfn_str.size() && assfile_rel_str.size() <= autobase_rel_str.size()) {
-				scripts_string += "~" + assfile_rel_str;
-			} else {
-				scripts_string += "/" + agi::fs::PathToGenericString(scriptfn);
-			}
-		}
-		core.ass->Properties.automation_scripts = std::move(scripts_string);
+		std::vector<agi::fs::path> filenames;
+		filenames.reserve(GetScripts().size());
+		for (auto const& script : GetScripts())
+			filenames.push_back(script->GetFilename());
+		core.ass->Properties.automation_scripts = SerializeLocalScriptReferences(filenames, *core.path, autobasefn);
 	}
 
 	std::unique_ptr<Script> ScriptFactory::CreateFromFile(
