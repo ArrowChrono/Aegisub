@@ -2037,6 +2037,8 @@ void SubsStyledTextEditCtrl::OnIndicatorRelease(wxStyledTextEvent& event) {
 	// presses that dragged a selection off the value.
 	if (pos < 0 || !(IndicatorAllOnFor(pos) & (1 << COLOR_SWATCH_BOX_INDICATOR)))
 		return;
+	if (!OPT_GET("Subtitle/Highlight/Color Swatches Click to Edit")->GetBool())
+		return;
 	if (!context)
 		return;
 	if (GetSelectionStart() != GetSelectionEnd())

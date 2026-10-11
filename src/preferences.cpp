@@ -805,6 +805,7 @@ void BuildInterfacePage(OptionPage *p) {
 #ifdef WITH_WXSTC
 	binder->AddBool(_("Enable syntax highlighting"), "Subtitle/Highlight/Syntax");
 	binder->AddBool(_("Show color swatches on color tags"), "Subtitle/Highlight/Color Swatches");
+	binder->AddBool(_("Click color swatches to open color picker"), "Subtitle/Highlight/Color Swatches Click to Edit");
 #ifdef __WXMSW__
 	// Opt-in only: historical default-on DirectWrite was reverted on Win10.
 	binder->AddBool(_("Use DirectWrite for styled edit box (experimental)"), "Subtitle/Edit Box/Use DirectWrite");

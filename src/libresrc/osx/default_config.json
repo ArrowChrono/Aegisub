@@ -472,7 +472,8 @@
 		},
 		"Highlight" : {
 			"Syntax" : true,
-			"Color Swatches" : true
+			"Color Swatches" : true,
+			"Color Swatches Click to Edit" : false
 		},
 		"Provider" : "libass",
 		"Show Original": false,
