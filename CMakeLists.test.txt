@@ -95,6 +95,7 @@ if(GTEST_FOUND)
         tests/tests/automation_runtime_profile.cpp
         tests/tests/automation_scenario_contract.cpp
         tests/tests/local_script_references.cpp
+        tests/tests/subtitle_history.cpp
         tests/tests/audio_display.cpp
         tests/tests/align_video_fade.cpp
         tests/tests/video_color_pick.cpp

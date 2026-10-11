@@ -847,6 +847,7 @@ set(AEGISUB_CORE_SOURCES
     # API and stay in the exe until abstracted (they are the export subsystem's
     # coupling root, pulling in export_fixstyle/export_framerate/auto4_base).
     src/ass_file.cpp
+    src/subtitle_history.cpp
     src/ass_file_app.cpp
     # ass_info_service.cpp stays with the executable while SubtitleFormat
     # registry and media-inspect services are still host-coupled.

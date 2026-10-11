@@ -19,8 +19,8 @@
 
 #include "ass_dialogue.h"
 #include "subs_controller_timer.h"
+#include "subtitle_history.h"
 
-#include <boost/container/list.hpp>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
@@ -90,25 +90,7 @@ namespace subs_controller_detail {
 		}
 	};
 
-	inline bool TryAmendDialogueSnapshot(
-		std::vector<AssDialogueBase>& snapshot,
-		std::span<AssDialogue const *const> changed_lines) {
-		if (changed_lines.empty())
-			return false;
-
-		for (auto const line : changed_lines) {
-			if (!line || line->Row < 0 || static_cast<size_t>(line->Row) >= snapshot.size())
-				return false;
-
-			auto const& previous = snapshot[static_cast<size_t>(line->Row)];
-			if (previous.Row != line->Row || previous.Id != line->Id)
-				return false;
-		}
-
-		for (auto const line : changed_lines)
-			snapshot[static_cast<size_t>(line->Row)] = *line;
-		return true;
-	}
+	using subtitle_history_detail::TryAmendDialogueSnapshot;
 }
 
 class SubsController {
@@ -118,20 +100,9 @@ class SubsController {
 	agi::signal::Connection selection_connection;
 	agi::signal::Connection text_selection_connection;
 
-	struct UndoInfo;
-	boost::container::list<UndoInfo> undo_stack;
-	boost::container::list<UndoInfo> redo_stack;
-
-	/// Revision counter for undo coalescing and modified state tracking
-	int commit_id = 0;
-	/// Last saved version of this file
-	int saved_commit_id = 0;
+	SubtitleHistory history;
 	/// Last autosaved version of this file
 	int autosaved_commit_id = 0;
-	/// Version to use for the next commit
-	/// Needed to handle Save -> Undo -> Edit, which would result in the file
-	/// being marked unmodified if we reused commit IDs
-	int next_commit_id = 1;
 
 	/// Timer for triggering autosaves on GUI shells only.
 	std::unique_ptr<SubsControllerTimer> autosave_timer;
@@ -248,9 +219,9 @@ public:
 	bool HasFile() const { return !filename.empty(); }
 
 	/// Does the file have unsaved changes?
-	bool IsModified() const { return commit_id != saved_commit_id; };
+	bool IsModified() const { return history.IsModified(); };
 	/// Current subtitle document revision used by snapshot/transaction clients.
-	int64_t GetDocumentRevision() const { return commit_id; }
+	int64_t GetDocumentRevision() const { return history.CurrentRevision(); }
 	[[nodiscard]] std::uint64_t GetDocumentGeneration() const { return document_generation; }
 
 	/// @brief Load from a file
@@ -290,9 +261,9 @@ public:
 	/// @brief Redo the last undone changes
 	void Redo();
 	/// Check if undo stack is empty
-	bool IsUndoStackEmpty() const { return undo_stack.size() <= 1; };
+	bool IsUndoStackEmpty() const { return !history.CanUndo(); };
 	/// Check if redo stack is empty
-	bool IsRedoStackEmpty() const { return redo_stack.empty(); };
+	bool IsRedoStackEmpty() const { return !history.CanRedo(); };
 	/// Get the description of the first undoable change
 	std::string GetUndoDescription() const;
 	/// Get the description of the first redoable change

@@ -50,6 +50,7 @@
 
 // #include <wx/msgdlg.h>  ← unused, removed (using context->ShowWarning/RequestInteraction instead)
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <functional>
@@ -128,103 +129,39 @@ SubsController::AutosaveInhibitor SubsController::InhibitAutosave() {
 	return AutosaveInhibitor(this);
 }
 
-struct SubsController::UndoInfo {
-	std::string undo_description;
-	int commit_id;
+namespace {
+SubtitleHistoryBookmark CaptureHistoryBookmark(agi::Context const *context) {
+	auto core = context->GetCore();
+	SubtitleHistoryBookmark bookmark;
+	if (auto *line = core.selectionController->GetActiveLine())
+		bookmark.active_line_id = line->Id;
+	auto const& selected = core.selectionController->GetSelectedSet();
+	bookmark.selected_line_ids.reserve(selected.size());
+	for (auto const *line : selected)
+		bookmark.selected_line_ids.push_back(line->Id);
+	bookmark.insertion_point = core.textSelectionController->GetInsertionPoint();
+	bookmark.selection_start = core.textSelectionController->GetSelectionStart();
+	bookmark.selection_end = core.textSelectionController->GetSelectionEnd();
+	return bookmark;
+}
 
-	std::vector<std::pair<std::string, std::string>> script_info;
-	std::vector<AssStyle> styles;
-	std::vector<AssDialogueBase> events;
-	std::vector<AssAttachment> attachments;
-	std::vector<ExtradataEntry> extradata;
-
-	mutable std::vector<int> selection;
-	int active_line_id = 0;
-	int pos = 0, sel_start = 0, sel_end = 0;
-
-	UndoInfo(const agi::Context *c, std::string const& d, int commit_id)
-	: undo_description(d)
-	, commit_id(commit_id)
-	, attachments(c->GetCore().ass->Attachments)
-	, extradata(c->GetCore().ass->Extradata)
-	{
-		auto core = c->GetCore();
-		script_info.reserve(core.ass->Info.size());
-		for (auto const& info : core.ass->Info)
-			script_info.emplace_back(info.Key(), info.Value());
-
-		styles.reserve(core.ass->Styles.size());
-		styles.assign(core.ass->Styles.begin(), core.ass->Styles.end());
-
-		events.reserve(core.ass->Events.size());
-		events.assign(core.ass->Events.begin(), core.ass->Events.end());
-
-		UpdateActiveLine(c);
-		UpdateSelection(c);
-		UpdateTextSelection(c);
+void RestoreHistoryBookmark(agi::Context *context, SubtitleHistoryBookmark const& bookmark) {
+	auto core = context->GetCore();
+	auto selected_ids = bookmark.selected_line_ids;
+	std::ranges::sort(selected_ids);
+	AssDialogue *active_line = nullptr;
+	Selection selected;
+	for (auto& line : core.ass->Events) {
+		if (line.Id == bookmark.active_line_id)
+			active_line = &line;
+		if (std::ranges::binary_search(selected_ids, line.Id))
+			selected.insert(&line);
 	}
-
-	void Apply(agi::Context *c) const {
-		auto core = c->GetCore();
-		// Keep old dialogue lines alive until after the commit is complete
-		// since a bunch of stuff holds references to them
-		AssFile old;
-		old.Events.swap(core.ass->Events);
-		core.ass->Info.clear();
-		core.ass->Attachments.clear();
-		core.ass->Styles.clear();
-		core.ass->Extradata.clear();
-
-		sort(begin(selection), end(selection));
-
-		AssDialogue *active_line = nullptr;
-		Selection new_sel;
-
-		for (auto const& info : script_info)
-			core.ass->Info.push_back(*new AssInfo(info.first, info.second));
-		for (auto const& style : styles)
-			core.ass->Styles.push_back(*new AssStyle(style));
-		core.ass->Attachments = attachments;
-		for (auto const& event : events) {
-			auto copy = new AssDialogue(event);
-			core.ass->Events.push_back(*copy);
-			if (copy->Id == active_line_id)
-				active_line = copy;
-			if (binary_search(begin(selection), end(selection), copy->Id))
-				new_sel.insert(copy);
-		}
-		core.ass->Extradata = extradata;
-
-		core.ass->Commit("", AssFile::COMMIT_NEW);
-		core.selectionController->SetSelectionAndActive(std::move(new_sel), active_line);
-
-		core.textSelectionController->SetInsertionPoint(pos);
-		core.textSelectionController->SetSelection(sel_start, sel_end);
-	}
-
-	void UpdateActiveLine(const agi::Context *c) {
-		auto core = c->GetCore();
-		auto line = core.selectionController->GetActiveLine();
-		if (line)
-			active_line_id = line->Id;
-	}
-
-	void UpdateSelection(const agi::Context *c) {
-		auto core = c->GetCore();
-		auto const& sel = core.selectionController->GetSelectedSet();
-		selection.clear();
-		selection.reserve(sel.size());
-		for (const auto diag : sel)
-			selection.push_back(diag->Id);
-	}
-
-	void UpdateTextSelection(const agi::Context *c) {
-		auto core = c->GetCore();
-		pos = core.textSelectionController->GetInsertionPoint();
-		sel_start = core.textSelectionController->GetSelectionStart();
-		sel_end = core.textSelectionController->GetSelectionEnd();
-	}
-};
+	core.selectionController->SetSelectionAndActive(std::move(selected), active_line);
+	core.textSelectionController->SetInsertionPoint(bookmark.insertion_point);
+	core.textSelectionController->SetSelection(bookmark.selection_start, bookmark.selection_end);
+}
+}
 
 struct SubsController::SaveEveryChangeState {
 	struct Request {
@@ -358,9 +295,9 @@ ProjectProperties SubsController::Load(agi::fs::path const& filename, std::strin
 	SetFileName(filename);
 
 	// Push the initial state of the file onto the undo stack
-	undo_stack.clear();
-	redo_stack.clear();
-	autosaved_commit_id = saved_commit_id = commit_id + 1;
+	history.Clear();
+	autosaved_commit_id = history.CurrentRevision() + 1;
+	history.MarkSaved(autosaved_commit_id);
 	core.ass->Commit("", AssFile::COMMIT_NEW);
 
 	// Save backup of file
@@ -392,10 +329,11 @@ void SubsController::Save(agi::fs::path const& filename, std::string const& enco
 
 	auto old_filename = this->filename;
 	auto old_properties = context->GetCore().ass->Properties;
-	int old_autosaved_commit_id = autosaved_commit_id, old_saved_commit_id = saved_commit_id;
+	int old_autosaved_commit_id = autosaved_commit_id, old_saved_commit_id = history.SavedRevision();
 	auto core = context->GetCore();
 	try {
-		autosaved_commit_id = saved_commit_id = commit_id;
+		autosaved_commit_id = history.CurrentRevision();
+		history.MarkSaved(autosaved_commit_id);
 
 		// Have to set this now for the sake of things that want to save paths
 		// relative to the script in the header
@@ -422,7 +360,7 @@ void SubsController::Save(agi::fs::path const& filename, std::string const& enco
 		core.path->SetToken("?script", old_filename.parent_path());
 		core.ass->Properties = std::move(old_properties);
 		autosaved_commit_id = old_autosaved_commit_id;
-		saved_commit_id = old_saved_commit_id;
+		history.MarkSaved(old_saved_commit_id);
 		throw;
 	}
 }
@@ -438,9 +376,9 @@ void SubsController::Close() {
 	if (frame && frame->NeedsLuaWorkspaceCloseDecision() && TryToClose() == wxCANCEL)
 		throw agi::UserCancelException("Subtitle change cancelled in Lua Workspace");
 	WaitForSaveEveryChangeWrites(true);
-	undo_stack.clear();
-	redo_stack.clear();
-	autosaved_commit_id = saved_commit_id = commit_id + 1;
+	history.Clear();
+	autosaved_commit_id = history.CurrentRevision() + 1;
+	history.MarkSaved(autosaved_commit_id);
 	filename.clear();
 	AssFile blank;
 	auto core = context->GetCore();
@@ -484,7 +422,7 @@ int SubsController::TryToClose(bool allow_cancel) {
 }
 
 void SubsController::AutoSave() {
-	if (autosave_inhibit_depth > 0 || commit_id == autosaved_commit_id)
+	if (autosave_inhibit_depth > 0 || history.CurrentRevision() == autosaved_commit_id)
 		return;
 
 	auto core = context->GetCore();
@@ -496,7 +434,7 @@ void SubsController::AutoSave() {
 	if (name.empty())
 		name = agi::fs::PathFromString("Untitled");
 
-	autosaved_commit_id = commit_id;
+	autosaved_commit_id = history.CurrentRevision();
 	auto status_sink = context->GetStatusSink();
 	auto choice_sink = context->GetSingleChoiceInteractionSink();
 	auto subs_copy = new AssFile(*core.ass);
@@ -575,7 +513,7 @@ void SubsController::QueueSaveEveryChange(
 	if (!snapshot->Extradata.empty())
 		snapshot->CleanExtradata();
 
-	auto const snapshot_id = commit_id;
+	auto const snapshot_id = history.CurrentRevision();
 	auto const target = filename;
 	auto const fps = core.project->Timecodes();
 	auto const encoding = SubtitleFormat::ResolveWriteEncoding("");
@@ -636,7 +574,7 @@ void SubsController::QueueSaveEveryChange(
 		auto completion = std::function<void()>([this, state, staging_snapshot, target, snapshot_id] {
 			if (!state->alive.load(std::memory_order_acquire) || filename != target)
 				return;
-			saved_commit_id = snapshot_id;
+			history.MarkSaved(snapshot_id);
 			autosaved_commit_id = snapshot_id;
 			FileSave();
 			if (tracks_external_file_state
@@ -930,7 +868,7 @@ bool SubsController::PromptReloadAfterExternalChange(FileWatchSnapshot const& cu
 		context->ShowWarning(
 			from_wx(_("The subtitle file was deleted or moved by another program.\n\nThe current subtitles will be kept in memory. If you save, the file will be recreated.")),
 			from_wx(_("Subtitle file changed")));
-		saved_commit_id = -1;
+		history.MarkSaved(-1);
 		UpdateTitleAfterExternalChange();
 		return false;
 	}
@@ -1040,14 +978,13 @@ void SubsController::SetFileName(agi::fs::path const& path) {
 }
 
 void SubsController::OnCommit(AssFileCommit c) {
-	if (c.message.empty() && !undo_stack.empty()) return;
+	if (c.message.empty() && !history.Empty())
+		return;
 	auto const save_generation = BeginSaveEveryChangeRevision();
 
 	auto core = context->GetCore();
 	auto save_on_change = [&] {
-		if (undo_stack.size() <= 1
-				|| !OPT_GET("App/Auto/Save on Every Change")->GetBool()
-				|| filename.empty())
+		if (history.UndoDepth() <= 1 || !OPT_GET("App/Auto/Save on Every Change")->GetBool() || filename.empty())
 			return;
 
 		const SubtitleFormat *writer = nullptr;
@@ -1077,89 +1014,58 @@ void SubsController::OnCommit(AssFileCommit c) {
 	if (c.single_line && c.single_line->Group() == AssEntryGroup::DIALOGUE)
 		core.selectionController->RecordEditedLine(c.single_line);
 
-	commit_id = next_commit_id++;
-	// Allow coalescing only if it's the last change and the file has not been
-	// saved since the last change
-	if (commit_id == *c.commit_id+1 && redo_stack.empty() && saved_commit_id+1 != commit_id) {
-		auto const dialogue_only = c.type != AssFile::COMMIT_NEW
-			&& (c.type & AssFile::COMMIT_DIAG_FULL) != 0
-			&& (c.type & ~AssFile::COMMIT_DIAG_FULL) == 0;
-		if (dialogue_only
-			&& subs_controller_detail::TryAmendDialogueSnapshot(undo_stack.back().events, c.changed_lines)) {
-			*c.commit_id = commit_id;
-			save_on_change();
-			return;
-		}
-
-		undo_stack.pop_back();
-	}
-
-	// Make sure the file has at least one style and one dialogue line
-	if (core.ass->Styles.empty())
-		core.ass->Styles.push_back(*new AssStyle);
-	if (core.ass->Events.empty()) {
-		core.ass->Events.push_back(*new AssDialogue);
-		core.ass->Events.back().Row = 0;
-	}
-
-	redo_stack.clear();
-
-	undo_stack.emplace_back(context, c.message, commit_id);
-
-	int depth = std::max<int>(OPT_GET("Limits/Undo Levels")->GetInt(), 2);
-	while ((int)undo_stack.size() > depth)
-		undo_stack.pop_front();
-
+	history.Record(*core.ass, c, [this] { return CaptureHistoryBookmark(context); }, OPT_GET("Limits/Undo Levels")->GetInt());
 	save_on_change();
-
-	*c.commit_id = commit_id;
 }
 
 void SubsController::OnActiveLineChanged() {
-	if (!undo_stack.empty())
-		undo_stack.back().UpdateActiveLine(context);
+	if (auto *line = context->GetCore().selectionController->GetActiveLine())
+		history.UpdateActiveLine(line->Id);
 }
 
 void SubsController::OnSelectionChanged() {
-	if (!undo_stack.empty())
-		undo_stack.back().UpdateSelection(context);
+	auto const& selected = context->GetCore().selectionController->GetSelectedSet();
+	std::vector<int> ids;
+	ids.reserve(selected.size());
+	for (auto const *line : selected)
+		ids.push_back(line->Id);
+	history.UpdateSelection(std::move(ids));
 }
 
 void SubsController::OnTextSelectionChanged() {
-	if (!undo_stack.empty())
-		undo_stack.back().UpdateTextSelection(context);
+	auto core = context->GetCore();
+	history.UpdateTextSelection(core.textSelectionController->GetInsertionPoint(),
+								core.textSelectionController->GetSelectionStart(), core.textSelectionController->GetSelectionEnd());
 }
 
 void SubsController::Undo() {
-	if (undo_stack.size() <= 1) return;
+	if (!history.CanUndo())
+		return;
 	BeginSaveEveryChangeRevision();
-	redo_stack.splice(redo_stack.end(), undo_stack, std::prev(undo_stack.end()));
-
-	commit_id = undo_stack.back().commit_id;
-
 	text_selection_connection.Block();
-	undo_stack.back().Apply(context);
-	text_selection_connection.Unblock();
+	auto unblock = agi::make_scope_exit([this] { text_selection_connection.Unblock(); });
+	history.Undo(*context->GetCore().ass, [this](SubtitleHistoryBookmark const& bookmark) {
+		RestoreHistoryBookmark(context, bookmark);
+	});
 }
 
 void SubsController::Redo() {
-	if (redo_stack.empty()) return;
+	if (!history.CanRedo())
+		return;
 	BeginSaveEveryChangeRevision();
-	undo_stack.splice(undo_stack.end(), redo_stack, std::prev(redo_stack.end()));
-
-	commit_id = undo_stack.back().commit_id;
-
 	text_selection_connection.Block();
-	undo_stack.back().Apply(context);
-	text_selection_connection.Unblock();
+	auto unblock = agi::make_scope_exit([this] { text_selection_connection.Unblock(); });
+	history.Redo(*context->GetCore().ass, [this](SubtitleHistoryBookmark const& bookmark) {
+		RestoreHistoryBookmark(context, bookmark);
+	});
 }
 
 std::string SubsController::GetUndoDescription() const {
-	return IsUndoStackEmpty() ? std::string() : undo_stack.back().undo_description;
+	return history.UndoDescription();
 }
 
 std::string SubsController::GetRedoDescription() const {
-	return IsRedoStackEmpty() ? std::string() : redo_stack.back().undo_description;
+	return history.RedoDescription();
 }
 
 agi::fs::path SubsController::Filename() const {
