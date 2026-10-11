@@ -204,11 +204,11 @@ void ApplyPatch(AssDialogue& line, DotNetSubtitleEventPatch const& patch) {
 } // namespace
 
 std::string BuildDotNetMacroContextJson(
-	agi::Context const* context,
+	agi::Context const *context,
 	int64_t invocation_token,
 	bool include_subtitles,
 	DotNetSubtitleSnapshotScope snapshot_scope,
-	ProgressSink* progress) {
+	AutomationProgress *progress) {
 	if (invocation_token <= 0)
 		throw std::invalid_argument("C# Macro invocation token must be positive");
 

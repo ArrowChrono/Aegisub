@@ -34,6 +34,11 @@
 
 #include "auto4_lua.h"
 
+#include "automation/automation_error.h"
+#include "automation/automation_features.h"
+#include "automation/automation_runtime_services.h"
+#include "automation/engine/automation_script_instance.h"
+
 #include "ass_dialogue.h"
 #include "ass_file.h"
 #include "ass_info.h"
@@ -42,33 +47,15 @@
 #include "automation/automation_debug_session.h"
 #include "automation/automation_debug_service.h"
 #include "automation/automation_invocation_observer.h"
-#include "automation/automation_live_host.h"
 #include "automation/automation_lua_debug_backend.h"
 #include "automation/automation_lua_runtime.h"
 #include "automation/lua_workspace_run.h"
 #include "automation/lua_source_tools.h"
 #include "automation/karaoke_line_classifier.h"
-#include "async_video_provider.h"
 #include "auto4_lua_factory.h"
-#include "audio_controller.h"
-#include "audio_timing.h"
-#include "command/command.h"
-#include "compat.h"
-#ifdef WITH_PLUGIN_BRIDGE
-#include "coreclr/plugin_lua_api.h"
-#endif
-#include "frame_main.h"
-#include "include/aegisub/context.h"
-#include "include/aegisub/context_ui.h"
 #include "options.h"
-#include "project.h"
-#include "selection_controller.h"
-#include "subs_controller.h"
-#include "video_controller.h"
-#include "wx_automation_file_dialog_service.h"
-#include "utils.h"
 
-#include <libaegisub/dispatch.h>
+#include <libaegisub/fs.h>
 #include <libaegisub/format.h>
 #include <libaegisub/log.h>
 #include <libaegisub/lua/ffi.h>
@@ -78,6 +65,7 @@
 #include <libaegisub/make_unique.h>
 #include <libaegisub/path.h>
 #include <libaegisub/scope_exit.h>
+#include <libaegisub/split.h>
 #include <libaegisub/string_utils.h>
 
 extern "C" {
@@ -89,11 +77,6 @@ extern "C" {
 #include <exception>
 #include <map>
 #include <set>
-#include <unordered_set>
-#include <wx/clipbrd.h>
-#include <wx/log.h>
-#include <wx/msgdlg.h>
-#include <wx/translation.h>
 
 using namespace agi::lua;
 using namespace Automation4;
@@ -131,14 +114,11 @@ namespace {
 		return lua_tocfunction(L, lua_upvalueindex(1))(L);
 	}
 
-	wxString get_wxstring(lua_State *L, int idx)
-	{
-		return wxString::FromUTF8(lua_tostring(L, idx));
-	}
-
-	wxString check_wxstring(lua_State *L, int idx)
-	{
-		return to_wx(check_string(L, idx));
+	AutomationRuntimeServices& get_services(lua_State *L) {
+		lua_getfield(L, LUA_REGISTRYINDEX, "automation_runtime_services");
+		auto *services = static_cast<AutomationRuntimeServices *>(lua_touserdata(L, -1));
+		lua_pop(L, 1);
+		return *services;
 	}
 
 	AutomationHost *get_host(lua_State *L)
@@ -261,42 +241,38 @@ namespace {
 
 	int get_translation(lua_State *L)
 	{
-		wxString str(check_wxstring(L, 1));
-		if (wxTranslations::Get())
-			push_value(L, wxGetTranslation(str).utf8_str());
-		else
-			push_value(L, str.utf8_str());
+		push_value(L, get_services(L).Translate(check_string(L, 1)));
 		return 1;
 	}
 
-	char *clipboard_get()
-	{
-		std::string data;
-		agi::dispatch::Main().Sync([&] { data = GetClipboard(); });
-		if (data.empty())
-			return nullptr;
-		return strndup(data);
+	int clipboard_get(lua_State *L) {
+		auto data = get_services(L).GetClipboard();
+		if (data.empty()) {
+			lua_pushnil(L);
+			return 1;
+		}
+		auto *buffer = strndup(data);
+		lua_pushvalue(L, lua_upvalueindex(1));
+		lua_pushliteral(L, "char *");
+		lua_pushlightuserdata(L, buffer);
+		lua_call(L, 2, 1);
+		return 1;
 	}
 
-	bool clipboard_set(const char *str)
-	{
-		bool succeeded = false;
-
-		agi::dispatch::Main().Sync([&] {
-			wxClipboard &cb = *wxTheClipboard;
-			if (cb.Open()) {
-				succeeded = cb.SetData(new wxTextDataObject(wxString::FromUTF8(str)));
-				cb.Close();
-				cb.Flush();
-			}
-		});
-
-		return succeeded;
+	int clipboard_set(lua_State *L) {
+		push_value(L, get_services(L).SetClipboard(check_string(L, 1)));
+		return 1;
 	}
 
 	int clipboard_init(lua_State *L)
 	{
-		agi::lua::register_lib_table(L, {}, "get", clipboard_get, "set", clipboard_set);
+		agi::lua::do_register_lib_table(L, {});
+		lua_createtable(L, 0, 2);
+		lua_pushvalue(L, -2);
+		lua_pushcclosure(L, exception_wrapper<clipboard_get>, 1);
+		lua_setfield(L, -2, "get");
+		set_field<clipboard_set>(L, "set");
+		lua_remove(L, -2);
 		return 1;
 	}
 
@@ -445,8 +421,8 @@ namespace {
 			return error(L, "Not a style entry");
 
 		double width, height, descent, extlead;
-		if (!Automation4::CalculateTextExtents(static_cast<AssStyle*>(et.get()),
-				check_string(L, 2), width, height, descent, extlead))
+		if (!get_services(L).CalculateTextExtents(*static_cast<AssStyle *>(et.get()),
+												  check_string(L, 2), width, height, descent, extlead))
 			return error(L, "Some internal error occurred calculating text_extents");
 
 		push_value(L, width);
@@ -605,57 +581,60 @@ namespace {
 	/// @param bsr Background script runner to use for the progress dialog
 	/// @param invocation Structured invocation metadata for the current feature call.
 	/// @throws agi::UserCancelException if the function fails to run to completion (either due to cancelling or errors)
-	void LuaThreadedCall(lua_State *L, int nargs, int nresults, BackgroundScriptRunner& bsr, AutomationInvocation const& invocation, AutomationInvocationOutcome *outcome = nullptr);
+	void LuaThreadedCall(lua_State *L, int nargs, int nresults, AutomationRunner& bsr, AutomationInvocation const& invocation, AutomationInvocationOutcome *outcome = nullptr);
 
 	class LuaScript;
-	class LuaCommand final : public cmd::Command, private LuaFeature {
+	class LuaCommand final : public AutomationMacro, private LuaFeature {
 		std::string cmd_name;
 		std::string execution_id;
-		wxString display;
-		wxString help;
+		std::string display;
+		std::string help;
 		int cmd_type;
 		LuaScript *owner;
 
 		public:
 		LuaCommand(lua_State *L);
-		~LuaCommand();
+		~LuaCommand() override;
 
-		const char* name() const override { return cmd_name.c_str(); }
-		[[nodiscard]] std::string_view ExecutionId() const { return execution_id; }
-		wxString StrMenu(const agi::Context *) const override { return display; }
-		wxString StrDisplay(const agi::Context *) const override { return display; }
-		wxString StrHelp() const override { return help; }
-
+		[[nodiscard]] std::string const& Name() const override { return cmd_name; }
+		[[nodiscard]] std::string const& Display() const override { return display; }
+		[[nodiscard]] std::string const& Help() const override { return help; }
+		[[nodiscard]] std::string_view ExecutionId() const override { return execution_id; }
 		int Type() const override { return cmd_type; }
-
-		void operator()(agi::Context *c) override;
-		bool Validate(const agi::Context *c) override;
-		bool ValidateForWorkspace(
-			const agi::Context *c,
-			std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
-			BackgroundScriptRunner& runner);
-		virtual bool IsActive(const agi::Context *c) override;
+		AutomationInvocationOutcome Run(AutomationMacroContext const& context) override;
+		bool Validate(AutomationMacroContext const& context) override;
+		bool ValidateForWorkspace(AutomationMacroContext const& context,
+								  std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
+								  AutomationRunner& runner) override;
+		bool IsActive(AutomationMacroContext const& context) override;
 
 		static int LuaRegister(lua_State *L);
 	};
 
-	class LuaExportFilter final : public ExportFilter, private LuaFeature {
+	class LuaExportFilter final : public AutomationExportFilter, private LuaFeature {
+		std::string name;
+		std::string description;
+		int priority;
 		bool has_config;
-		LuaDialog *config_dialog;
+		std::shared_ptr<LuaDialog> config_dialog;
 
-	protected:
-		std::unique_ptr<ScriptDialog> GenerateConfigDialog(wxWindow *parent, agi::Context *c) override;
-
-	public:
+		public:
 		LuaExportFilter(lua_State *L);
 		static int LuaRegister(lua_State *L);
-
-		void ProcessSubs(AssFile *subs, wxWindow *export_dialog) override;
+		[[nodiscard]] std::string const& Name() const override { return name; }
+		void SetName(std::string value) override { name = std::move(value); }
+		[[nodiscard]] std::string const& Description() const override { return description; }
+		[[nodiscard]] int Priority() const override { return priority; }
+		std::shared_ptr<AutomationDialog> GenerateConfigDialog(AutomationMacroContext const& context) override;
+		void ProcessSubs(AssFile *subs, std::shared_ptr<AutomationHost> host, AutomationUiAnchor anchor) override;
 	};
-	class LuaScript final : public Script {
+	class LuaScript final : public AutomationScriptInstance {
+		agi::fs::path filename;
+		std::vector<agi::fs::path> include_path;
+		std::shared_ptr<AutomationRuntimeServices> services;
+		std::shared_ptr<AutomationFeatureRegistry> feature_registry;
 		lua_State *L = nullptr;
 		std::shared_ptr<AutomationHost> automation_host;
-		void const* automation_host_identity = nullptr;
 		AutomationRuntimeTraceSink *runtime_trace_sink = nullptr;
 		AutomationDebugSession *debug_session = nullptr;
 		std::unique_ptr<AutomationLuaDebugBackend> debug_backend;
@@ -670,10 +649,13 @@ namespace {
 		std::string author;
 		std::string version;
 
-		std::vector<cmd::Command*> macros;
-		std::vector<std::unique_ptr<LuaCommand>> pending_macros;
-		std::vector<std::unique_ptr<ExportFilter>> filters;
+		std::vector<AutomationMacro *> macros;
+		std::vector<std::unique_ptr<LuaCommand>> owned_macros;
+		std::vector<LuaCommand *> pending_macros;
+		std::vector<std::unique_ptr<LuaExportFilter>> filters;
 		std::vector<LuaExportFilter*> pending_filters;
+		std::vector<AutomationMacro *> active_macros;
+		std::vector<AutomationExportFilter *> active_filters;
 
 		/// load script and create internal structures etc.
 		void Create();
@@ -683,47 +665,43 @@ namespace {
 		static int LuaInclude(lua_State *L);
 
 	public:
-		LuaScript(agi::fs::path const& filename);
-		~LuaScript() { Destroy(); }
+	LuaScript(agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> services);
+	~LuaScript() override { Destroy(); }
 
-		void RegisterCommand(LuaCommand *command);
-		void UnregisterCommand(LuaCommand *command);
-		void RegisterFilter(LuaExportFilter *filter);
-		void QueueCommand(std::unique_ptr<LuaCommand> command);
-		void QueueFilter(std::unique_ptr<LuaExportFilter> filter);
+	void RegisterCommand(LuaCommand *command);
+	void UnregisterCommand(LuaCommand *command);
+	void QueueCommand(std::unique_ptr<LuaCommand> command);
+	void QueueFilter(std::unique_ptr<LuaExportFilter> filter);
 
-		static LuaScript* GetScriptObject(lua_State *L);
-		std::shared_ptr<AutomationHost> GetAutomationHost() const { return automation_host; }
-		[[nodiscard]] AutomationRuntimeTraceSink *GetRuntimeTraceSink() const { return runtime_trace_sink; }
-		bool MatchesAutomationHostContext(agi::Context const* context) const
-		{
-			return automation_host && automation_host_identity == context;
-		}
-		[[nodiscard]] AutomationLuaDebugBackend *GetDebugBackend() const { return debug_backend.get(); }
-		AutomationDebugSession *GetDebugSession() const { return debug_session; }
-		void PrepareWorkspaceSources(LuaWorkspaceRunRequest const& request);
-		[[nodiscard]] bool IsMacroRunning() const { return macro_running; }
-		void SetMacroRunning(bool value) { macro_running = value; }
-		[[nodiscard]] bool IsJitEnabled() const;
+	static LuaScript *GetScriptObject(lua_State *L);
+	[[nodiscard]] std::shared_ptr<AutomationHost> GetAutomationHost() const { return automation_host; }
+	[[nodiscard]] AutomationRuntimeTraceSink *GetRuntimeTraceSink() const { return runtime_trace_sink; }
+	[[nodiscard]] AutomationLuaDebugBackend *GetDebugBackend() const { return debug_backend.get(); }
+	[[nodiscard]] AutomationDebugSession *GetDebugSession() const { return debug_session; }
+	void PrepareWorkspaceSources(LuaWorkspaceRunRequest const& request);
+	[[nodiscard]] bool IsMacroRunning() const { return macro_running; }
+	void SetMacroRunning(bool value) { macro_running = value; }
+	[[nodiscard]] bool IsJitEnabled() const;
 
-		// Script implementation
-		void Reload() override { Create(); }
+	[[nodiscard]] agi::fs::path GetFilename() const override { return filename; }
+	[[nodiscard]] agi::fs::path GetPrettyFilename() const { return filename.filename(); }
+	void Reload() override { Create(); }
 
-		std::string GetName() const override { return name; }
-		std::string GetDescription() const override { return description; }
-		std::string GetAuthor() const override { return author; }
-		std::string GetVersion() const override { return version; }
-		bool GetLoadedState() const override { return L != nullptr; }
+	[[nodiscard]] std::string GetName() const override { return name; }
+	[[nodiscard]] std::string GetDescription() const override { return description; }
+	[[nodiscard]] std::string GetAuthor() const override { return author; }
+	[[nodiscard]] std::string GetVersion() const override { return version; }
+	[[nodiscard]] bool GetLoadedState() const override { return L != nullptr; }
 
-		std::vector<cmd::Command*> GetMacros() const override { return macros; }
-		std::vector<ExportFilter*> GetFilters() const override;
-		void CommitPendingFeatures() override;
-		std::string GetEngineName() const override { return "Lua"; }
-		std::optional<AutomationRuntimeStateSnapshot> TryGetRuntimeStateSnapshot() const override;
-		void SetRuntimeTraceSink(AutomationRuntimeTraceSink *sink) override;
-		void SetAutomationHost(std::shared_ptr<AutomationHost> host) override;
-		void SetAutomationHostForContext(std::shared_ptr<AutomationHost> host, agi::Context const* context);
-		void SetDebugSession(AutomationDebugSession *session) override;
+	[[nodiscard]] std::vector<AutomationMacro *> GetRuntimeMacros() const override { return macros; }
+	[[nodiscard]] std::vector<AutomationExportFilter *> GetRuntimeFilters() const override;
+	void SetFeatureRegistry(std::shared_ptr<AutomationFeatureRegistry> registry) override;
+	void CommitPendingFeatures() override;
+	[[nodiscard]] std::string GetEngineName() const override { return "Lua"; }
+	[[nodiscard]] std::optional<AutomationRuntimeStateSnapshot> TryGetRuntimeStateSnapshot() const override;
+	void SetRuntimeTraceSink(AutomationRuntimeTraceSink *sink) override;
+	void SetAutomationHost(std::shared_ptr<AutomationHost> host) override;
+	void SetDebugSession(AutomationDebugSession *session) override;
 
 	private:
 		void UpdateTemplateDebugEnabledFlag();
@@ -781,9 +759,30 @@ namespace {
 		}
 	};
 
-	LuaScript::LuaScript(agi::fs::path const& filename)
-	: Script(filename)
-	{
+	LuaScript::LuaScript(agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> services)
+		: filename(filename), services(std::move(services)) {
+		if (!this->services)
+			throw AutomationError("Lua runtime services are unavailable");
+		include_path.emplace_back(filename.parent_path());
+
+		for (auto probe = filename.parent_path(); !probe.empty();) {
+			auto candidate = probe / "include";
+			if (agi::fs::DirectoryExists(candidate)) {
+				include_path.emplace_back(std::move(candidate));
+				break;
+			}
+			auto parent = probe.parent_path();
+			if (parent == probe)
+				break;
+			probe = std::move(parent);
+		}
+
+		std::string include_paths = OPT_GET("Path/Automation/Include")->GetString();
+		for (auto tok : agi::Split(include_paths, '|')) {
+			auto path = config::path->Decode(agi::str(tok));
+			if (path.is_absolute() && agi::fs::DirectoryExists(path))
+				include_path.emplace_back(std::move(path));
+		}
 		Create();
 	}
 
@@ -844,6 +843,9 @@ namespace {
 		lua_setfield(L, LUA_REGISTRYINDEX, "filename");
 		stackcheck.check_stack(0);
 
+		push_value(L, services.get());
+		lua_setfield(L, LUA_REGISTRYINDEX, "automation_runtime_services");
+
 		// reference to the script object
 		push_value(L, this);
 		lua_setfield(L, LUA_REGISTRYINDEX, "aegisub");
@@ -887,10 +889,8 @@ namespace {
 		// store aegisub table to globals
 		lua_settable(L, LUA_GLOBALSINDEX);
 		stackcheck.check_stack(0);
-#ifdef WITH_PLUGIN_BRIDGE
-		RegisterPluginLuaApi(L);
+		services->InstallLuaModules(L);
 		stackcheck.check_stack(0);
-#endif
 		debug_backend->CaptureRuntimeBaseline();
 
 		auto workspace_request = workspace_load_request;
@@ -1029,12 +1029,15 @@ namespace {
 		pending_macros.clear();
 		pending_filters.clear();
 
-		// loops backwards because commands remove themselves from macros when
-		// they're unregistered
-		for (int i = macros.size() - 1; i >= 0; --i)
-			if (cmd::get_if(macros[i]->name()) == macros[i])
-				cmd::unreg(macros[i]->name());
-
+		if (feature_registry) {
+			for (auto *macro : active_macros)
+				feature_registry->DeactivateMacro(*macro);
+			for (auto *filter : active_filters)
+				feature_registry->DeactivateFilter(*filter);
+		}
+		active_macros.clear();
+		active_filters.clear();
+		owned_macros.clear();
 		filters.clear();
 
 		lua_close(L);
@@ -1108,9 +1111,8 @@ namespace {
 		}
 	}
 
-	std::vector<ExportFilter*> LuaScript::GetFilters() const
-	{
-		std::vector<ExportFilter *> ret;
+	std::vector<AutomationExportFilter *> LuaScript::GetRuntimeFilters() const {
+		std::vector<AutomationExportFilter *> ret;
 		ret.reserve(filters.size());
 		for (auto& filter : filters) ret.push_back(filter.get());
 		return ret;
@@ -1142,15 +1144,7 @@ namespace {
 
 	void LuaScript::SetAutomationHost(std::shared_ptr<AutomationHost> host)
 	{
-		SetAutomationHostForContext(std::move(host), nullptr);
-	}
-
-	void LuaScript::SetAutomationHostForContext(std::shared_ptr<AutomationHost> host, agi::Context const* context)
-	{
 		automation_host = std::move(host);
-		automation_host_identity = automation_host
-			? (context ? static_cast<void const*>(context) : automation_host->ProjectContextIdentity())
-			: nullptr;
 		if (L)
 			LuaSetAutomationHost(L, automation_host);
 	}
@@ -1166,9 +1160,9 @@ namespace {
 	void LuaScript::RegisterCommand(LuaCommand *command)
 	{
 		for (auto macro : macros) {
-			if (macro->name() == command->name()) {
+			if (macro->Name().c_str() == command->Name().c_str()) {
 				error(L, "A macro named '%s' is already defined in script '%s'",
-					command->StrDisplay(nullptr).utf8_str().data(), name.c_str());
+					  command->Display().c_str(), name.c_str());
 			}
 		}
 		macros.push_back(command);
@@ -1179,15 +1173,11 @@ namespace {
 		macros.erase(remove(macros.begin(), macros.end(), command), macros.end());
 	}
 
-	void LuaScript::RegisterFilter(LuaExportFilter *filter)
-	{
-		filters.emplace_back(filter);
-	}
-
 	void LuaScript::QueueCommand(std::unique_ptr<LuaCommand> command)
 	{
 		RegisterCommand(command.get());
-		pending_macros.emplace_back(std::move(command));
+		pending_macros.push_back(command.get());
+		owned_macros.emplace_back(std::move(command));
 	}
 
 	void LuaScript::QueueFilter(std::unique_ptr<LuaExportFilter> filter)
@@ -1196,36 +1186,49 @@ namespace {
 		filters.emplace_back(std::move(filter));
 	}
 
-	void LuaScript::CommitPendingFeatures()
-	{
-		if (pending_macros.empty() && pending_filters.empty())
+	void LuaScript::SetFeatureRegistry(std::shared_ptr<AutomationFeatureRegistry> registry) {
+		if (feature_registry == registry)
 			return;
-
-		std::unordered_set<std::string> committed_names;
-		for (auto *macro : macros) {
-			if (macro && find_if(pending_macros.begin(), pending_macros.end(), [&](std::unique_ptr<LuaCommand> const& pending) { return pending.get() == macro; }) == pending_macros.end())
-				committed_names.insert(macro->name());
+		if (feature_registry) {
+			for (auto *macro : active_macros)
+				feature_registry->DeactivateMacro(*macro);
+			for (auto *filter : active_filters)
+				feature_registry->DeactivateFilter(*filter);
 		}
+		active_macros.clear();
+		active_filters.clear();
+		pending_macros.clear();
+		pending_filters.clear();
+		for (auto const& macro : owned_macros)
+			pending_macros.push_back(macro.get());
+		for (auto const& filter : filters)
+			pending_filters.push_back(filter.get());
+		feature_registry = std::move(registry);
+	}
 
-		for (auto it = pending_macros.begin(); it != pending_macros.end(); ) {
-			auto& macro = *it;
-			auto const name = std::string(macro->name());
-			if (committed_names.count(name) || cmd::get_if(name)) {
-				wxLogWarning(wxS("Skipping Automation macro '%s' from script '%s' because command '%s' is already registered."),
-					macro->StrDisplay(nullptr), GetFilename().wstring(), to_wx(name));
-				macros.erase(remove(macros.begin(), macros.end(), macro.get()), macros.end());
-				it = pending_macros.erase(it);
+	void LuaScript::CommitPendingFeatures() {
+		if (!feature_registry)
+			return;
+		while (!pending_macros.empty()) {
+			auto *macro = pending_macros.front();
+			if (feature_registry->ActivateMacro(*macro)) {
+				active_macros.push_back(macro);
+				pending_macros.erase(pending_macros.begin());
 				continue;
 			}
-
-			committed_names.insert(name);
-			cmd::reg(std::move(macro));
-			it = pending_macros.erase(it);
+			services->LogWarning(agi::format(
+				"Skipping Automation macro '%s' from script '%s' because command '%s' is already registered.",
+				macro->Display(), agi::fs::PathToString(filename), macro->Name()));
+			pending_macros.erase(pending_macros.begin());
+			owned_macros.erase(std::ranges::find_if(owned_macros,
+													[&](auto const& owned) { return owned.get() == macro; }));
 		}
-
-		for (auto *filter : pending_filters)
-			AssExportFilterChain::Register(filter);
-		pending_filters.clear();
+		while (!pending_filters.empty()) {
+			auto *filter = pending_filters.front();
+			feature_registry->ActivateFilter(*filter);
+			active_filters.push_back(filter);
+			pending_filters.erase(pending_filters.begin());
+		}
 	}
 
 	LuaScript* LuaScript::GetScriptObject(lua_State *L)
@@ -1236,15 +1239,11 @@ namespace {
 		return (LuaScript*)ptr;
 	}
 
-	std::shared_ptr<AutomationHost> EnsureLuaScriptHost(lua_State *L, agi::Context const* context)
-	{
+	std::shared_ptr<AutomationHost> EnsureLuaScriptHost(lua_State *L, AutomationMacroContext const& context) {
 		auto *script = LuaScript::GetScriptObject(L);
-		auto host = script->GetAutomationHost();
-		if (context && !script->MatchesAutomationHostContext(context)) {
-			host = CreateAutomationLiveHost(context);
-			script->SetAutomationHostForContext(host, context);
-		}
-		return host;
+		if (context.host)
+			script->SetAutomationHost(context.host);
+		return script->GetAutomationHost();
 	}
 
 	std::shared_ptr<AutomationDebugSession> PrepareLuaDebugSession(lua_State *L, AutomationInvocation const& invocation)
@@ -1324,7 +1323,7 @@ namespace {
 		return lua_gettop(L) - pretop;
 	}
 
-	void LuaThreadedCall(lua_State *L, int nargs, int nresults, BackgroundScriptRunner& bsr, AutomationInvocation const& invocation, AutomationInvocationOutcome *outcome) {
+	void LuaThreadedCall(lua_State *L, int nargs, int nresults, AutomationRunner& bsr, AutomationInvocation const& invocation, AutomationInvocationOutcome *outcome) {
 		bool failed = false;
 		bool failure_recorded = false;
 		auto result = AutomationInvocationOutcome::Failed;
@@ -1335,7 +1334,7 @@ namespace {
 				*outcome = result;
 		});
 		try {
-			bsr.Run([&](ProgressSink *ps) {
+			bsr.Run([&](AutomationProgress *ps) {
 				try {
 					auto *script = LuaScript::GetScriptObject(L);
 					auto workspace_request = LuaGetWorkspaceRunRequest(L);
@@ -1464,7 +1463,7 @@ namespace {
 	}
 
 	LuaCommand::LuaCommand(lua_State *L)
-		: LuaFeature(L), display(check_wxstring(L, 1)), help(get_wxstring(L, 2)), cmd_type(cmd::COMMAND_NORMAL), owner(LuaScript::GetScriptObject(L)) {
+		: LuaFeature(L), display(check_string(L, 1)), help(get_string(L, 2)), cmd_type(MACRO_NORMAL), owner(LuaScript::GetScriptObject(L)) {
 		if (!lua_isnoneornil(L, 6)) {
 			if (lua_type(L, 6) != LUA_TSTRING)
 				error(L, "The macro execution identifier must be a string");
@@ -1477,10 +1476,10 @@ namespace {
 			error(L, "The macro processing function must be a function");
 
 		if (lua_isfunction(L, 4))
-			cmd_type |= cmd::COMMAND_VALIDATE;
+			cmd_type |= MACRO_VALIDATE;
 
 		if (lua_isfunction(L, 5))
-			cmd_type |= cmd::COMMAND_TOGGLE;
+			cmd_type |= MACRO_TOGGLE;
 
 		// new table for containing the functions for this feature
 		lua_createtable(L, 0, 3);
@@ -1510,11 +1509,9 @@ namespace {
 		LuaScript::GetScriptObject(L)->UnregisterCommand(this);
 	}
 
-	static std::vector<int> selected_rows(const agi::Context *c)
-	{
-		auto core = c->GetCore();
-		auto const& sel = core.selectionController->GetSelectedSet();
-		int offset = core.ass->Info.size() + core.ass->Styles.size();
+	static std::vector<int> selected_rows(AutomationMacroContext const& context) {
+		auto const& sel = context.selection->GetSelectedSet();
+		int offset = context.ass->Info.size() + context.ass->Styles.size();
 		std::vector<int> rows;
 		rows.reserve(sel.size());
 		for (auto line : sel)
@@ -1523,19 +1520,19 @@ namespace {
 		return rows;
 	}
 
-	bool LuaCommand::Validate(const agi::Context *c)
-	{
-		if (c->lua_workspace_invocation_active || owner->IsMacroRunning())
+	bool LuaCommand::Validate(AutomationMacroContext const& context) {
+		if (context.is_current && !context.is_current())
 			return false;
-		if (!(cmd_type & cmd::COMMAND_VALIDATE)) return true;
-		auto core = c->GetCore();
+		if (context.workspace_invocation_active || owner->IsMacroRunning())
+			return false;
+		if (!(cmd_type & MACRO_VALIDATE)) return true;
 		auto invocation = MakeMacroValidateInvocation(cmd_name);
-		auto rows = selected_rows(c);
+		auto rows = selected_rows(context);
 		int active_row = 0;
-		if (auto active_line = core.selectionController->GetActiveLine())
-			active_row = active_line->Row + core.ass->Info.size() + core.ass->Styles.size() + 1;
+		if (auto active_line = context.selection->GetActiveLine())
+			active_row = active_line->Row + context.ass->Info.size() + context.ass->Styles.size() + 1;
 
-		auto host = EnsureLuaScriptHost(L, c);
+		auto host = EnsureLuaScriptHost(L, context);
 		auto debug_session = PrepareLuaDebugSession(L, invocation);
 		auto clear_debug_session = agi::make_scope_exit([&] {
 			FinalizeLuaDebugSession(L, debug_session);
@@ -1547,7 +1544,7 @@ namespace {
 
 		GetFeatureFunction("validate");
 		auto subsobj = LuaAssFile::Create(
-			L, core.ass.get(),
+			L, context.ass,
 			invocation.capabilities.allow_modify,
 			invocation.capabilities.allow_undo);
 
@@ -1561,17 +1558,17 @@ namespace {
 		subsobj->ProcessingComplete();
 
 		if (err) {
-			wxLogWarning(wxS("Runtime error in Lua macro validation function:\n%s"), get_wxstring(L, -1));
+			get_services(L).LogWarning("Runtime error in Lua macro validation function:\n" + get_string(L, -1));
 			lua_pop(L, 2);
 			return false;
 		}
 
 		bool result = !!lua_toboolean(L, -2);
 
-		wxString new_help_string(get_wxstring(L, -1));
+		std::string new_help_string(get_string(L, -1));
 		if (new_help_string.size()) {
 			help = new_help_string;
-			cmd_type |= cmd::COMMAND_DYNAMIC_HELP;
+			cmd_type |= MACRO_DYNAMIC_HELP;
 		}
 
 		lua_pop(L, 3); // two return values and error handler
@@ -1580,16 +1577,18 @@ namespace {
 	}
 
 	bool LuaCommand::ValidateForWorkspace(
-		const agi::Context *c,
+		AutomationMacroContext const& context,
 		std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
-		BackgroundScriptRunner& runner) {
+		AutomationRunner& runner) {
+		if (context.is_current && !context.is_current())
+			throw agi::UserCancelException("The Automation context is no longer current");
 		if (!request || !request->sources || !request->stop_requested)
 			throw AutomationError("Invalid Lua Workspace validation request");
 		if (owner->IsMacroRunning())
 			return false;
 		if (request->stop_requested->load())
 			throw agi::UserCancelException("Cancelled by Lua Workspace");
-		if (!(cmd_type & cmd::COMMAND_VALIDATE))
+		if (!(cmd_type & MACRO_VALIDATE))
 			return true;
 
 		owner->SetMacroRunning(true);
@@ -1605,18 +1604,17 @@ namespace {
 		});
 
 		LuaStackcheck stackcheck(L);
-		auto core = c->GetCore();
 		auto invocation = MakeMacroValidateInvocation(cmd_name);
-		auto rows = selected_rows(c);
+		auto rows = selected_rows(context);
 		int active_row = 0;
-		if (auto active_line = core.selectionController->GetActiveLine())
-			active_row = active_line->Row + core.ass->Info.size() + core.ass->Styles.size() + 1;
-		auto host = EnsureLuaScriptHost(L, c);
+		if (auto active_line = context.selection->GetActiveLine())
+			active_row = active_line->Row + context.ass->Info.size() + context.ass->Styles.size() + 1;
+		auto host = EnsureLuaScriptHost(L, context);
 		LuaSetAutomationRuntimeState(L, host, invocation, rows, active_row);
 
 		GetFeatureFunction("validate");
 		auto subsobj = LuaAssFile::Create(
-			L, core.ass.get(),
+			L, context.ass,
 			invocation.capabilities.allow_modify,
 			invocation.capabilities.allow_undo);
 		push_value(L, rows);
@@ -1646,24 +1644,25 @@ namespace {
 		}
 
 		bool result = lua_toboolean(L, -2) != 0;
-		wxString new_help_string(get_wxstring(L, -1));
+		std::string new_help_string(get_string(L, -1));
 		if (!new_help_string.empty()) {
 			help = new_help_string;
-			cmd_type |= cmd::COMMAND_DYNAMIC_HELP;
+			cmd_type |= MACRO_DYNAMIC_HELP;
 		}
 		lua_pop(L, 2);
 		stackcheck.check_stack(0);
 		return result;
 	}
 
-	void LuaCommand::operator()(agi::Context *c)
-	{
+	AutomationInvocationOutcome LuaCommand::Run(AutomationMacroContext const& context) {
+		if (context.is_current && !context.is_current())
+			return AutomationInvocationOutcome::Cancelled;
 		if (owner->IsMacroRunning())
 			throw AutomationError("This Lua macro is already running");
 		auto invocation = MakeMacroRunInvocation(cmd_name);
 		std::shared_ptr<LuaWorkspaceRunRequest const> workspace_request;
-		if (c->lua_workspace_invocation_active) {
-			workspace_request = CreateAutomationLiveHost(c)->Ui().GetWorkspaceRunRequest(invocation);
+		if (context.workspace_invocation_active) {
+			workspace_request = (context.host ? context.host->Ui().GetWorkspaceRunRequest(invocation) : nullptr);
 			if (!workspace_request || workspace_request->macro_command != cmd_name)
 				throw AutomationError("Another Lua Workspace invocation is active");
 		}
@@ -1672,13 +1671,12 @@ namespace {
 		owner->SetMacroRunning(true);
 		auto clear_running = agi::make_scope_exit([&] { owner->SetMacroRunning(false); });
 		LuaStackcheck stackcheck(L);
-		auto core = c->GetCore();
-		int original_offset = core.ass->Info.size() + core.ass->Styles.size() + 1;
-		auto original_sel = selected_rows(c);
+		int original_offset = context.ass->Info.size() + context.ass->Styles.size() + 1;
+		auto original_sel = selected_rows(context);
 		int original_active = 0;
-		if (auto active_line = core.selectionController->GetActiveLine())
+		if (auto active_line = context.selection->GetActiveLine())
 			original_active = active_line->Row + original_offset;
-		auto host = EnsureLuaScriptHost(L, c);
+		auto host = EnsureLuaScriptHost(L, context);
 		if (!workspace_request && host)
 			workspace_request = host->Ui().GetWorkspaceRunRequest(invocation);
 		auto *script = LuaScript::GetScriptObject(L);
@@ -1688,10 +1686,10 @@ namespace {
 				throw AutomationError("Invalid Lua Workspace invocation request");
 			if (workspace_request->source_override) {
 				auto const& override = *workspace_request->source_override;
-				if (override.document_generation != c->subsController->GetDocumentGeneration())
+				if (override.document_generation != context.document_generation)
 					throw AutomationError("The Workspace template belongs to a different subtitle document");
 				bool found = false;
-				for (auto const& line : core.ass->Events)
+				for (auto const& line : context.ass->Events)
 					if (line.Id == override.dialogue_id)
 						found = IsKaraokeCodeLine(line.Comment, line.Effect.get());
 				if (!found)
@@ -1728,7 +1726,7 @@ namespace {
 
 		GetFeatureFunction("run");
 		auto subsobj = LuaAssFile::Create(
-			L, core.ass.get(),
+			L, context.ass,
 			invocation.capabilities.allow_modify,
 			invocation.capabilities.allow_undo);
 
@@ -1736,14 +1734,14 @@ namespace {
 		push_value(L, original_active);
 
 		auto runner = host
-						  ? (workspace_request ? host->Ui().CreateWorkspaceBackgroundScriptRunner(workspace_request, from_wx(StrDisplay(c))) : host->Ui().CreateBackgroundScriptRunner(from_wx(StrDisplay(c))))
-						  : std::unique_ptr<BackgroundScriptRunner>{};
+						  ? (workspace_request ? host->Ui().CreateWorkspaceBackgroundScriptRunner(workspace_request, Display()) : host->Ui().CreateBackgroundScriptRunner(Display()))
+						  : std::unique_ptr<AutomationRunner>{};
 		if (!runner)
 			throw AutomationError("Automation background runner unavailable");
 
 		auto call_outcome = AutomationInvocationOutcome::Failed;
 		try {
-			LuaThreadedCall(L, 3, 2, *runner, invocation, observer || workspace_request ? &call_outcome : nullptr);
+			LuaThreadedCall(L, 3, 2, *runner, invocation, &call_outcome);
 			if (workspace_request && workspace_request->stop_requested->load()) {
 				call_outcome = AutomationInvocationOutcome::Cancelled;
 				lua_pop(L, 2);
@@ -1753,13 +1751,18 @@ namespace {
 				lua_pop(L, 2);
 				throw AutomationError("The selected macro did not consume the Workspace template source");
 			}
+			if (context.is_current && !context.is_current()) {
+				call_outcome = AutomationInvocationOutcome::Cancelled;
+				lua_pop(L, 2);
+				throw agi::UserCancelException("The Automation context is no longer current");
+			}
 		}
 		catch (agi::UserCancelException const&) {
 			observation.SetOutcome(call_outcome);
 			subsobj->Cancel();
 			clear_pending_edit_box_request(L);
 			stackcheck.check_stack(0);
-			return;
+			return call_outcome;
 		}
 		catch (...) {
 			subsobj->Cancel();
@@ -1767,7 +1770,7 @@ namespace {
 			throw;
 		}
 
-		auto lines = subsobj->ProcessingComplete(StrDisplay(c));
+		auto lines = subsobj->ProcessingComplete(Display());
 
 		AssDialogue *active_line = nullptr;
 		int active_idx = original_active;
@@ -1776,7 +1779,7 @@ namespace {
 		if (lua_isnumber(L, -1)) {
 			active_idx = lua_tointeger(L, -1);
 			if (active_idx < 1 || active_idx > (int)lines.size()) {
-				wxLogError(wxS("Active row %d is out of bounds (must be 1-%u)"), active_idx, lines.size());
+				get_services(L).LogError(agi::format("Active row %d is out of bounds (must be 1-%u)", active_idx, lines.size()));
 				active_idx = original_active;
 			}
 		}
@@ -1792,12 +1795,12 @@ namespace {
 					return;
 				int cur = lua_tointeger(L, -1);
 				if (cur < 1 || cur > (int)lines.size()) {
-					wxLogError(wxS("Selected row %d is out of bounds (must be 1-%u)"), cur, lines.size());
+					get_services(L).LogError(agi::format("Selected row %d is out of bounds (must be 1-%u)", cur, lines.size()));
 					throw LuaForEachBreak();
 				}
 
 				if (typeid(*lines[cur - 1]) != typeid(AssDialogue)) {
-					wxLogError(wxS("Selected row %d is not a dialogue line"), cur);
+					get_services(L).LogError(agi::format("Selected row %d is not a dialogue line", cur));
 					throw LuaForEachBreak();
 				}
 
@@ -1807,35 +1810,35 @@ namespace {
 					active_line = diag;
 			});
 
-			AssDialogue *new_active = core.selectionController->GetActiveLine();
+			AssDialogue *new_active = context.selection->GetActiveLine();
 			if (active_line && (active_idx > 0 || !sel.count(new_active)))
 				new_active = active_line;
 			if (sel.empty())
 				sel.insert(new_active);
-			core.selectionController->SetSelectionAndActive(std::move(sel), new_active);
+			context.selection->SetSelectionAndActive(std::move(sel), new_active);
 		}
 		else {
 			lua_pop(L, 1);
 
-			Selection new_sel;
+			std::set<AssDialogue *> new_sel;
 			AssDialogue *new_active = nullptr;
 
 			int prev = original_offset;
-			auto it = core.ass->Events.begin();
+			auto it = context.ass->Events.begin();
 			for (int row : original_sel) {
-				while (row > prev && it != core.ass->Events.end()) {
+				while (row > prev && it != context.ass->Events.end()) {
 					++prev;
 					++it;
 				}
-				if (it == core.ass->Events.end()) break;
+				if (it == context.ass->Events.end()) break;
 				new_sel.insert(&*it);
 				if (row == original_active)
 					new_active = &*it;
 			}
 
 			if (new_sel.empty()) {
-				if (!core.ass->Events.empty()) {
-					new_active = &core.ass->Events.front();
+				if (!context.ass->Events.empty()) {
+					new_active = &context.ass->Events.front();
 					new_sel.insert(new_active);
 				}
 				else
@@ -1843,29 +1846,30 @@ namespace {
 			}
 			else if (!new_sel.count(new_active))
 				new_active = *new_sel.begin();
-			core.selectionController->SetSelectionAndActive(std::move(new_sel), new_active);
+			context.selection->SetSelectionAndActive(std::move(new_sel), new_active);
 		}
 
 		apply_pending_edit_box_request(L, host.get());
 		stackcheck.check_stack(0);
 		observation.SetOutcome(AutomationInvocationOutcome::Completed);
+		return AutomationInvocationOutcome::Completed;
 	}
 
-	bool LuaCommand::IsActive(const agi::Context *c)
-	{
-		if (c->lua_workspace_invocation_active || owner->IsMacroRunning())
+	bool LuaCommand::IsActive(AutomationMacroContext const& context) {
+		if (context.is_current && !context.is_current())
 			return false;
-		if (!(cmd_type & cmd::COMMAND_TOGGLE)) return false;
-		auto core = c->GetCore();
+		if (context.workspace_invocation_active || owner->IsMacroRunning())
+			return false;
+		if (!(cmd_type & MACRO_TOGGLE)) return false;
 		auto invocation = MakeMacroIsActiveInvocation(cmd_name);
-		auto rows = selected_rows(c);
+		auto rows = selected_rows(context);
 		int active_row = 0;
-		if (auto active_line = core.selectionController->GetActiveLine())
-			active_row = active_line->Row + core.ass->Info.size() + core.ass->Styles.size() + 1;
+		if (auto active_line = context.selection->GetActiveLine())
+			active_row = active_line->Row + context.ass->Info.size() + context.ass->Styles.size() + 1;
 
 		LuaStackcheck stackcheck(L);
 
-		auto host = EnsureLuaScriptHost(L, c);
+		auto host = EnsureLuaScriptHost(L, context);
 		auto debug_session = PrepareLuaDebugSession(L, invocation);
 		auto clear_debug_session = agi::make_scope_exit([&] {
 			FinalizeLuaDebugSession(L, debug_session);
@@ -1875,7 +1879,7 @@ namespace {
 
 		GetFeatureFunction("isactive");
 		auto subsobj = LuaAssFile::Create(
-			L, core.ass.get(),
+			L, context.ass,
 			invocation.capabilities.allow_modify,
 			invocation.capabilities.allow_undo);
 		push_value(L, rows);
@@ -1887,7 +1891,7 @@ namespace {
 
 		bool result = false;
 		if (err)
-			wxLogWarning(wxS("Runtime error in Lua macro IsActive function:\n%s"), get_wxstring(L, -1));
+			get_services(L).LogWarning("Runtime error in Lua macro IsActive function:\n" + get_string(L, -1));
 		else
 			result = !!lua_toboolean(L, -1);
 
@@ -1900,9 +1904,7 @@ namespace {
 
 	// LuaFeatureFilter
 	LuaExportFilter::LuaExportFilter(lua_State *L)
-	: ExportFilter(check_string(L, 1), lua_tostring(L, 2), lua_tointeger(L, 3))
-	, LuaFeature(L)
-	{
+		: LuaFeature(L), name(check_string(L, 1)), description(get_string(L, 2)), priority(lua_tointeger(L, 3)) {
 		if (!lua_isfunction(L, 4))
 			error(L, "The filter processing function must be a function");
 
@@ -1922,7 +1924,6 @@ namespace {
 
 		// store the table in the registry
 		RegisterFeature();
-
 	}
 
 	int LuaExportFilter::LuaRegister(lua_State *L)
@@ -1932,20 +1933,17 @@ namespace {
 		return 0;
 	}
 
-	void LuaExportFilter::ProcessSubs(AssFile *subs, wxWindow *export_dialog)
-	{
+	void LuaExportFilter::ProcessSubs(AssFile *subs, std::shared_ptr<AutomationHost> host, AutomationUiAnchor anchor) {
 		LuaStackcheck stackcheck(L);
-		auto invocation = MakeExportFilterRunInvocation(GetName());
+		auto invocation = MakeExportFilterRunInvocation(Name());
 		auto debug_session = PrepareLuaDebugSession(L, invocation);
 		auto clear_debug_session = agi::make_scope_exit([&] {
 			FinalizeLuaDebugSession(L, debug_session);
 		});
-		auto host = LuaScript::GetScriptObject(L)->GetAutomationHost();
-		if (!host) {
-			host = GetAutomationHost();
-			if (host)
-				LuaScript::GetScriptObject(L)->SetAutomationHost(host);
-		}
+		if (host)
+			LuaScript::GetScriptObject(L)->SetAutomationHost(host);
+		else
+			host = LuaScript::GetScriptObject(L)->GetAutomationHost();
 		LuaSetAutomationRuntimeState(L, host, invocation, {}, 0);
 		clear_pending_edit_box_request(L);
 
@@ -1974,15 +1972,9 @@ namespace {
 		assert(lua_istable(L, -1));
 		stackcheck.check_stack(3);
 
-		std::unique_ptr<BackgroundScriptRunner> runner;
-		if (host)
-			runner = host->Ui().CreateBackgroundScriptRunner(GetName(), AutomationUiAnchor{ export_dialog });
-		if (!runner) {
-			auto file_dialog_service = Automation4::ResolveAutomationFileDialogService(
-				host ? host->Ui().GetFileDialogService() : std::shared_ptr<agi::FileDialogService>{},
-				export_dialog);
-			runner = std::make_unique<BackgroundScriptRunner>(export_dialog, GetName(), std::move(file_dialog_service));
-		}
+		auto runner = host ? host->Ui().CreateBackgroundScriptRunner(Name(), anchor) : nullptr;
+		if (!runner)
+			throw AutomationError("Automation background runner unavailable");
 		try {
 			LuaThreadedCall(L, 2, 0, *runner, invocation);
 			stackcheck.check_stack(0);
@@ -1996,13 +1988,11 @@ namespace {
 		}
 	}
 
-	std::unique_ptr<ScriptDialog> LuaExportFilter::GenerateConfigDialog(wxWindow *parent, agi::Context *c)
-	{
+	std::shared_ptr<AutomationDialog> LuaExportFilter::GenerateConfigDialog(AutomationMacroContext const& context) {
 		if (!has_config)
 			return nullptr;
-		auto core = c->GetCore();
-		auto invocation = MakeExportFilterConfigInvocation(GetName());
-		auto host = EnsureLuaScriptHost(L, c);
+		auto invocation = MakeExportFilterConfigInvocation(Name());
+		auto host = EnsureLuaScriptHost(L, context);
 		auto debug_session = PrepareLuaDebugSession(L, invocation);
 		auto clear_debug_session = agi::make_scope_exit([&] {
 			FinalizeLuaDebugSession(L, debug_session);
@@ -2014,7 +2004,7 @@ namespace {
 
 		// prepare function call
 		auto subsobj = LuaAssFile::Create(
-			L, core.ass.get(),
+			L, context.ass,
 			invocation.capabilities.allow_modify,
 			invocation.capabilities.allow_undo);
 		// stored options
@@ -2025,73 +2015,51 @@ namespace {
 		subsobj->ProcessingComplete();
 
 		if (err) {
-			wxLogWarning(wxS("Runtime error in Lua config dialog function:\n%s"), get_wxstring(L, -1));
+			get_services(L).LogWarning("Runtime error in Lua config dialog function:\n" + get_string(L, -1));
 			lua_pop(L, 1); // remove error message
-		} else {
-			// Create config dialogue from table on top of stack
-			config_dialog = new LuaDialog(L, false);
+			return {};
 		}
-
-		return std::unique_ptr<ScriptDialog>{config_dialog};
+		config_dialog = std::make_shared<LuaDialog>(L, false);
+		return config_dialog;
 	}
 }
 
 namespace Automation4 {
-	std::string_view GetLuaMacroExecutionId(cmd::Command const *command)
-	{
-		auto const *lua_command = dynamic_cast<LuaCommand const *>(command);
-		return lua_command ? lua_command->ExecutionId() : std::string_view{};
-	}
+std::unique_ptr<AutomationScriptInstance> CreateLuaAutomationScriptInstanceForWorkspace(
+	agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> services,
+	std::shared_ptr<LuaWorkspaceRunRequest const> request, AutomationRunner& runner) {
+	if (!request || !request->sources || !request->stop_requested)
+		throw AutomationError("Invalid Lua Workspace script load request");
+	if (request->stop_requested->load())
+		throw agi::UserCancelException("Cancelled by Lua Workspace");
 
-	bool ValidateLuaMacroForWorkspace(
-		cmd::Command *command,
-		agi::Context const *context,
-		std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
-		BackgroundScriptRunner& runner) {
-		auto *lua_command = dynamic_cast<LuaCommand *>(command);
-		if (!lua_command)
-			throw AutomationError("The selected Workspace macro is not backed by Lua");
-		return lua_command->ValidateForWorkspace(context, request, runner);
-	}
-
-	std::unique_ptr<Script> ScriptFactory::CreateFromFileForWorkspace(
-		agi::fs::path const& filename,
-		std::shared_ptr<LuaWorkspaceRunRequest const> request,
-		BackgroundScriptRunner& runner,
-		bool *recognised_out) {
-		if (!request || !request->sources || !request->stop_requested)
-			throw AutomationError("Invalid Lua Workspace script load request");
+	std::unique_ptr<AutomationScriptInstance> candidate;
+	runner.Run([&](AutomationProgress *) {
+		auto previous_request = std::move(workspace_load_request);
+		workspace_load_request = request;
+		auto restore_request = agi::make_scope_exit([&] {
+			workspace_load_request = std::move(previous_request);
+		});
+		candidate = CreateLuaAutomationScriptInstance(filename, services);
 		if (request->stop_requested->load())
 			throw agi::UserCancelException("Cancelled by Lua Workspace");
+	});
+	return candidate;
+}
 
-		std::unique_ptr<Script> candidate;
-		bool recognised = false;
-		runner.Run([&](ProgressSink *) {
-			auto previous_request = std::move(workspace_load_request);
-			workspace_load_request = request;
-			auto restore_request = agi::make_scope_exit([&] {
-				workspace_load_request = std::move(previous_request);
-			});
-			candidate = CreateFromFile(filename, false, &recognised);
-			if (request->stop_requested->load())
-				throw agi::UserCancelException("Cancelled by Lua Workspace");
-		});
-		if (recognised_out)
-			*recognised_out = recognised;
-		return candidate;
-	}
+std::unique_ptr<AutomationScriptInstance> CreateLuaAutomationScriptInstance(
+	agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> services) {
+	if (agi::fs::HasExtension(filename, "lua") || agi::fs::HasExtension(filename, "moon"))
+		return agi::make_unique<LuaScript>(filename, std::move(services));
+	return nullptr;
+}
 
-	std::unique_ptr<AutomationScriptInstance> CreateLuaAutomationScriptInstance(agi::fs::path const& filename)
-	{
-		if (agi::fs::HasExtension(filename, "lua") || agi::fs::HasExtension(filename, "moon"))
-			return agi::make_unique<LuaScript>(filename);
-		return nullptr;
-	}
+LuaAutomationEngine::LuaAutomationEngine(std::shared_ptr<AutomationRuntimeServices> services)
+	: services(std::move(services)) {}
 
-	std::string LuaAutomationEngine::EngineName() const
-	{
-		return "Lua";
-	}
+std::string LuaAutomationEngine::EngineName() const {
+	return "Lua";
+}
 
 	std::string LuaAutomationEngine::FilenamePattern() const
 	{
@@ -2105,6 +2073,13 @@ namespace Automation4 {
 
 	std::unique_ptr<AutomationScriptInstance> LuaAutomationEngine::LoadScript(agi::fs::path const& filename) const
 	{
-		return CreateLuaAutomationScriptInstance(filename);
+		return CreateLuaAutomationScriptInstance(filename, services);
+	}
+
+	std::unique_ptr<AutomationScriptInstance> LuaAutomationEngine::LoadScript(
+		agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> load_services) const {
+		if (load_services)
+			return CreateLuaAutomationScriptInstance(filename, std::move(load_services));
+		return CreateLuaAutomationScriptInstance(filename, services);
 	}
 }

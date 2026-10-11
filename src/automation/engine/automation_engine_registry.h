@@ -30,7 +30,10 @@ namespace Automation4 {
 		static void Register(std::unique_ptr<AutomationEngine> engine);
 		static const std::vector<std::unique_ptr<AutomationEngine>>& GetEngines();
 		static AutomationEngine const* FindEngine(std::string_view engine_name);
-		static std::unique_ptr<AutomationScriptInstance> CreateFromFile(agi::fs::path const& filename);
-		static std::unique_ptr<AutomationScriptInstance> CreateForEngine(std::string_view engine_name, agi::fs::path const& filename);
+		static std::unique_ptr<AutomationScriptInstance> CreateFromFile(
+			agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> const& services = {});
+		static std::unique_ptr<AutomationScriptInstance> CreateForEngine(
+			std::string_view engine_name, agi::fs::path const& filename,
+			std::shared_ptr<AutomationRuntimeServices> services = {});
 	};
 }

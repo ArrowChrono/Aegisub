@@ -1,0 +1,4 @@
+Dialogue: 3,0:00:01.00,0:00:03.00,Default,first,0,0,0,,EXPORT:|,# café {\i1}café, 世界
+Comment: 1,0:00:02.00,0:00:04.00,Default,comment,0,0,0,sentinel,Keep this comment
+Dialogue: 5,0:00:05.00,0:00:07.25,Default,last,0,0,0,,EXPORT:|,# café Second dialogue
+Dialogue: 9,0:00:09.00,0:00:12.50,Default,untouched,10,20,30,keep,EXPORT:|,# café Untouched {\b1}tail

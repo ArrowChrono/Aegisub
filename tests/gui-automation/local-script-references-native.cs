@@ -290,6 +290,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             """)!;
         config["Path"]!["Automation"]!["Base"] = baseDir;
         File.WriteAllText(Path.Combine(profile, "user", "config.json"), config.ToJsonString(Json));
+        AutomationTestProfile.WriteMenusWithoutClipboardValidation(profile, artifacts);
         WriteLua(Path.Combine(scriptDir, "local.lua"), "Local Alpha", "Ref Alpha", "original description");
         WriteLua(Path.Combine(baseDir, "base.lua"), "Base Beta", "Ref Beta", "base directory fixture");
         WriteLua(Path.Combine(externalDir, "absolute.lua"), "Absolute Gamma", "Ref Gamma", "absolute input fixture");

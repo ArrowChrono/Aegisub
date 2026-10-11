@@ -36,10 +36,10 @@
 
 #include "automation/automation_host.h"
 #include "automation/automation_lua_runtime.h"
-#include "compat.h"
-#include "perf_trace.h"
 
 #include <libaegisub/lua/utils.h>
+
+#include <cassert>
 
 using namespace agi::lua;
 
@@ -207,55 +207,54 @@ namespace {
 }
 
 namespace Automation4 {
-	LuaProgressSink::LuaProgressSink(lua_State *L, ProgressSink *ps, AutomationInvocation const& invocation)
-	: L(L)
-	{
-		auto ud = (ProgressSink**)lua_newuserdata(L, sizeof(ProgressSink*));
-		*ud = ps;
+LuaProgressSink::LuaProgressSink(lua_State *L, AutomationProgress *ps, AutomationInvocation const& invocation)
+	: L(L) {
+	auto ud = static_cast<AutomationProgress **>(lua_newuserdata(L, sizeof(AutomationProgress *)));
+	*ud = ps;
 
 		// register progress reporting stuff
-		lua_getglobal(L, "aegisub");
+	lua_getglobal(L, "aegisub");
 
 		// Create aegisub.progress table
-		lua_createtable(L, 0, 5);
-		set_field_to_closure<LuaSetProgress>(L, "set");
-		set_field_to_closure<LuaSetTask>(L, "task");
-		set_field_to_closure<LuaSetTitle>(L, "title");
-		set_field_to_closure<LuaGetCancelled>(L, "is_cancelled");
-		lua_setfield(L, -2, "progress");
+	lua_createtable(L, 0, 5);
+	set_field_to_closure<LuaSetProgress>(L, "set");
+	set_field_to_closure<LuaSetTask>(L, "task");
+	set_field_to_closure<LuaSetTitle>(L, "title");
+	set_field_to_closure<LuaGetCancelled>(L, "is_cancelled");
+	lua_setfield(L, -2, "progress");
 
 		// Create aegisub.debug table
-		lua_createtable(L, 0, 4);
-		set_field_to_closure<LuaDebugOut>(L, "out");
-		lua_setfield(L, -2, "debug");
+	lua_createtable(L, 0, 4);
+	set_field_to_closure<LuaDebugOut>(L, "out");
+	lua_setfield(L, -2, "debug");
 
 		// Set aegisub.log
-		set_field_to_closure<LuaDebugOut>(L, "log", -2);
+	set_field_to_closure<LuaDebugOut>(L, "log", -2);
 
-		auto *host = LuaGetAutomationHost(L);
-		if (invocation.capabilities.allow_dialog && host && host->Ui().SupportsInteractiveDialogs()) {
-			lua_createtable(L, 0, 3);
-			set_field_to_closure<LuaDisplayDialog>(L, "display");
-			set_field_to_closure<LuaDisplayOpenDialog>(L, "open");
-			set_field_to_closure<LuaDisplaySaveDialog>(L, "save");
-			lua_setfield(L, -2, "dialog");
-		}
+	auto *host = LuaGetAutomationHost(L);
+	if (invocation.capabilities.allow_dialog && host && host->Ui().SupportsInteractiveDialogs()) {
+		lua_createtable(L, 0, 3);
+		set_field_to_closure<LuaDisplayDialog>(L, "display");
+		set_field_to_closure<LuaDisplayOpenDialog>(L, "open");
+		set_field_to_closure<LuaDisplaySaveDialog>(L, "save");
+		lua_setfield(L, -2, "dialog");
+	}
 
 		// reference so other objects can also find the progress sink
-		lua_pushvalue(L, -2);
-		lua_setfield(L, LUA_REGISTRYINDEX, "progress_sink");
+	lua_pushvalue(L, -2);
+	lua_setfield(L, LUA_REGISTRYINDEX, "progress_sink");
 
-		ensure_registry_table(L, kAutomationDebugProgressRegistryKey, 0, 6);
-		set_field(L, "percent", 0.0);
-		set_field(L, "task", std::string());
-		set_field(L, "title", std::string());
-		set_field(L, "cancelled", false);
-		set_field(L, "dialog_available", invocation.capabilities.allow_dialog && host && host->Ui().SupportsInteractiveDialogs());
-		lua_pop(L, 1);
-		clear_registry_table(L, kAutomationDebugDialogRegistryKey);
+	ensure_registry_table(L, kAutomationDebugProgressRegistryKey, 0, 6);
+	set_field(L, "percent", 0.0);
+	set_field(L, "task", std::string());
+	set_field(L, "title", std::string());
+	set_field(L, "cancelled", false);
+	set_field(L, "dialog_available", invocation.capabilities.allow_dialog && host && host->Ui().SupportsInteractiveDialogs());
+	lua_pop(L, 1);
+	clear_registry_table(L, kAutomationDebugDialogRegistryKey);
 
-		lua_pop(L, 2);
-	}
+	lua_pop(L, 2);
+}
 
 	LuaProgressSink::~LuaProgressSink()
 	{
@@ -270,10 +269,9 @@ namespace Automation4 {
 		clear_registry_table(L, kAutomationDebugDialogRegistryKey);
 	}
 
-	ProgressSink* LuaProgressSink::GetObjPointer(lua_State *L, int idx)
-	{
+	AutomationProgress *LuaProgressSink::GetObjPointer(lua_State *L, int idx) {
 		assert(lua_type(L, idx) == LUA_TUSERDATA);
-		return *((ProgressSink**)lua_touserdata(L, idx));
+		return *static_cast<AutomationProgress **>(lua_touserdata(L, idx));
 	}
 
 	int LuaProgressSink::LuaSetProgress(lua_State *L)
@@ -318,7 +316,7 @@ namespace Automation4 {
 
 	int LuaProgressSink::LuaDebugOut(lua_State *L)
 	{
-		ProgressSink *ps = GetObjPointer(L, lua_upvalueindex(1));
+		AutomationProgress *ps = GetObjPointer(L, lua_upvalueindex(1));
 
 		// Check trace level
 		if (lua_type(L, 1) == LUA_TNUMBER) {
@@ -357,31 +355,22 @@ namespace Automation4 {
 
 	int LuaProgressSink::LuaDisplayDialog(lua_State *L)
 	{
-		ProgressSink *ps = GetObjPointer(L, lua_upvalueindex(1));
+		AutomationProgress *ps = GetObjPointer(L, lua_upvalueindex(1));
 		auto *host = LuaGetAutomationHost(L);
 		if (!host)
 			return error(L, "Automation host unavailable for dialog.display");
 		record_dialog_display_request(L);
-		perf_trace::TraceLuaDialogOpenBegin();
 
-		try {
-			LuaDialog dlg(L, true); // magically creates the config dialog structure etc
-			host->Ui().ShowDialog(*ps, dlg);
-
-			// more magic: puts two values on stack: button pushed and table with control results
-			int result_count = dlg.LuaReadBack(L);
-			record_dialog_display_result(L, result_count);
-			return result_count;
-		}
-		catch (...) {
-			perf_trace::TraceLuaDialogOpenEnd(-1, -1, -1.0, false);
-			throw;
-		}
+		LuaDialog dlg(L, true);
+		host->Ui().ShowDialog(*ps, dlg);
+		int result_count = dlg.LuaReadBack(L);
+		record_dialog_display_result(L, result_count);
+		return result_count;
 	}
 
 	int LuaProgressSink::LuaDisplayOpenDialog(lua_State *L)
 	{
-		ProgressSink *ps = GetObjPointer(L, lua_upvalueindex(1));
+		AutomationProgress *ps = GetObjPointer(L, lua_upvalueindex(1));
 		auto *host = LuaGetAutomationHost(L);
 		if (!host)
 			return error(L, "Automation host unavailable for dialog.open");
@@ -420,7 +409,7 @@ namespace Automation4 {
 
 	int LuaProgressSink::LuaDisplaySaveDialog(lua_State *L)
 	{
-		ProgressSink *ps = GetObjPointer(L, lua_upvalueindex(1));
+		AutomationProgress *ps = GetObjPointer(L, lua_upvalueindex(1));
 		auto *host = LuaGetAutomationHost(L);
 		if (!host)
 			return error(L, "Automation host unavailable for dialog.save");

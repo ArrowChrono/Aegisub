@@ -35,16 +35,28 @@
 #pragma once
 
 #include "automation/engine/automation_engine.h"
-#include "auto4_base.h"
 
 namespace Automation4 {
-	std::unique_ptr<AutomationScriptInstance> CreateLuaAutomationScriptInstance(agi::fs::path const& filename);
+class AutomationRuntimeServices;
+class AutomationRunner;
+struct LuaWorkspaceRunRequest;
 
-	class LuaAutomationEngine final : public AutomationEngine {
+std::unique_ptr<AutomationScriptInstance> CreateLuaAutomationScriptInstance(
+	agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> services);
+std::unique_ptr<AutomationScriptInstance> CreateLuaAutomationScriptInstanceForWorkspace(
+	agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> services,
+	std::shared_ptr<LuaWorkspaceRunRequest const> request, AutomationRunner& runner);
+
+class LuaAutomationEngine final : public AutomationEngine {
+	std::shared_ptr<AutomationRuntimeServices> services;
+
 	public:
-		std::string EngineName() const override;
-		std::string FilenamePattern() const override;
-		bool SupportsFile(agi::fs::path const& filename) const override;
-		std::unique_ptr<AutomationScriptInstance> LoadScript(agi::fs::path const& filename) const override;
-	};
+	explicit LuaAutomationEngine(std::shared_ptr<AutomationRuntimeServices> services = {});
+	std::string EngineName() const override;
+	std::string FilenamePattern() const override;
+	bool SupportsFile(agi::fs::path const& filename) const override;
+	std::unique_ptr<AutomationScriptInstance> LoadScript(agi::fs::path const& filename) const override;
+	std::unique_ptr<AutomationScriptInstance> LoadScript(
+		agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> services) const override;
+};
 }

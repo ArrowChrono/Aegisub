@@ -1331,7 +1331,7 @@ void LuaWorkspaceFrame::StartRun(bool debug) {
 			reject(std::move(message));
 		};
 		disabled_windows.emplace(this);
-		std::unique_ptr<BackgroundScriptRunner> preparation_runner;
+		std::unique_ptr<AutomationRunner> preparation_runner;
 		if (karaoke_templater) {
 			std::vector<std::pair<Script *, cmd::Command *>> matches;
 			for (auto *manager : {static_cast<ScriptManager *>(context->local_scripts.get()), static_cast<ScriptManager *>(config::global_scripts)}) {

@@ -15,6 +15,7 @@
 #pragma once
 
 #include "automation_context_snapshot.h"
+#include "automation_ui.h"
 #include "automation_visual_guide_snapshot.h"
 
 #include <libaegisub/fs_fwd.h>
@@ -29,10 +30,9 @@ namespace agi {
 }
 
 namespace Automation4 {
-	class BackgroundScriptRunner;
+
 	class AutomationMutationJournal;
-	class ProgressSink;
-	class ScriptDialog;
+
 	class AutomationInvocationObserver;
 	struct AutomationInvocation;
 	struct LuaWorkspaceRunRequest;
@@ -95,14 +95,14 @@ namespace Automation4 {
 		virtual ~AutomationUiProxy() = default;
 		[[nodiscard]] virtual std::shared_ptr<AutomationInvocationObserver> BeginInvocationObservation(AutomationInvocation const&) const { return {}; }
 		[[nodiscard]] virtual std::shared_ptr<LuaWorkspaceRunRequest const> GetWorkspaceRunRequest(AutomationInvocation const&) const { return {}; }
-		virtual std::unique_ptr<BackgroundScriptRunner> CreateWorkspaceBackgroundScriptRunner(
-			std::shared_ptr<LuaWorkspaceRunRequest const> const&, std::string const&) const;
+		virtual std::unique_ptr<AutomationRunner> CreateWorkspaceBackgroundScriptRunner(
+			std::shared_ptr<LuaWorkspaceRunRequest const> const&, std::string const&) const { return {}; }
 		virtual void ShowStatus(std::string const& message, int timeout_ms = 10000) = 0;
 		virtual bool SupportsInteractiveDialogs() const = 0;
-		virtual std::unique_ptr<BackgroundScriptRunner> CreateBackgroundScriptRunner(std::string const& title, AutomationUiAnchor anchor = {}) const = 0;
-		virtual void ShowDialog(ProgressSink& sink, ScriptDialog& dialog) = 0;
-		virtual std::vector<agi::fs::path> RequestOpenFiles(ProgressSink& sink, AutomationOpenFileDialogRequest const& request) = 0;
-		virtual agi::fs::path RequestSaveFile(ProgressSink& sink, AutomationSaveFileDialogRequest const& request) = 0;
+		virtual std::unique_ptr<AutomationRunner> CreateBackgroundScriptRunner(std::string const& title, AutomationUiAnchor anchor = {}) const = 0;
+		virtual void ShowDialog(AutomationProgress& sink, AutomationDialog& dialog) = 0;
+		virtual std::vector<agi::fs::path> RequestOpenFiles(AutomationProgress& sink, AutomationOpenFileDialogRequest const& request) = 0;
+		virtual agi::fs::path RequestSaveFile(AutomationProgress& sink, AutomationSaveFileDialogRequest const& request) = 0;
 		virtual std::shared_ptr<agi::FileDialogService> GetFileDialogService() const = 0;
 		virtual bool CanFocusSubtitleEditBox() const = 0;
 		virtual std::optional<AutomationSubtitleEditBoxCursor> TryGetSubtitleEditBoxCursor() const = 0;

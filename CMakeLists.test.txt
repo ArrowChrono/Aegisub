@@ -39,10 +39,25 @@ add_executable(lua-workspace-language-e2e EXCLUDE_FROM_ALL
 target_compile_features(lua-workspace-language-e2e PRIVATE cxx_std_20)
 target_link_libraries(lua-workspace-language-e2e PRIVATE aegisub_core luajit)
 
+add_executable(automation-neutral-runtime-e2e EXCLUDE_FROM_ALL
+    tests/gui-automation/automation-neutral-runtime-e2e.cpp
+)
+target_compile_features(automation-neutral-runtime-e2e PRIVATE cxx_std_20)
+target_link_libraries(automation-neutral-runtime-e2e PRIVATE aegisub_core luajit)
+if(BUILD_TESTING)
+    add_test(NAME automation_neutral_runtime
+        COMMAND automation-neutral-runtime-e2e
+            "${PROJECT_BINARY_DIR}/artifacts/automation-neutral-runtime/e2e"
+    )
+    set_tests_properties(automation_neutral_runtime PROPERTIES
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        TIMEOUT 90
+        LABELS "e2e;automation"
+    )
+endif()
+
 add_executable(lua-workspace-virtual-source-e2e EXCLUDE_FROM_ALL
     tests/gui-automation/lua-workspace/virtual-source-e2e.cpp
-    src/automation/automation_lua_debug_backend.cpp
-    src/auto4_lua_assfile.cpp
     src/compat.cpp
 )
 target_compile_features(lua-workspace-virtual-source-e2e PRIVATE cxx_std_20)

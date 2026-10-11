@@ -1,0 +1,4 @@
+Dialogue: 4,0:00:01.25,0:00:03.25,Default,native-actor,0,0,0,neutral-accepted,{\b1}Accepted café, 世界\Nline one\Nline two|beta|#11223380|#7F
+Comment: 1,0:00:02.00,0:00:04.00,Default,comment,0,0,0,sentinel,Keep this comment
+Dialogue: 7,0:00:05.00,0:00:07.25,Default,last,0,0,0,neutral-active,Second dialogue
+Dialogue: 6,0:00:09.00,0:00:12.50,Default,untouched,10,20,30,keep,Untouched {\b1}tail

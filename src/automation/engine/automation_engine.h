@@ -14,15 +14,17 @@
 
 #pragma once
 
+#include "automation_script_instance.h"
+
 #include <libaegisub/fs_fwd.h>
 
 #include <memory>
 #include <string>
 
 namespace Automation4 {
-	class AutomationScriptInstance;
+class AutomationRuntimeServices;
 
-	class AutomationEngine {
+class AutomationEngine {
 	public:
 		virtual ~AutomationEngine() = default;
 
@@ -30,5 +32,9 @@ namespace Automation4 {
 		virtual std::string FilenamePattern() const = 0;
 		virtual bool SupportsFile(agi::fs::path const& filename) const = 0;
 		virtual std::unique_ptr<AutomationScriptInstance> LoadScript(agi::fs::path const& filename) const = 0;
+		virtual std::unique_ptr<AutomationScriptInstance> LoadScript(
+			agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices>) const {
+			return LoadScript(filename);
+		}
 	};
 }

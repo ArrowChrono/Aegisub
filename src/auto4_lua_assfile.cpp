@@ -37,14 +37,12 @@
 #include "ass_dialogue.h"
 #include "ass_info.h"
 #include "ass_file.h"
-#include "ass_file_app.h"
 #include "ass_karaoke.h"
 #include "ass_style.h"
 #include "automation/automation_host.h"
 #include "automation/automation_lua_runtime.h"
 #include "automation/automation_mutation_journal.h"
 #include "automation/lua_workspace_run.h"
-#include "compat.h"
 
 #include <libaegisub/exception.h>
 #include <libaegisub/log.h>
@@ -777,7 +775,7 @@ namespace Automation4 {
 			auto description = check_string(L, 1);
 
 			back.modification_type = modification_type;
-			back.mesage = to_wx(description);
+			back.mesage = description;
 			back.lines = lines;
 			if (mutation_journal)
 				mutation_journal->RecordUndoPoint(description, modification_type, static_cast<int>(lines.size()));
@@ -835,7 +833,7 @@ namespace Automation4 {
 		return true;
 	}
 
-	std::vector<AssEntry *> LuaAssFile::ProcessingComplete(wxString const& undo_description)
+	std::vector<AssEntry *> LuaAssFile::ProcessingComplete(std::string const& undo_description)
 	{
 		auto apply_lines = [&](std::vector<AssEntry *> const& lines) {
 			if (script_info_copied)
@@ -857,8 +855,8 @@ namespace Automation4 {
 		for (auto const& pc : pending_commits) {
 			apply_lines(pc.lines);
 			if (mutation_journal)
-				mutation_journal->RecordCommit(from_wx(pc.mesage), pc.modification_type, static_cast<int>(pc.lines.size()), true);
-			ass->Commit(from_wx(pc.mesage), pc.modification_type);
+				mutation_journal->RecordCommit(pc.mesage, pc.modification_type, static_cast<int>(pc.lines.size()), true);
+			ass->Commit(pc.mesage, pc.modification_type);
 		}
 
 		// Commit any changes after the last undo point was set
@@ -866,8 +864,8 @@ namespace Automation4 {
 			apply_lines(lines);
 		if (modification_type && can_set_undo && !undo_description.empty()) {
 			if (mutation_journal)
-				mutation_journal->RecordCommit(from_wx(undo_description), modification_type, static_cast<int>(lines.size()), true);
-			ass->Commit(from_wx(undo_description), modification_type);
+				mutation_journal->RecordCommit(undo_description, modification_type, static_cast<int>(lines.size()), true);
+			ass->Commit(undo_description, modification_type);
 		}
 		else if (modification_type && mutation_journal) {
 			mutation_journal->RecordApply(modification_type, static_cast<int>(lines.size()));

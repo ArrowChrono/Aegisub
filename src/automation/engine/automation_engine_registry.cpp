@@ -60,23 +60,24 @@ AutomationEngine const* AutomationEngineRegistry::FindEngine(std::string_view en
 	return nullptr;
 }
 
-std::unique_ptr<AutomationScriptInstance> AutomationEngineRegistry::CreateFromFile(agi::fs::path const& filename)
-{
+std::unique_ptr<AutomationScriptInstance> AutomationEngineRegistry::CreateFromFile(
+	agi::fs::path const& filename, std::shared_ptr<AutomationRuntimeServices> const& services) {
 	for (auto const& engine : Engines()) {
 		if (!engine || !engine->SupportsFile(filename))
 			continue;
 
-		if (auto script = engine->LoadScript(filename))
+		if (auto script = engine->LoadScript(filename, services))
 			return script;
 	}
 
 	return nullptr;
 }
 
-std::unique_ptr<AutomationScriptInstance> AutomationEngineRegistry::CreateForEngine(std::string_view engine_name, agi::fs::path const& filename)
-{
+std::unique_ptr<AutomationScriptInstance> AutomationEngineRegistry::CreateForEngine(
+	std::string_view engine_name, agi::fs::path const& filename,
+	std::shared_ptr<AutomationRuntimeServices> services) {
 	if (auto const* engine = FindEngine(engine_name))
-		return engine->LoadScript(filename);
+		return engine->LoadScript(filename, std::move(services));
 	return nullptr;
 }
 }

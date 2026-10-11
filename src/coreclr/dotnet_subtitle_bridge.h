@@ -9,7 +9,7 @@ namespace agi { struct Context; }
 
 namespace Automation4 {
 class AutomationHost;
-class ProgressSink;
+class AutomationProgress;
 
 enum class DotNetSubtitleSnapshotScope {
 	Full,
@@ -45,11 +45,11 @@ struct DotNetMacroExecutionResult {
 };
 
 std::string BuildDotNetMacroContextJson(
-	agi::Context const* context,
+	agi::Context const *context,
 	int64_t invocation_token,
 	bool include_subtitles,
 	DotNetSubtitleSnapshotScope snapshot_scope,
-	ProgressSink* progress = nullptr);
+	AutomationProgress *progress = nullptr);
 
 DotNetMacroExecutionResult ParseDotNetMacroResultJson(std::string const& result_json);
 

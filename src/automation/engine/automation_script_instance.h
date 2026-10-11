@@ -24,12 +24,12 @@
 #include <string>
 #include <vector>
 
-namespace cmd { class Command; }
-
 namespace Automation4 {
 	class AutomationHost;
 	class AutomationDebugSession;
-	class ExportFilter;
+	class AutomationMacro;
+	class AutomationExportFilter;
+	class AutomationFeatureRegistry;
 
 	class AutomationScriptInstance {
 	public:
@@ -42,8 +42,10 @@ namespace Automation4 {
 		virtual std::string GetAuthor() const = 0;
 		virtual std::string GetVersion() const = 0;
 		virtual bool GetLoadedState() const = 0;
-		virtual std::vector<cmd::Command*> GetMacros() const = 0;
-		virtual std::vector<ExportFilter*> GetFilters() const = 0;
+		virtual std::vector<AutomationMacro *> GetRuntimeMacros() const { return {}; }
+		virtual std::vector<AutomationExportFilter *> GetRuntimeFilters() const { return {}; }
+		virtual void SetFeatureRegistry(std::shared_ptr<AutomationFeatureRegistry>) {}
+		virtual void CommitPendingFeatures() {}
 		virtual std::string GetEngineName() const = 0;
 		/// Eagerly validate and activate an application-managed installation.
 		/// Traditional Automation autoload does not call this and remains lazy.

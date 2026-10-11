@@ -345,7 +345,6 @@ TEST(host_boundary_policy, service_like_sources_keep_wx_at_host_edges) {
 		"src/gui_wx_locale_host.cpp",
 		"src/gui_wx_runtime_entry_host.cpp",
 		"src/gui_wx_runtime_host.cpp",
-		"src/wx_automation_file_dialog_service.h",
 		"src/wx_audio_controller_power_host.cpp",
 		"src/wx_frame_main_dialog_ui_host.h",
 		"src/wx_frame_main_request_host.h",
@@ -562,24 +561,24 @@ TEST(host_boundary_policy, preferences_file_dialog_usage_stays_centralized) {
 	EXPECT_FALSE(seam_make_hits.empty());
 }
 
-TEST(host_boundary_policy, automation_file_dialog_fallback_lives_in_explicit_wx_service_seam) {
+TEST(host_boundary_policy, automation_file_dialog_requests_use_neutral_host_service) {
 	auto const root = ProjectRoot();
 	auto const auto4_lua_cpp = root / "src" / "auto4_lua.cpp";
-	auto const wx_automation_service_h = root / "src" / "wx_automation_file_dialog_service.h";
+	auto const auto4_progress_cpp = root / "src" / "auto4_lua_progresssink.cpp";
 
 	auto auto4_include_hits = FindLiteralHits(auto4_lua_cpp, "wx_file_dialog_services.h");
 	auto auto4_make_hits = FindLiteralHits(auto4_lua_cpp, "MakeWindowFileDialogService(");
 	auto auto4_seam_hits = FindLiteralHits(auto4_lua_cpp, "ResolveAutomationFileDialogService(");
 
-	auto seam_make_hits = FindLiteralHits(wx_automation_service_h, "MakeWindowFileDialogService(");
-	auto seam_include_hits = FindLiteralHits(wx_automation_service_h, "wx_file_dialog_services.h");
+	auto host_open_hits = FindLiteralHits(auto4_progress_cpp, "host->Ui().RequestOpenFiles(");
+	auto host_save_hits = FindLiteralHits(auto4_progress_cpp, "host->Ui().RequestSaveFile(");
 
 	EXPECT_TRUE(auto4_include_hits.empty()) << JoinLines(auto4_include_hits);
 	EXPECT_TRUE(auto4_make_hits.empty()) << JoinLines(auto4_make_hits);
-	EXPECT_FALSE(auto4_seam_hits.empty());
+	EXPECT_TRUE(auto4_seam_hits.empty()) << JoinLines(auto4_seam_hits);
 
-	EXPECT_FALSE(seam_make_hits.empty());
-	EXPECT_FALSE(seam_include_hits.empty());
+	EXPECT_FALSE(host_open_hits.empty());
+	EXPECT_FALSE(host_save_hits.empty());
 }
 
 TEST(host_boundary_policy, app_bootstrap_ui_fallback_lives_in_explicit_wx_service_seam) {
@@ -1384,6 +1383,13 @@ TEST(host_boundary_policy, aegisub_core_sources_keep_host_coupled_clusters_out) 
 		"src/async_video_provider_host.cpp",
 		"src/async_video_trace.cpp",
 		"src/audio_provider_factory.cpp",
+		"src/auto4_lua.cpp",
+		"src/auto4_lua_assfile.cpp",
+		"src/auto4_lua_dialog.cpp",
+		"src/auto4_lua_progresssink.cpp",
+		"src/automation/automation_lua_debug_backend.cpp",
+		"src/automation/automation_features.cpp",
+		"src/automation/automation_script_collection.cpp",
 		"src/cache_cleanup.cpp",
 		"src/context_core_session.cpp",
 		"src/ebu_export_settings.cpp",
@@ -1433,7 +1439,9 @@ TEST(host_boundary_policy, aegisub_core_sources_keep_host_coupled_clusters_out) 
 		"${AEGISUB_SHARED_PLAYBACK_PROJECT_SESSION_CORE_SOURCES}",
 		"${AEGISUB_SHARED_PROJECT_MEDIA_OPEN_QUERY_SOURCES}",
 		"src/automation/automation_live_host.cpp",
-		"src/automation/automation_lua_debug_backend.cpp",
+		"src/auto4_base.cpp",
+		"src/wx_automation_dialog.cpp",
+		"src/wx_automation_runtime.cpp",
 		"src/context.cpp",
 		"src/search_replace_engine.cpp",
 		"src/subs_controller.cpp",
@@ -2459,7 +2467,10 @@ TEST(host_boundary_policy, explicit_wx_surface_inventory_stays_current) {
 		"src/gui_wx_dispatch_event.cpp",
 		"src/gui_wx_dispatch_event.h",
 		"src/wx_app_bootstrap_ui_services.h",
-		"src/wx_automation_file_dialog_service.h",
+		"src/wx_automation_dialog.cpp",
+		"src/wx_automation_dialog.h",
+		"src/wx_automation_runtime.cpp",
+		"src/wx_automation_runtime.h",
 		"src/wx_file_dialog_services.h",
 		"src/wx_frame_main_dialog_ui_host.h",
 		"src/wx_frame_main_request_host.h",

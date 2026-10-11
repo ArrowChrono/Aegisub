@@ -227,8 +227,7 @@ public:
 		return context && context->GetUI().frame;
 	}
 
-	std::unique_ptr<BackgroundScriptRunner> CreateBackgroundScriptRunner(std::string const& title, AutomationUiAnchor anchor) const override
-	{
+	[[nodiscard]] std::unique_ptr<AutomationRunner> CreateBackgroundScriptRunner(std::string const& title, AutomationUiAnchor anchor) const override {
 		auto *parent = static_cast<wxWindow *>(anchor.native_parent);
 		if (context) {
 			if (context->lua_workspace_invocation_active)
@@ -239,7 +238,7 @@ public:
 		return std::make_unique<BackgroundScriptRunner>(parent, title, GetFileDialogService());
 	}
 
-	[[nodiscard]] std::unique_ptr<BackgroundScriptRunner> CreateWorkspaceBackgroundScriptRunner(
+	[[nodiscard]] std::unique_ptr<AutomationRunner> CreateWorkspaceBackgroundScriptRunner(
 		std::shared_ptr<LuaWorkspaceRunRequest const> const& request, std::string const& title) const override {
 #ifdef WITH_WXSTC
 		agi::ui::VerifyAccess();
@@ -261,20 +260,17 @@ public:
 #endif
 	}
 
-	void ShowDialog(ProgressSink& sink, ScriptDialog& dialog) override
-	{
+	void ShowDialog(AutomationProgress& sink, AutomationDialog& dialog) override {
 		if (!SupportsInteractiveDialogs())
 			throw AutomationError("interactive automation dialog unavailable in current host");
-		sink.ShowDialog(&dialog);
+		sink.ShowDialog(dialog);
 	}
 
-	std::vector<agi::fs::path> RequestOpenFiles(ProgressSink& sink, AutomationOpenFileDialogRequest const& request) override
-	{
+	std::vector<agi::fs::path> RequestOpenFiles(AutomationProgress& sink, AutomationOpenFileDialogRequest const& request) override {
 		return sink.RequestOpenFiles(request);
 	}
 
-	agi::fs::path RequestSaveFile(ProgressSink& sink, AutomationSaveFileDialogRequest const& request) override
-	{
+	agi::fs::path RequestSaveFile(AutomationProgress& sink, AutomationSaveFileDialogRequest const& request) override {
 		return sink.RequestSaveFile(request);
 	}
 

@@ -713,7 +713,7 @@ void WriteCSharpDebugContext(std::string const& context_json) {
 
 std::mutex invocation_services_mutex;
 struct CSharpInvocationServices {
-	ProgressSink* progress = nullptr;
+	AutomationProgress *progress = nullptr;
 	agi::Context* context = nullptr;
 };
 std::map<int64_t, CSharpInvocationServices> invocation_services;
@@ -724,7 +724,7 @@ class ScopedCSharpInvocationServices final {
 public:
 	ScopedCSharpInvocationServices(
 		int64_t token,
-		ProgressSink* progress,
+		AutomationProgress* progress,
 		agi::Context* context)
 	: token(token) {
 		std::lock_guard<std::mutex> lock(invocation_services_mutex);
@@ -1622,7 +1622,7 @@ public:
 			DotNetMacroExecutionResult result;
 			std::exception_ptr invocation_error;
 			auto runner = host->Ui().CreateBackgroundScriptRunner(from_wx(display));
-			runner->Run([&](ProgressSink* progress) {
+			runner->Run([&](AutomationProgress *progress) {
 				ScopedCSharpInvocationServices services(token, progress, context);
 				try {
 					auto context_json = BuildDotNetMacroContextJson(

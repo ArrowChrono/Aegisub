@@ -27,46 +27,30 @@
 //
 // Aegisub Project http://www.aegisub.org/
 
-#include "auto4_base.h"
+#pragma once
+
+#include "automation/automation_ui.h"
+#include "automation/automation_error.h"
 #include "automation/automation_invocation.h"
 
 #include <deque>
 #include <memory>
-#include <string_view>
+#include <string>
 #include <vector>
-#include <wx/string.h>
 
 class AssEntry;
-class wxControl;
-class wxWindow;
+class AssFile;
 struct lua_State;
 
 namespace Automation4 {
-	struct LuaWorkspaceRunRequest;
-
-	std::string_view GetLuaMacroExecutionId(cmd::Command const *command);
-	bool ValidateLuaMacroForWorkspace(
-		cmd::Command *command,
-		agi::Context const *context,
-		std::shared_ptr<LuaWorkspaceRunRequest const> const& request,
-		BackgroundScriptRunner& runner);
-
+	class AutomationHost;
 	class AutomationMutationJournal;
-
-	struct LuaDialogControlCreateTrace {
-		double native_construct_ms = 0.0;
-		double validator_bind_ms = 0.0;
-		double initial_value_set_ms = 0.0;
-		double floatedit_spin_construct_with_value_ms = 0.0;
-		double floatedit_spin_validator_bind_ms = 0.0;
-		double floatedit_text_construct_with_validator_ms = 0.0;
-	};
 
 	/// @class LuaAssFile
 	/// @brief Object wrapping an AssFile object for modification through Lua
 	class LuaAssFile {
 		struct PendingCommit {
-			wxString mesage;
+			std::string mesage;
 			int modification_type;
 			std::vector<AssEntry*> lines;
 		};
@@ -162,7 +146,7 @@ namespace Automation4 {
 		/// @param set_undo If there's any uncommitted changes to the file,
 		///                 they will be automatically committed with this
 		///                 description
-		std::vector<AssEntry *> ProcessingComplete(wxString const& undo_description = wxString());
+		std::vector<AssEntry *> ProcessingComplete(std::string const& undo_description = {});
 
 		/// End processing without applying any changes made
 		void Cancel();
@@ -183,82 +167,17 @@ namespace Automation4 {
 		static int LuaDisplaySaveDialog(lua_State *L);
 
 	public:
-		LuaProgressSink(lua_State *L, ProgressSink *ps, AutomationInvocation const& invocation);
+		LuaProgressSink(lua_State *L, AutomationProgress *ps, AutomationInvocation const& invocation);
 		~LuaProgressSink();
 
-		static ProgressSink* GetObjPointer(lua_State *L, int idx);
+		static AutomationProgress* GetObjPointer(lua_State *L, int idx);
 	};
 
-	/// Base class for controls in dialogs
-	class LuaDialogControl {
-		char const* trace_type;
-	protected:
-		LuaDialogControlCreateTrace create_trace;
-	public:
-		/// Name of this control in the output table
-		std::string name;
-
-		/// Tooltip of this control
-		std::string hint;
-		wxString hint_wx;
-
-		int x, y, width, height;
-
-		/// Create the associated wxControl
-		virtual wxControl *Create(wxWindow *parent) = 0;
-
-		/// Get the default flags to use when inserting this control into a sizer
-		virtual int GetSizerFlags() const { return wxEXPAND; }
-
-		char const* GetTraceType() const { return trace_type; }
-		virtual int GetTraceItemCount() const { return 0; }
-		LuaDialogControlCreateTrace const& GetCreateTrace() const { return create_trace; }
-
-		/// Push the current value of the control onto the lua stack. Must not
-		/// touch the GUI as this may be called on a background thread.
-		virtual void LuaReadBack(lua_State *L) = 0;
-
-		/// Does this control have any user-changeable data that can be serialized?
-		virtual bool CanSerialiseValue() const { return false; }
-
-		/// Serialize the control's current value so that it can be stored
-		/// in the script
-		virtual std::string SerialiseValue() const { return ""; }
-
-		/// Restore the control's value from a saved value in the script
-		virtual void UnserialiseValue(const std::string &serialised) { }
-
-		LuaDialogControl(lua_State *L, char const* trace_type);
-
-		/// Virtual destructor so this can safely be inherited from
-		virtual ~LuaDialogControl() = default;
-	};
-
-	/// A lua-generated dialog or panel in the export options dialog
-	class LuaDialog final : public ScriptDialog {
-		/// Controls in this dialog
-		std::vector<std::unique_ptr<LuaDialogControl>> controls;
-		/// The names and IDs of buttons in this dialog if non-default ones were used
-		std::vector<std::pair<int, std::string>> buttons;
-
-		/// Does the dialog contain any buttons
-		bool use_buttons;
-
-		/// Id of the button pushed (once a button has been pushed)
-		int button_pushed = -1;
-
-		wxWindow *window = nullptr;
-
+	class LuaDialog final : public AutomationDialog {
 	public:
 		LuaDialog(lua_State *L, bool include_buttons);
-
-		/// Push the values of the controls in this dialog onto the lua stack
-		/// in a single table
 		int LuaReadBack(lua_State *L);
-
-		// ScriptDialog implementation
-		wxWindow* CreateWindow(wxWindow *parent) override;
 		std::string Serialise() override;
-		void Unserialise(const std::string &serialised) override;
+		void Unserialise(std::string const& serialised) override;
 	};
 }

@@ -4,6 +4,7 @@
 
 #include "auto4_base.h"
 #include "auto4_lua_factory.h"
+#include "wx_automation_runtime.h"
 #include "automation/engine/automation_engine_registry.h"
 #include "automation/automation_debug_service.h"
 #ifdef WITH_PLUGIN_BRIDGE
@@ -23,7 +24,7 @@
 void InitializeRuntimeOptionalFacilities(AppRuntimeInitOptions const& options) {
 	if (options.register_automation_script_factory) {
 		if (!Automation4::AutomationEngineRegistry::FindEngine("Lua"))
-			Automation4::AutomationEngineRegistry::Register(agi::make_unique<Automation4::LuaAutomationEngine>());
+			Automation4::AutomationEngineRegistry::Register(agi::make_unique<Automation4::LuaAutomationEngine>(Automation4::CreateWxAutomationRuntimeServices()));
 #ifdef WITH_PLUGIN_BRIDGE
 		if (!Automation4::AutomationEngineRegistry::FindEngine("Plugin Bridge"))
 			Automation4::AutomationEngineRegistry::Register(agi::make_unique<Automation4::DotNetAutomationEngine>());

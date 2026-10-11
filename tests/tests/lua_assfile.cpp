@@ -54,7 +54,7 @@ TEST_F(lua_assfile, replacing_fold_boundaries_preserves_identity_and_group) {
 			subs[index] = line
 		end
 	)")) << lua_tostring(state.get(), -1);
-	subtitles->ProcessingComplete(wxS("edit boundaries"));
+	subtitles->ProcessingComplete("edit boundaries");
 
 	std::vector<AssDialogue const *> lines;
 	for (auto const& line : file.Events)
@@ -82,7 +82,7 @@ TEST_F(lua_assfile, appending_copy_keeps_distinct_identity_after_indexed_update)
 		subs[1] = line
 		subs.append(line)
 	)")) << lua_tostring(state.get(), -1);
-	subtitles->ProcessingComplete(wxS("edit and copy"));
+	subtitles->ProcessingComplete("edit and copy");
 
 	EXPECT_EQ(original_id, file.Events.front().Id);
 	EXPECT_NE(original_id, file.Events.back().Id);

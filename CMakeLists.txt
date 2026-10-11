@@ -991,21 +991,21 @@ set(AEGISUB_CORE_SOURCES
     src/provider_index_cache.cpp
     src/provider_catalog_builder.cpp
     src/provider_open_policy.cpp
-    # NOTE: auto4_base.h / auto4_lua.h expose wxWindow*/wxDialog*/wxString in
-    # their public/protected API (GenerateConfigDialog, CreateWindow, ShowDialog,
-    # ProcessingComplete(wxString)). The automation host subsystem is coupled
-    # through these roots and stays in the exe until abstracted. The wx-free
-    # automation debug subsystem below is kept in core.
+    src/auto4_lua.cpp
+    src/auto4_lua_assfile.cpp
+    src/auto4_lua_dialog.cpp
+    src/auto4_lua_progresssink.cpp
     src/automation/automation_breakpoint_store.cpp
     src/automation/automation_context_snapshot.cpp
     src/automation/automation_debug_adapter.cpp
     src/automation/automation_debug_service.cpp
     src/automation/automation_debug_session.cpp
-    # live automation/debug backend still depends on auto4 wx progress/dialog
-    # objects; the lower-level debug/session model remains in core.
+    src/automation/automation_features.cpp
+    src/automation/automation_lua_debug_backend.cpp
     src/automation/automation_lua_runtime.cpp
     src/automation/automation_mutation_journal.cpp
     src/automation/automation_runtime_journal.cpp
+    src/automation/automation_script_collection.cpp
     src/automation/local_script_references.cpp
     src/automation/karaoke_line_classifier.cpp
     src/automation/lua_source_tools.cpp
@@ -1368,14 +1368,10 @@ add_executable(Aegisub WIN32
     src/audio_renderer_waveform.cpp
     src/audio_timing_dialogue.cpp
     src/audio_timing_karaoke.cpp
-    # Automation host (auto4_base / auto4_lua are coupling roots)
     src/auto4_base.cpp
-    src/auto4_lua.cpp
-    src/auto4_lua_assfile.cpp
-    src/auto4_lua_dialog.cpp
-    src/auto4_lua_progresssink.cpp
+    src/wx_automation_runtime.cpp
+    src/wx_automation_dialog.cpp
     src/automation/automation_live_host.cpp
-    src/automation/automation_lua_debug_backend.cpp
     # Controllers with wx in public API
     src/project.cpp
     src/text_selection_controller.cpp
@@ -1590,7 +1586,8 @@ if(WIN32)
         src/font_family_obs_repository_win.cpp
         src/font_family_catalog_win.cpp
         src/font_variant_resolver_win.cpp)
-    target_link_libraries(aegisub_core PRIVATE Usp10 dwrite Version)
+    target_sources(aegisub_core PRIVATE src/automation/automation_text_extents_win.cpp)
+    target_link_libraries(aegisub_core PRIVATE Usp10 dwrite Version gdi32)
 elseif(APPLE)
     # Platform: CoreText always. Libass matcher: optional Fontconfig catalog
     # (there is no CoreText ILibassFontProvider yet). Do not hard-require Fontconfig

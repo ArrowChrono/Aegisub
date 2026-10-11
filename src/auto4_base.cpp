@@ -28,6 +28,8 @@
 // Aegisub Project http://www.aegisub.org/
 
 #include "auto4_base.h"
+#include "wx_automation_dialog.h"
+#include "wx_automation_runtime.h"
 
 #include "ass_file.h"
 #include "ass_style.h"
@@ -61,7 +63,6 @@
 
 #include <chrono>
 #include <exception>
-#include <future>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -70,20 +71,11 @@
 #include <wx/log.h>
 #include <wx/sizer.h>
 
-#ifdef __WINDOWS__
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
-#include <libaegisub/charset_conv_win.h>
-#include <libaegisub/scope_exit.h>
+#ifdef WIN32
+#include "automation/automation_text_extents.h"
 #endif
 
 namespace Automation4 {
-std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgroundScriptRunner(
-	std::shared_ptr<LuaWorkspaceRunRequest const> const&, std::string const&) const {
-	return {};
-}
-
 	namespace {
 		using AutoloadTimingClock = std::chrono::steady_clock;
 
@@ -93,32 +85,6 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		{
 			return std::chrono::duration<double, std::milli>(finished - started).count();
 		}
-
-		class ScriptCompatibilityWrapper final : public Script {
-			std::unique_ptr<AutomationScriptInstance> impl;
-
-		public:
-			explicit ScriptCompatibilityWrapper(std::unique_ptr<AutomationScriptInstance> impl)
-			: Script(impl ? impl->GetFilename() : agi::fs::path())
-			, impl(std::move(impl))
-			{
-			}
-
-			void Reload() override { impl->Reload(); }
-			std::string GetName() const override { return impl->GetName(); }
-			std::string GetDescription() const override { return impl->GetDescription(); }
-			std::string GetAuthor() const override { return impl->GetAuthor(); }
-			std::string GetVersion() const override { return impl->GetVersion(); }
-			bool GetLoadedState() const override { return impl->GetLoadedState(); }
-			std::vector<cmd::Command*> GetMacros() const override { return impl->GetMacros(); }
-			std::vector<ExportFilter*> GetFilters() const override { return impl->GetFilters(); }
-			std::string GetEngineName() const override { return impl->GetEngineName(); }
-			void ValidateApplicationActivation() override { impl->ValidateApplicationActivation(); }
-			std::optional<AutomationRuntimeStateSnapshot> TryGetRuntimeStateSnapshot() const override { return impl->TryGetRuntimeStateSnapshot(); }
-			void SetRuntimeTraceSink(AutomationRuntimeTraceSink *sink) override { impl->SetRuntimeTraceSink(sink); }
-			void SetAutomationHost(std::shared_ptr<AutomationHost> host) override { impl->SetAutomationHost(std::move(host)); }
-			void SetDebugSession(AutomationDebugSession *session) override { impl->SetDebugSession(session); }
-		};
 
 		std::unique_ptr<Script> WrapScriptInstance(std::unique_ptr<AutomationScriptInstance> instance)
 		{
@@ -130,7 +96,15 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 				return std::unique_ptr<Script>(script);
 			}
 
-			return agi::make_unique<ScriptCompatibilityWrapper>(std::move(instance));
+			return CreateWxAutomationScript(std::move(instance));
+		}
+
+		std::vector<std::unique_ptr<Script>> WrapScriptInstances(std::vector<std::unique_ptr<AutomationScriptInstance>> instances) {
+			std::vector<std::unique_ptr<Script>> result;
+			result.reserve(instances.size());
+			for (auto& instance : instances)
+				result.emplace_back(WrapScriptInstance(std::move(instance)));
+			return result;
 		}
 
 		void AddFilterEntry(
@@ -151,15 +125,7 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 			bool recognised = false;
 		};
 
-		struct AutoloadReloadResult {
-			std::vector<std::unique_ptr<Script>> scripts;
-			int error_count = 0;
-			struct Diagnostic {
-				std::string message;
-				bool error = false;
-			};
-			std::vector<Diagnostic> diagnostics;
-		};
+		using AutoloadReloadResult = AutomationScriptLoadResult;
 
 		class FailedScript final : public Script {
 			std::string description;
@@ -199,22 +165,14 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 			}
 		}
 
-		ScriptLoadAttempt LoadAutomationScript(agi::fs::path const& script_filename)
-		{
-			ScriptLoadAttempt attempt;
-			try {
-				attempt.script = ScriptFactory::CreateFromFile(script_filename, false, &attempt.recognised);
-			}
-			catch (...) {
-				attempt.recognised = true;
-				attempt.script = agi::make_unique<FailedScript>(script_filename, DescribeCurrentException());
-			}
-			return attempt;
+		ScriptLoadAttempt LoadWxAutomationScript(agi::fs::path const& script_filename) {
+			auto attempt = LoadAutomationScript(script_filename);
+			return {.script = WrapScriptInstance(std::move(attempt.script)), .recognised = attempt.recognised};
 		}
 
 		ScriptLoadAttempt LoadManagedApplicationPlugin(
 			agi::fs::path const& script_filename) {
-			auto attempt = LoadAutomationScript(script_filename);
+			auto attempt = LoadWxAutomationScript(script_filename);
 			if (!attempt.script || !attempt.script->GetLoadedState()) return attempt;
 			try {
 				attempt.script->ValidateApplicationActivation();
@@ -225,16 +183,6 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 					script_filename, DescribeCurrentException());
 			}
 			return attempt;
-		}
-
-		void ReportFailedAutomationScriptLoad(agi::fs::path const& filename, std::string const& description)
-		{
-			wxLogError(_("Failed to load Automation script '%s':\n%s"), filename.wstring(), to_wx(description));
-		}
-
-		void ReportUnrecognisedAutomationScript(agi::fs::path const& filename)
-		{
-			wxLogError(_("The file was not recognised as an Automation script: %s"), filename.wstring());
 		}
 
 #ifdef WITH_PLUGIN_BRIDGE
@@ -343,73 +291,14 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		}
 #endif
 
-		AutoloadReloadResult LoadAutoloadScripts(
+		AutoloadReloadResult LoadWxAutoloadScripts(
 			std::string const& path,
-			agi::fs::path const& managed_plugin_root)
-		{
-			AutoloadReloadResult result;
-			std::vector<agi::fs::path> script_filenames;
-
-			for (auto tok : agi::Split(path, '|')) {
-				auto dirname = config::path->Decode(agi::str(tok));
-				if (!agi::fs::DirectoryExists(dirname)) continue;
-
-				try {
-					dirname = agi::fs::Canonicalize(dirname);
-				}
-				catch (agi::fs::FileSystemError const&) {
-				}
-
-				for (auto filename : agi::fs::DirectoryIterator(dirname, "*.*")) {
-					auto script_filename = dirname / agi::fs::PathFromString(filename);
-					// Bare plugin.json is only for app-local plugins/<id>/ discovery.
-					// Traditional autoload uses *.* and must not pick it up.
-					auto leaf = agi::fs::PathToString(script_filename.filename());
-					std::transform(leaf.begin(), leaf.end(), leaf.begin(), [](char value) {
-						return value >= 'A' && value <= 'Z'
-							? static_cast<char>(value - 'A' + 'a')
-							: value;
-					});
-					if (leaf == "plugin.json")
-						continue;
-
-					try {
-						script_filename = agi::fs::Canonicalize(script_filename);
-					}
-					catch (agi::fs::FileSystemError const&) {
-					}
-
-					if (find(script_filenames.begin(), script_filenames.end(), script_filename) == script_filenames.end())
-						script_filenames.emplace_back(std::move(script_filename));
-				}
-			}
-
-			std::vector<std::future<ScriptLoadAttempt>> script_futures;
-			for (auto const& script_filename : script_filenames) {
-				try {
-					script_futures.emplace_back(std::async(std::launch::async, [=] {
-						return LoadAutomationScript(script_filename);
-					}));
-				}
-				catch (...) {
-					auto attempt = LoadAutomationScript(script_filename);
-					if (attempt.script) {
-						if (!attempt.script->GetLoadedState())
-							++result.error_count;
-						result.scripts.emplace_back(std::move(attempt.script));
-					}
-				}
-			}
-
-			for (auto& future : script_futures) {
-				auto attempt = future.get();
-				if (!attempt.script)
-					continue;
-
-				if (!attempt.script->GetLoadedState())
-					++result.error_count;
-				result.scripts.emplace_back(std::move(attempt.script));
-			}
+			agi::fs::path const& managed_plugin_root) {
+			std::vector<agi::fs::path> directories;
+			for (auto tok : agi::Split(path, '|'))
+				directories.push_back(config::path->Decode(agi::str(tok)));
+			auto result = LoadAutoloadScripts(directories);
+			auto const regular_script_count = result.scripts.size();
 
 #ifdef WITH_PLUGIN_BRIDGE
 			// Bundled plugins under <exe>/plugins/<id>/ register macros from their
@@ -517,70 +406,28 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 			(void)managed_plugin_root;
 #endif
 
+			for (auto index = regular_script_count; index < result.scripts.size(); ++index) {
+				auto const& script = result.scripts[index];
+				if (script && !script->GetLoadedState())
+					result.diagnostics.push_back({.message = "Failed to load Automation script '" + agi::fs::PathToString(script->GetFilename()) +
+															 "':\n" + script->GetDescription(),
+												  .error = true});
+			}
+
 			return result;
 		}
 	}
 
 	bool CalculateTextExtents(AssStyle *style, std::string const& text, double &width, double &height, double &descent, double &extlead)
 	{
+#ifdef WIN32
+		return CalculateAutomationTextExtents(*style, text, width, height, descent, extlead);
+#else
 		width = height = descent = extlead = 0;
 
 		double fontsize = style->fontsize * 64;
 		double spacing = style->spacing * 64;
 
-#ifdef WIN32
-		// This is almost copypasta from TextSub
-		auto dc = CreateCompatibleDC(nullptr);
-		if (!dc) return false;
-		auto release_dc = agi::make_scope_exit([dc] { DeleteDC(dc); });
-
-		SetMapMode(dc, MM_TEXT);
-
-		LOGFONTW lf = {0};
-		lf.lfHeight = (LONG)fontsize;
-		lf.lfWeight = style->bold ? FW_BOLD : FW_NORMAL;
-		lf.lfItalic = style->italic;
-		lf.lfUnderline = style->underline;
-		lf.lfStrikeOut = style->strikeout;
-		lf.lfCharSet = style->encoding;
-		lf.lfOutPrecision = OUT_TT_PRECIS;
-		lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
-		lf.lfQuality = ANTIALIASED_QUALITY;
-		lf.lfPitchAndFamily = DEFAULT_PITCH|FF_DONTCARE;
-		wcsncpy(lf.lfFaceName, agi::charset::ConvertW(style->font).c_str(), 31);
-
-		auto font = CreateFontIndirect(&lf);
-		if (!font) return false;
-
-		auto old_font = SelectObject(dc, font);
-		auto release_font = agi::make_scope_exit([dc, font, old_font] {
-			SelectObject(dc, old_font);
-			DeleteObject(font);
-		});
-
-		std::wstring wtext(agi::charset::ConvertW(text));
-		if (spacing != 0 ) {
-			width = 0;
-			for (auto c : wtext) {
-				SIZE sz;
-				GetTextExtentPoint32(dc, &c, 1, &sz);
-				width += sz.cx + spacing;
-				height = sz.cy;
-			}
-		}
-		else {
-			SIZE sz;
-			GetTextExtentPoint32(dc, &wtext[0], (int)wtext.size(), &sz);
-			width = sz.cx;
-			height = sz.cy;
-		}
-
-		TEXTMETRIC tm;
-		GetTextMetrics(dc, &tm);
-		descent = tm.tmDescent;
-		extlead = tm.tmExternalLeading;
-
-#else // not WIN32
 		wxMemoryDC thedc;
 
 		// fix fontsize to be 72 DPI
@@ -620,7 +467,6 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 			double scaling = fontsize / (double)(lheight > 0 ? lheight : 1); // semi-workaround for missing OS/2 table data for scaling
 			width = lwidth*scaling; height = lheight*scaling; descent = ldescent*scaling; extlead = lextlead*scaling;
 		}
-#endif
 
 		// Compensate for scaling
 		width = style->scalex / 100 * width / 64;
@@ -629,37 +475,7 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		extlead = style->scaley / 100 * extlead / 64;
 
 		return true;
-	}
-
-	ExportFilter::ExportFilter(std::string const& name, std::string const& description, int priority)
-	: AssExportFilter(name, description, priority)
-	{
-	}
-
-	std::string ExportFilter::GetScriptSettingsIdentifier()
-	{
-		return inline_string_encode(GetName());
-	}
-
-	wxWindow* ExportFilter::GetConfigDialogWindow(wxWindow *parent, agi::Context *c) {
-		automation_host = c ? CreateAutomationLiveHost(c) : nullptr;
-		config_dialog = GenerateConfigDialog(parent, c);
-
-		if (config_dialog) {
-			auto core = c->GetCore();
-			std::string const& val = core.ass->Properties.automation_settings[GetScriptSettingsIdentifier()];
-			if (!val.empty())
-				config_dialog->Unserialise(val);
-			return config_dialog->CreateWindow(parent);
-		}
-
-		return nullptr;
-	}
-
-	void ExportFilter::LoadSettings(bool is_default, agi::Context *c) {
-		automation_host = c ? CreateAutomationLiveHost(c) : nullptr;
-		if (config_dialog)
-			c->GetCore().ass->Properties.automation_settings[GetScriptSettingsIdentifier()] = config_dialog->Serialise();
+#endif
 	}
 
 	// ProgressSink
@@ -701,6 +517,17 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		return agi::ui::MainInvoke([dialog] { return dialog->ShowModal(); });
 	}
 
+	void ProgressSink::ShowDialog(AutomationDialog& model) {
+		class DialogAdapter final : public ScriptDialog {
+			AutomationDialog& model;
+
+			public:
+			explicit DialogAdapter(AutomationDialog& model) : model(model) {}
+			wxWindow *CreateWindow(wxWindow *parent) override { return CreateAutomationDialogWindow(model, parent); }
+		} adapter(model);
+		ShowDialog(&adapter);
+	}
+
 	std::vector<agi::fs::path> ProgressSink::RequestOpenFiles(AutomationOpenFileDialogRequest const& request)
 	{
 		return bsr->RequestOpenFiles(request);
@@ -735,8 +562,7 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 	{
 	}
 
-	void BackgroundScriptRunner::Run(std::function<void (ProgressSink*)> task)
-	{
+	void BackgroundScriptRunner::Run(std::function<void(AutomationProgress *)> task) {
 		impl->Run([&](agi::ProgressSink *ps) {
 			ProgressSink aps(ps, this);
 			task(&aps);
@@ -808,102 +634,53 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 	Script::Script(agi::fs::path const& filename)
 	: filename(filename)
 	{
-		include_path.emplace_back(filename.parent_path());
-
-		for (auto probe = filename.parent_path(); !probe.empty();) {
-			auto candidate = probe / "include";
-			if (agi::fs::DirectoryExists(candidate)) {
-				include_path.emplace_back(std::move(candidate));
-				break;
-			}
-			auto parent = probe.parent_path();
-			if (parent == probe)
-				break;
-			probe = std::move(parent);
-		}
-
-		std::string include_paths = OPT_GET("Path/Automation/Include")->GetString();
-		for (auto tok : agi::Split(include_paths, '|')) {
-			auto path = config::path->Decode(agi::str(tok));
-			if (path.is_absolute() && agi::fs::DirectoryExists(path))
-				include_path.emplace_back(std::move(path));
-		}
 	}
 
 	// ScriptManager
-	void ScriptManager::Add(std::unique_ptr<Script> script)
-	{
-		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession())
-			throw AutomationError("Cannot change loaded scripts while a Lua Workspace invocation is active");
-		if (!script)
-			return;
-		script->CommitPendingFeatures();
+	ScriptManager::ScriptManager()
+		: AutomationScriptCollection<Script>(
+			  [](AutomationScriptMutation mutation, std::shared_ptr<AutomationDebugSession> const& owner) {
+				  if (mutation == AutomationScriptMutation::Replace) {
+					  agi::ui::VerifyAccess();
+					  if (!config::automation_debug_service || !config::automation_debug_service->OwnsLocalSession(owner))
+						  throw AutomationError("Cannot replace a script without owning the active Lua Workspace session");
+					  return;
+				  }
+				  if (!config::automation_debug_service || !config::automation_debug_service->HasLocalSession())
+					  return;
+				  if (mutation == AutomationScriptMutation::Reload) {
+					  if (!config::automation_debug_service->OwnsLocalSession(owner) || owner->GetStateSnapshot().invocation_active)
+						  throw AutomationError("Cannot reload scripts while a Lua Workspace invocation is active");
+					  return;
+				  }
+				  throw AutomationError("Cannot change loaded scripts while a Lua Workspace invocation is active");
+			  },
+			  [this] { ScriptsChanged(); }) {
+	}
 
-		if (find(scripts.begin(), scripts.end(), script) == scripts.end())
-			scripts.emplace_back(std::move(script));
-
-		ScriptsChanged();
+	void ScriptManager::Add(std::unique_ptr<Script> script) {
+		AutomationScriptCollection<Script>::Add(std::move(script));
 	}
 
 	void ScriptManager::Remove(Script *script)
 	{
-		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession())
-			throw AutomationError("Cannot change loaded scripts while a Lua Workspace invocation is active");
-		auto i = find_if(scripts.begin(), scripts.end(), [&](std::unique_ptr<Script> const& s) { return s.get() == script; });
-		if (i != scripts.end())
-			scripts.erase(i);
-
-		ScriptsChanged();
+		AutomationScriptCollection<Script>::Remove(script);
 	}
 
 	void ScriptManager::RemoveAll()
 	{
-		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession())
-			throw AutomationError("Cannot change loaded scripts while a Lua Workspace invocation is active");
-		scripts.clear();
-		ScriptsChanged();
+		AutomationScriptCollection<Script>::RemoveAll();
 	}
 
 	void ScriptManager::Reload(Script *script, std::shared_ptr<AutomationDebugSession> const& owner) {
-		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession() && (!config::automation_debug_service->OwnsLocalSession(owner) || owner->GetStateSnapshot().invocation_active))
-			throw AutomationError("Cannot reload scripts while a Lua Workspace invocation is active");
-		script->Reload();
-		script->CommitPendingFeatures();
-		ScriptsChanged();
+		AutomationScriptCollection<Script>::Reload(script, owner);
 	}
 
 	Script *ScriptManager::ReplaceForWorkspace(
 		Script *current,
 		std::unique_ptr<Script> replacement,
 		std::shared_ptr<AutomationDebugSession> const& owner) {
-		agi::ui::VerifyAccess();
-		if (!config::automation_debug_service || !config::automation_debug_service->OwnsLocalSession(owner))
-			throw AutomationError("Cannot replace a script without owning the active Lua Workspace session");
-		if (!current || !replacement || !replacement->GetLoadedState())
-			throw AutomationError("Cannot replace a script with an unloaded Workspace candidate");
-
-		auto found = std::ranges::find_if(scripts, [&](std::unique_ptr<Script> const& script) {
-			return script.get() == current;
-		});
-		if (found == scripts.end())
-			throw AutomationError("The Workspace script is no longer managed");
-		if (replacement->GetFilename() != (*found)->GetFilename())
-			throw AutomationError("The Workspace replacement does not match the managed script");
-
-		auto *published = replacement.get();
-		std::swap(*found, replacement);
-		replacement.reset();
-		published->CommitPendingFeatures();
-		ScriptsChanged();
-		return published;
-	}
-
-	void CommitPendingFeatures(std::vector<std::unique_ptr<Script>>& scripts)
-	{
-		for (auto& script : scripts) {
-			if (script && script->GetLoadedState())
-				script->CommitPendingFeatures();
-		}
+		return Replace(current, std::move(replacement), owner);
 	}
 
 	const std::vector<cmd::Command*>& ScriptManager::GetMacros()
@@ -926,24 +703,16 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 	}
 
 	void AutoloadScriptManager::ApplyReloadedScripts(
-		std::vector<std::unique_ptr<Script>> loaded_scripts,
+		std::vector<std::unique_ptr<AutomationScriptInstance>> loaded_scripts,
 		int error_count,
-		std::vector<std::pair<std::string, bool>> diagnostics)
-	{
+		std::vector<std::pair<std::string, bool>> const& diagnostics) {
 		if (config::automation_debug_service && config::automation_debug_service->HasLocalSession()) {
 			pending_reload = true;
 			LOG_W("automation/reload") << "Autoload refresh deferred until the Lua Workspace invocation finishes";
 			return;
 		}
 		pending_reload = false;
-		for (auto& script : loaded_scripts) {
-			if (!script->GetLoadedState())
-				ReportFailedAutomationScriptLoad(script->GetFilename(), script->GetDescription());
-		}
-
-		scripts.clear();
-		CommitPendingFeatures(loaded_scripts);
-		scripts = std::move(loaded_scripts);
+		ReplaceAll(WrapScriptInstances(std::move(loaded_scripts)));
 
 		for (auto const& [message, error] : diagnostics) {
 			if (error)
@@ -958,8 +727,6 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		else if (error_count > 1) {
 			wxLogWarning(wxS("Multiple scripts in the Automation autoload directory failed to load.\nPlease review the errors, fix them and use the Rescan Autoload Dir button in Automation Manager to load the scripts again."));
 		}
-
-		ScriptsChanged();
 	}
 
 	void AutoloadScriptManager::ProcessPendingReload() {
@@ -971,8 +738,8 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 
 	void AutoloadScriptManager::Reload()
 	{
-		reload_generation->fetch_add(1, std::memory_order_relaxed);
-		auto result = LoadAutoloadScripts(path, managed_plugin_root);
+		reload_gate.Begin();
+		auto result = LoadWxAutoloadScripts(path, managed_plugin_root);
 		std::vector<std::pair<std::string, bool>> diagnostics;
 		for (auto& diagnostic : result.diagnostics)
 			diagnostics.emplace_back(std::move(diagnostic.message), diagnostic.error);
@@ -982,24 +749,23 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 
 	void AutoloadScriptManager::ReloadAsync()
 	{
-		auto lifetime = std::weak_ptr<char>(reload_lifetime);
-		auto generation = reload_generation;
+		auto ticket = reload_gate.Begin();
 		auto path_copy = path;
 		auto managed_plugin_root_copy = managed_plugin_root;
-		auto const reload_id = generation->fetch_add(1, std::memory_order_relaxed) + 1;
+		auto const reload_id = ticket.Id();
 		auto const scheduled_at = AutoloadTimingClock::now();
 		LOG_I_IF(perf_trace::IsCategoryEnabled(perf_trace::Category::Log), "automation/autoload/timing")
 			<< "reload_id=" << reload_id << " phase=scheduled";
 
-		agi::dispatch::Background().Async([this, lifetime, generation, reload_id,
-			scheduled_at,
-			path_copy = std::move(path_copy),
-			managed_plugin_root_copy = std::move(managed_plugin_root_copy)] {
+		agi::dispatch::Background().Async([this, ticket, reload_id,
+										   scheduled_at,
+										   path_copy = std::move(path_copy),
+										   managed_plugin_root_copy = std::move(managed_plugin_root_copy)] {
 			auto const background_started = AutoloadTimingClock::now();
 			auto const background_dispatch_delay_ms =
 				AutoloadDurationMs(scheduled_at, background_started);
 			auto result = std::make_shared<AutoloadReloadResult>(
-				LoadAutoloadScripts(path_copy, managed_plugin_root_copy));
+				LoadWxAutoloadScripts(path_copy, managed_plugin_root_copy));
 			auto const background_finished = AutoloadTimingClock::now();
 			auto const background_load_ms =
 				AutoloadDurationMs(background_started, background_finished);
@@ -1010,8 +776,14 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 				if (!script || !script->GetLoadedState())
 					continue;
 				++loaded_script_count;
-				macro_count += script->GetMacros().size();
-				filter_count += script->GetFilters().size();
+				if (auto *adapter = dynamic_cast<Script *>(script.get())) {
+					macro_count += adapter->GetMacros().size();
+					filter_count += adapter->GetFilters().size();
+				}
+				else {
+					macro_count += script->GetRuntimeMacros().size();
+					filter_count += script->GetRuntimeFilters().size();
+				}
 			}
 			auto const script_count = result->scripts.size();
 			auto const error_count = result->error_count;
@@ -1028,21 +800,21 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 				<< " error_count=" << error_count
 				<< " diagnostic_count=" << diagnostic_count;
 
-			agi::dispatch::Main().Async([this, lifetime, generation, reload_id, result,
-				background_finished, background_dispatch_delay_ms, background_load_ms,
-				script_count, loaded_script_count, macro_count, filter_count,
-				error_count, diagnostic_count] {
+			agi::dispatch::Main().Async([this, ticket, reload_id, result,
+										 background_finished, background_dispatch_delay_ms, background_load_ms,
+										 script_count, loaded_script_count, macro_count, filter_count,
+										 error_count, diagnostic_count] {
 				auto const main_started = AutoloadTimingClock::now();
 				auto const main_queue_wait_ms =
 					AutoloadDurationMs(background_finished, main_started);
-				if (!lifetime.lock()) {
+				if (!ticket.IsAlive()) {
 					LOG_I_IF(perf_trace::IsCategoryEnabled(perf_trace::Category::Log), "automation/autoload/timing")
 						<< "reload_id=" << reload_id
 						<< " phase=main_skipped reason=lifetime_expired"
 						<< " main_queue_wait_ms=" << main_queue_wait_ms;
 					return;
 				}
-				if (generation->load(std::memory_order_relaxed) != reload_id) {
+				if (!ticket.IsCurrent()) {
 					LOG_I_IF(perf_trace::IsCategoryEnabled(perf_trace::Category::Log), "automation/autoload/timing")
 						<< "reload_id=" << reload_id
 						<< " phase=main_skipped reason=superseded"
@@ -1085,63 +857,19 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 
 	void LocalScriptManager::Reload()
 	{
-		bool was_empty = scripts.empty();
-		scripts.clear();
-
 		auto core = context->GetCore();
-		auto const& local_scripts = core.ass->Properties.automation_scripts;
-		if (local_scripts.empty()) {
-			if (!was_empty)
-				ScriptsChanged();
+		auto const& references = core.ass->Properties.automation_scripts;
+		if (references.empty() && scripts.empty())
 			return;
+		auto result = LoadLocalScripts(references, core.subsController->Filename().parent_path(),
+									   OPT_GET("Path/Automation/Base")->GetString());
+		ReplaceAll(WrapScriptInstances(std::move(result.scripts)));
+		for (auto const& diagnostic : result.diagnostics) {
+			if (diagnostic.error)
+				context->ShowError(diagnostic.message, "Automation");
+			else
+				context->ShowWarning(diagnostic.message, "Automation");
 		}
-
-		auto autobasefn(OPT_GET("Path/Automation/Base")->GetString());
-
-		for (auto const& reference : ParseLocalScriptReferences(local_scripts)) {
-			auto location = ResolveLocalScriptReference(
-				reference, core.subsController->Filename().parent_path(), autobasefn);
-			if (!location) {
-				context->ShowWarning(
-					agi::format(
-						"Automation Script referenced with unknown location specifier character.\n"
-						"Location specifier found: %c\nFilename specified: %s",
-						reference.location,
-						reference.filename),
-					"Automation");
-				continue;
-			}
-			auto const& sfname = location->filename;
-			if (agi::fs::FileExists(sfname)) {
-				bool recognised = false;
-				auto script = Automation4::ScriptFactory::CreateFromFile(sfname, true, &recognised);
-				if (!recognised)
-					context->ShowError(
-						"The file was not recognised as an Automation script: " +
-							agi::fs::PathToString(sfname),
-						"Automation");
-				else if (script && !script->GetLoadedState())
-					context->ShowError(
-						"Failed to load Automation script '" + agi::fs::PathToString(sfname) +
-							"':\n" + script->GetDescription(),
-						"Automation");
-				scripts.emplace_back(std::move(script));
-			}
-			else {
-				context->ShowWarning(
-					agi::format(
-						"Automation Script referenced could not be found.\n"
-						"Filename specified: %c%s\nSearched relative to: %s\nResolved filename: %s",
-						reference.location,
-						reference.filename,
-						agi::fs::PathToString(location->base_directory),
-						agi::fs::PathToString(sfname)),
-					"Automation");
-			}
-		}
-
-		CommitPendingFeatures(scripts);
-		ScriptsChanged();
 	}
 
 	void LocalScriptManager::SaveLoadedList()
@@ -1160,23 +888,10 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		bool create_unknown,
 		bool *recognised_out)
 	{
+		auto attempt = LoadAutomationScript(filename, create_unknown);
 		if (recognised_out)
-			*recognised_out = false;
-
-		try {
-			if (auto script = WrapScriptInstance(AutomationEngineRegistry::CreateFromFile(filename))) {
-				if (recognised_out)
-					*recognised_out = true;
-				return script;
-			}
-		}
-		catch (...) {
-			if (recognised_out)
-				*recognised_out = true;
-			return agi::make_unique<FailedScript>(filename, DescribeCurrentException());
-		}
-
-		return create_unknown ? agi::make_unique<UnknownScript>(filename) : nullptr;
+			*recognised_out = attempt.recognised;
+		return WrapScriptInstance(std::move(attempt.script));
 	}
 
 	std::string ScriptFactory::GetWildcardStr()

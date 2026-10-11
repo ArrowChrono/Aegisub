@@ -29,6 +29,7 @@
 
 #include "auto4_base.h"
 #include "automation/automation_debug_ui.h"
+#include "automation/automation_script_collection.h"
 #include "automation/engine/automation_engine_registry.h"
 #include "automation/automation_debug_service.h"
 #include "compat.h"
@@ -319,13 +320,6 @@ void DialogAutomation::UpdateDebugModeButton()
 		: _("Enable Debug Mode"));
 }
 
-template<class Container>
-static bool has_file(Container const& c, agi::fs::path const& fn)
-{
-	return any_of(c.begin(), c.end(),
-		[&](std::unique_ptr<Automation4::Script> const& s) { return fn == s->GetFilename(); });
-}
-
 void DialogAutomation::OnAdd(wxCommandEvent &)
 {
 	auto fnames = context->RequestOpenFiles({
@@ -339,7 +333,7 @@ void DialogAutomation::OnAdd(wxCommandEvent &)
 		return;
 
 	for (auto const& fnpath : fnames) {
-		if (has_file(local_manager->GetScripts(), fnpath) || has_file(global_manager->GetScripts(), fnpath)) {
+		if (Automation4::IsAutomationScriptLoaded(fnpath, global_manager->GetScripts(), local_manager->GetScripts())) {
 			wxLogError(wxS("Script '%s' is already loaded"), to_wx(agi::fs::PathToString(fnpath)));
 			continue;
 		}
