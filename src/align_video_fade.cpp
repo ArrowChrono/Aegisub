@@ -12,6 +12,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -433,19 +434,21 @@ AssFadeTiming BuildAssFadeTiming(
 	bool fade_in_detected,
 	bool fade_out_detected) {
 	AssFadeTiming result;
-	result.start_ms = timecodes.TimeAtFrame(first_visible_frame, agi::vfr::START);
-	result.end_ms = timecodes.TimeAtFrame(last_visible_frame, agi::vfr::END);
-	int const duration_ms = std::max(result.end_ms - result.start_ms, 0);
+	result.start_ms = timecodes.CheckedTimeAtFrame(first_visible_frame, agi::vfr::START);
+	result.end_ms = timecodes.CheckedTimeAtFrame(last_visible_frame, agi::vfr::END);
+	int64_t const duration_ms = std::max<int64_t>(int64_t{result.end_ms} - result.start_ms, 0);
+	if (duration_ms > std::numeric_limits<int>::max())
+		throw std::overflow_error("Aligned subtitle duration is outside the supported range");
 	if (fade_in_detected) {
-		int const full_sample_ms = timecodes.TimeAtFrame(fade_in_full_frame, agi::vfr::EXACT);
-		result.fade_in_ms = std::clamp(full_sample_ms - result.start_ms, 0, duration_ms);
+		int64_t const full_sample_ms = timecodes.CheckedTimeAtFrame(fade_in_full_frame, agi::vfr::EXACT);
+		result.fade_in_ms = static_cast<int>(std::clamp(full_sample_ms - result.start_ms, int64_t{0}, duration_ms));
 	}
 	if (fade_out_detected) {
-		int const full_sample_ms = timecodes.TimeAtFrame(fade_out_full_frame, agi::vfr::EXACT);
-		result.fade_out_ms = std::clamp(
+		int64_t const full_sample_ms = timecodes.CheckedTimeAtFrame(fade_out_full_frame, agi::vfr::EXACT);
+		result.fade_out_ms = static_cast<int>(std::clamp(
 			result.end_ms - full_sample_ms,
-			0,
-			duration_ms - result.fade_in_ms);
+			int64_t{0},
+			duration_ms - result.fade_in_ms));
 	}
 	return result;
 }

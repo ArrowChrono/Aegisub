@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -214,6 +216,64 @@ TEST(align_video_fade, projects_fade_controls_to_exact_frame_samples) {
 	EXPECT_EQ(last_full_sample_ms - timing.start_ms, duration_ms - timing.fade_out_ms);
 	EXPECT_LT(last_sample_ms, timing.end_ms);
 	EXPECT_GT(timing.end_ms - last_sample_ms, 0);
+}
+
+TEST(align_video_fade, rejects_unrepresentable_event_and_sample_times) {
+	agi::vfr::Framerate const timecodes(25, 1);
+	EXPECT_THROW(aegisub::align_video_fade::BuildAssFadeTiming(
+					 timecodes, 53687092, 53687092, 0, 0, false, false),
+				 std::overflow_error);
+	EXPECT_THROW(aegisub::align_video_fade::BuildAssFadeTiming(
+					 timecodes, 53687090, 53687091, 0, 0, false, false),
+				 std::overflow_error);
+	EXPECT_THROW(aegisub::align_video_fade::BuildAssFadeTiming(
+					 timecodes, 0, 10, 53687092, 0, true, false),
+				 std::overflow_error);
+	EXPECT_THROW(aegisub::align_video_fade::BuildAssFadeTiming(
+					 timecodes, 0, 10, 0, -53687092, false, true),
+				 std::overflow_error);
+}
+
+TEST(align_video_fade, rejects_unrepresentable_duration_with_representable_endpoints) {
+	agi::vfr::Framerate const timecodes(1, 1);
+	EXPECT_THROW(aegisub::align_video_fade::BuildAssFadeTiming(
+					 timecodes, 0, 2147483, 0, 0, false, false),
+				 std::overflow_error);
+}
+
+TEST(align_video_fade, clamps_fade_differences_before_narrowing) {
+	agi::vfr::Framerate const timecodes(1, 1);
+	auto const fade_in = aegisub::align_video_fade::BuildAssFadeTiming(
+		timecodes, -1, 0, 2147483, 0, true, false);
+	EXPECT_EQ(-1500, fade_in.start_ms);
+	EXPECT_EQ(500, fade_in.end_ms);
+	EXPECT_EQ(2000, fade_in.fade_in_ms);
+	EXPECT_EQ(0, fade_in.fade_out_ms);
+
+	auto const fade_out = aegisub::align_video_fade::BuildAssFadeTiming(
+		timecodes, 0, 1, 0, -2147483, false, true);
+	EXPECT_EQ(-500, fade_out.start_ms);
+	EXPECT_EQ(1500, fade_out.end_ms);
+	EXPECT_EQ(0, fade_out.fade_in_ms);
+	EXPECT_EQ(2000, fade_out.fade_out_ms);
+}
+
+TEST(align_video_fade, accepts_end_when_next_exact_time_exceeds_int) {
+	agi::vfr::Framerate const timecodes(1, 1);
+	auto const timing = aegisub::align_video_fade::BuildAssFadeTiming(
+		timecodes, 2147482, 2147483, 2147482, 2147483, true, true);
+	EXPECT_EQ(2147481500, timing.start_ms);
+	EXPECT_EQ(2147483500, timing.end_ms);
+	EXPECT_EQ(500, timing.fade_in_ms);
+	EXPECT_EQ(500, timing.fade_out_ms);
+}
+
+TEST(align_video_fade, rejects_end_past_last_representable_frame_index) {
+	agi::vfr::Framerate const timecodes(1000, 1);
+	constexpr int last = std::numeric_limits<int>::max();
+	EXPECT_THROW(aegisub::align_video_fade::BuildAssFadeTiming(
+					 timecodes, last - 3, last, last - 1, last, true, true),
+				 std::overflow_error);
 }
 
 TEST(align_video_fade, rounds_absolute_fade_control_points_to_centiseconds) {

@@ -56,6 +56,8 @@
 #include <wx/textctrl.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <stdexcept>
 
 namespace {
 	// Key-point alignment needs contiguous frame ranges, so do not skip over
@@ -225,10 +227,16 @@ namespace {
 		bool const detect_fade_enabled = detect_fade->GetValue();
 		int max_fade_frames = 0;
 		if (detect_fade_enabled) {
-			int const anchor_time = timecode.TimeAtFrame(current_n_frame, agi::vfr::EXACT);
-			int const before = current_n_frame - timecode.FrameAtTime(anchor_time - 2000, agi::vfr::EXACT);
-			int const after = timecode.FrameAtTime(anchor_time + 2000, agi::vfr::EXACT) - current_n_frame;
-			max_fade_frames = std::clamp(std::max({ before, after, 1 }), 1, 240);
+			try {
+				int64_t const anchor_time = timecode.CheckedTimeAtFrame(current_n_frame, agi::vfr::EXACT);
+				int64_t const before = int64_t{current_n_frame} - timecode.CheckedFrameAtTime(anchor_time - 2000, agi::vfr::EXACT);
+				int64_t const after = int64_t{timecode.CheckedFrameAtTime(anchor_time + 2000, agi::vfr::EXACT)} - current_n_frame;
+				max_fade_frames = static_cast<int>(std::clamp<int64_t>(std::max(before, after), 1, 240));
+			}
+			catch (std::overflow_error const&) {
+				wxMessageBox(_("The aligned time is outside the supported range. No subtitles were changed."), _("Align subtitle to video"), wxOK | wxICON_ERROR, this);
+				return;
+			}
 		}
 
 		KeyPointRangeScanRequest request;
@@ -276,17 +284,23 @@ namespace {
 			wxMessageBox(_("No active subtitle line is selected."));
 			return;
 		}
-		auto const fade_timing = aegisub::align_video_fade::BuildAssFadeTiming(
-			timecode,
-			scan.left,
-			scan.right,
-			scan.fade_in_end,
-			scan.fade_out_start,
-			scan.fade_in_detected,
-			scan.fade_out_detected);
-		line->Start = fade_timing.start_ms;
-		line->End = fade_timing.end_ms;
+		aegisub::align_video_fade::AssFadeTiming fade_timing;
+		try {
+			fade_timing = aegisub::align_video_fade::BuildAssFadeTiming(
+				timecode,
+				scan.left,
+				scan.right,
+				scan.fade_in_end,
+				scan.fade_out_start,
+				scan.fade_in_detected,
+				scan.fade_out_detected);
+		}
+		catch (std::overflow_error const&) {
+			wxMessageBox(_("The aligned time is outside the supported range. No subtitles were changed."), _("Align subtitle to video"), wxOK | wxICON_ERROR, this);
+			return;
+		}
 
+		auto updated_text = line->Text;
 		bool text_changed = false;
 		if (detect_fade_enabled && (scan.fade_in_detected || scan.fade_out_detected)) {
 			auto const tag_timing = round_fade_times->GetValue()
@@ -294,13 +308,17 @@ namespace {
 				: fade_timing;
 			auto const updated = aegisub::align_video_fade::ApplyAssFade(
 				line->Text.get(),
-				tag_timing.end_ms - tag_timing.start_ms,
+				static_cast<int>(std::max<int64_t>(int64_t{tag_timing.end_ms} - tag_timing.start_ms, 0)),
 				tag_timing.fade_in_ms,
 				tag_timing.fade_out_ms);
 			text_changed = updated.text != line->Text.get();
 			if (text_changed)
-				line->Text = updated.text;
+				updated_text = updated.text;
 		}
+
+		line->Text = updated_text;
+		line->Start = fade_timing.start_ms;
+		line->End = fade_timing.end_ms;
 
 		int commit_flags = AssFile::COMMIT_DIAG_TIME;
 		if (text_changed)
