@@ -75,6 +75,7 @@
 #include <windows.h>
 
 #include <libaegisub/charset_conv_win.h>
+#include <libaegisub/scope_exit.h>
 #endif
 
 namespace Automation4 {
@@ -531,6 +532,7 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		// This is almost copypasta from TextSub
 		auto dc = CreateCompatibleDC(nullptr);
 		if (!dc) return false;
+		auto release_dc = agi::make_scope_exit([dc] { DeleteDC(dc); });
 
 		SetMapMode(dc, MM_TEXT);
 
@@ -551,6 +553,10 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		if (!font) return false;
 
 		auto old_font = SelectObject(dc, font);
+		auto release_font = agi::make_scope_exit([dc, font, old_font] {
+			SelectObject(dc, old_font);
+			DeleteObject(font);
+		});
 
 		std::wstring wtext(agi::charset::ConvertW(text));
 		if (spacing != 0 ) {
@@ -573,10 +579,6 @@ std::unique_ptr<BackgroundScriptRunner> AutomationUiProxy::CreateWorkspaceBackgr
 		GetTextMetrics(dc, &tm);
 		descent = tm.tmDescent;
 		extlead = tm.tmExternalLeading;
-
-		SelectObject(dc, old_font);
-		DeleteObject(font);
-		DeleteObject(dc);
 
 #else // not WIN32
 		wxMemoryDC thedc;
