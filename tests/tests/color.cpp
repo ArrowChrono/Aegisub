@@ -44,10 +44,23 @@ TEST(lagi_color, hex) {
 }
 
 TEST(lagi_color, hex_rgba) {
+	EXPECT_EQ(agi::Color(0, 0, 0, 0), agi::Color("#00000000"));
+	EXPECT_EQ(agi::Color(255, 255, 255, 255), agi::Color("#FFFFFFFF"));
+	EXPECT_EQ(agi::Color(255, 0, 127, 32), agi::Color("#FF007F20"));
+	EXPECT_EQ(agi::Color(16, 32, 48, 64), agi::Color("#10203040"));
+	EXPECT_EQ(agi::Color(171, 205, 239, 128), agi::Color("#abcdef80"));
+
 	EXPECT_EQ("#00000000", agi::Color(0, 0, 0, 0).GetHexFormatted(true));
 	EXPECT_EQ("#FFFFFFFF", agi::Color(255, 255, 255, 255).GetHexFormatted(true));
 	EXPECT_EQ("#FF007F20", agi::Color(255, 0, 127, 32).GetHexFormatted(true));
 	EXPECT_EQ("#10203040", agi::Color(16, 32, 48, 64).GetHexFormatted(true));
+}
+
+TEST(lagi_color, hex_rgba_round_trip) {
+	for (auto const color : {agi::Color(16, 32, 48, 0), agi::Color(255, 0, 127, 1),
+							 agi::Color(171, 205, 239, 128), agi::Color(17, 34, 51, 254), agi::Color(0, 127, 255, 255)}) {
+		EXPECT_EQ(color, agi::Color(color.GetHexFormatted(true)));
+	}
 }
 
 TEST(lagi_color, rgb) {
