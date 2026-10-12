@@ -42,6 +42,7 @@
 #include <libaegisub/string_utils.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <type_traits>
@@ -168,6 +169,11 @@ std::string serialise_control_value(Automation4::AutomationDialogValue const& va
 			return inline_string_encode(data.value.GetHexFormatted(data.alpha));
 		else if constexpr (std::is_same_v<T, AutomationDialogCheckbox>)
 			return data.value ? "1" : "0";
+		else if constexpr (std::is_same_v<T, AutomationDialogFloatEdit>) {
+			char buffer[64];
+			auto result = std::to_chars(std::begin(buffer), std::end(buffer), data.value);
+			return {buffer, result.ptr};
+		}
 		else
 			return std::to_string(data.value);
 	},
@@ -182,8 +188,16 @@ void unserialise_control_value(Automation4::AutomationDialogValue& value, std::s
 			data.value = inline_string_decode(serialised);
 		else if constexpr (std::is_same_v<T, AutomationDialogIntEdit>)
 			data.value = std::atoi(serialised.c_str());
-		else if constexpr (std::is_same_v<T, AutomationDialogFloatEdit>)
+		else if constexpr (std::is_same_v<T, AutomationDialogFloatEdit>) {
+			auto first = serialised.find_first_not_of(" \t\n\r\f\v");
+			auto last = serialised.find_last_not_of(" \t\n\r\f\v");
+			if (first != std::string::npos) {
+				if (serialised[first] == '+' && first < last && serialised[first + 1] != '-') ++first;
+				auto result = std::from_chars(serialised.data() + first, serialised.data() + last + 1, data.value);
+				if (result.ec == std::errc{} && result.ptr == serialised.data() + last + 1) return;
+			}
 			data.value = std::atof(serialised.c_str());
+		}
 		else if constexpr (std::is_same_v<T, AutomationDialogCheckbox>)
 			data.value = serialised != "0";
 	},

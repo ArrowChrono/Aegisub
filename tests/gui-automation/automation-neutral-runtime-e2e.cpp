@@ -32,6 +32,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <clocale>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -849,6 +851,103 @@ json::Object Run(fs::path const& artifacts, Results& results) {
 	filter->ProcessSubs(&exported, host);
 	results.Check("export_values_reach_lua_without_mutating_live_document", Line(exported, 0).Text.get() == "export:|%accepted:|%:1" && Line(exported, 0).Start.GetMillisecond() == 1125 && static_cast<int>(Line(exported, 0).Start) == 1130 && DialogueData(ass) == accepted && history.messages.size() == 3);
 	SaveAndCompare(exported, artifacts / "exported.ass", results);
+
+	results.Begin("export_float_configuration_roundtrip");
+	auto float_script = AutomationEngineRegistry::CreateFromFile(fixtures / "float-config.lua", services);
+	results.Check("float_fixture_loaded", float_script && float_script->GetLoadedState());
+	float_script->SetAutomationHost(host);
+	auto *float_filter = float_script->GetRuntimeFilters().front();
+	std::vector<std::pair<std::string, double>> const float_values{
+		{"precise", 1.2345678901234567}, {"negative", -12.345678901234567}, {"tiny", 1e-100}, {"large", 1e100}, {"subnormal", 5e-324}, {"negative_zero", -0.0}, {"maximum", 1.7976931348623157e308}, {"minimum_normal", 2.2250738585072014e-308}};
+	auto float_dialog = float_filter->GenerateConfigDialog(context);
+	for (auto const& [name, value] : float_values)
+		std::get<AutomationDialogFloatEdit>(Control(*float_dialog, name).value).value = value;
+	AssFile direct_float_exported(ass);
+	float_filter->ProcessSubs(&direct_float_exported, host);
+	results.Check("unsaved_floats_execute_in_real_lua_without_live_mutation", Line(direct_float_exported, 0).Text.get() == "float-config-executed:1.2345678901234567" && DialogueData(ass) == accepted && history.messages.size() == 3);
+	float_filter->SaveSettings(ass, *float_dialog);
+	auto const float_settings = ass.Properties.automation_settings.at(float_filter->SettingsIdentifier());
+	std::ofstream(artifacts / "float-settings.txt") << float_settings << '\n';
+	float_dialog.reset();
+	float_dialog = float_filter->GenerateConfigDialog(context);
+	float_filter->LoadSettings(ass, *float_dialog);
+	for (auto const& [name, value] : float_values) {
+		auto restored = std::get<AutomationDialogFloatEdit>(Control(*float_dialog, name).value).value;
+		results.Check("restored_" + name + "_matches_original", restored == value && std::signbit(restored) == std::signbit(value));
+	}
+	float_dialog.reset();
+	AssFile float_exported(ass);
+	float_filter->ProcessSubs(&float_exported, host);
+	results.Check("restored_floats_execute_in_real_lua_without_live_mutation", Line(float_exported, 0).Text.get() == "float-config-executed:1.2345678901234567" && DialogueData(ass) == accepted && history.messages.size() == 3);
+	SaveAndCompare(float_exported, artifacts / "float-exported.ass", results);
+
+	results.Begin("export_float_legacy_configuration");
+	ass.Properties.automation_settings[float_filter->SettingsIdentifier()] = "precise:1.234568|negative: -12.345679 |tiny:+1e-100|large:1E+100|subnormal:4.9406564584124654e-324|negative_zero:-0.000000|maximum:1.7976931348623157e308|minimum_normal:2.2250738585072014e-308|legacy:1";
+	float_dialog = float_filter->GenerateConfigDialog(context);
+	float_filter->LoadSettings(ass, *float_dialog);
+	std::vector<std::pair<std::string, double>> const legacy_values{
+		{"precise", 1.234568}, {"negative", -12.345679}, {"tiny", 1e-100}, {"large", 1e100}, {"subnormal", 5e-324}, {"negative_zero", -0.0}, {"maximum", 1.7976931348623157e308}, {"minimum_normal", 2.2250738585072014e-308}};
+	for (auto const& [name, value] : legacy_values) {
+		auto restored = std::get<AutomationDialogFloatEdit>(Control(*float_dialog, name).value).value;
+		results.Check("legacy_" + name + "_retains_saved_value", restored == value && std::signbit(restored) == std::signbit(value));
+	}
+	float_filter->SaveSettings(ass, *float_dialog);
+	float_dialog.reset();
+	float_dialog = float_filter->GenerateConfigDialog(context);
+	float_filter->LoadSettings(ass, *float_dialog);
+	results.Check("legacy_configuration_can_be_resaved", std::get<AutomationDialogFloatEdit>(Control(*float_dialog, "precise").value).value == 1.234568);
+	float_dialog.reset();
+	AssFile legacy_float_exported(ass);
+	float_filter->ProcessSubs(&legacy_float_exported, host);
+	results.Check("legacy_floats_execute_in_real_lua_without_live_mutation", Line(legacy_float_exported, 0).Text.get() == "legacy-float-config-executed" && DialogueData(ass) == accepted && history.messages.size() == 3);
+	SaveAndCompare(legacy_float_exported, artifacts / "legacy-float-exported.ass", results);
+
+	results.Begin("export_float_legacy_parser_semantics");
+	ass.Properties.automation_settings[float_filter->SettingsIdentifier()] = "precise:garbage|negative:-12.5tail|tiny:0x1p-3|large:1e9999|subnormal:+-1|negative_zero: ";
+	float_dialog = float_filter->GenerateConfigDialog(context);
+	float_filter->LoadSettings(ass, *float_dialog);
+	auto restored_float = [&](std::string_view name) { return std::get<AutomationDialogFloatEdit>(Control(*float_dialog, name).value).value; };
+	results.Check("legacy_invalid_text_remains_zero", restored_float("precise") == 0.0);
+	results.Check("legacy_numeric_prefix_remains_accepted", restored_float("negative") == -12.5);
+	results.Check("legacy_hexadecimal_float_remains_accepted", restored_float("tiny") == 0.125);
+	results.Check("legacy_overflow_remains_positive_infinity", std::isinf(restored_float("large")) && !std::signbit(restored_float("large")));
+	results.Check("legacy_double_sign_remains_invalid_zero", restored_float("subnormal") == 0.0);
+	results.Check("legacy_whitespace_remains_positive_zero", restored_float("negative_zero") == 0.0 && !std::signbit(restored_float("negative_zero")));
+
+#ifdef _WIN32
+	results.Begin("export_float_locale_independence");
+	std::string const original_numeric_locale = std::setlocale(LC_NUMERIC, nullptr);
+	auto restore_numeric_locale = agi::make_scope_exit([&] { std::setlocale(LC_NUMERIC, original_numeric_locale.c_str()); });
+	char const *comma_locale = nullptr;
+	for (auto const *candidate : {"German_Germany.1252", "de_DE.UTF-8", "de_DE"}) {
+		comma_locale = std::setlocale(LC_NUMERIC, candidate);
+		if (comma_locale) break;
+	}
+	results.Check("comma_decimal_locale_available", comma_locale && std::string(std::localeconv()->decimal_point) == ",");
+	std::ofstream(artifacts / "float-locale.txt") << comma_locale << '\n'
+												  << std::localeconv()->decimal_point << '\n';
+	ass.Properties.automation_settings[float_filter->SettingsIdentifier()] = "precise:1,5";
+	float_dialog = float_filter->GenerateConfigDialog(context);
+	float_filter->LoadSettings(ass, *float_dialog);
+	results.Check("legacy_comma_locale_configuration_remains_accepted", std::get<AutomationDialogFloatEdit>(Control(*float_dialog, "precise").value).value == 1.5);
+	float_dialog.reset();
+	ass.Properties.automation_settings[float_filter->SettingsIdentifier()] = float_settings;
+	float_dialog = float_filter->GenerateConfigDialog(context);
+	float_filter->LoadSettings(ass, *float_dialog);
+	for (auto const& [name, value] : float_values) {
+		auto restored = std::get<AutomationDialogFloatEdit>(Control(*float_dialog, name).value).value;
+		results.Check("comma_locale_restored_" + name + "_matches_original", restored == value && std::signbit(restored) == std::signbit(value));
+	}
+	float_filter->SaveSettings(ass, *float_dialog);
+	results.Check("comma_locale_writes_standard_numeric_configuration", ass.Properties.automation_settings.at(float_filter->SettingsIdentifier()) == float_settings);
+	std::setlocale(LC_NUMERIC, original_numeric_locale.c_str());
+	float_dialog.reset();
+	AssFile locale_float_exported(ass);
+	float_filter->ProcessSubs(&locale_float_exported, host);
+	results.Check("comma_locale_restored_floats_execute_in_real_lua", Line(locale_float_exported, 0).Text.get() == "float-config-executed:1.2345678901234567" && DialogueData(ass) == accepted);
+	SaveAndCompare(locale_float_exported, artifacts / "locale-float-exported.ass", results);
+#endif
+	float_script.reset();
 
 	results.Begin("workspace_guard_and_source_binding");
 	context.workspace_invocation_active = true;
