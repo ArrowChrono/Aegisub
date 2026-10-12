@@ -31,7 +31,12 @@ class UnavailableScript final : public AutomationScriptInstance {
 	[[nodiscard]] bool GetLoadedState() const override { return false; }
 };
 
-agi::fs::path CanonicalScriptPath(agi::fs::path const& filename) {
+agi::fs::path CanonicalScriptPath(agi::fs::path filename) {
+#ifdef _WIN32
+	auto const& native = filename.native();
+	if (native.size() >= 260 && !native.starts_with(L"\\\\?\\") && !native.starts_with(L"\\\\.\\"))
+		filename = filename.lexically_normal();
+#endif
 	try {
 		return agi::fs::Canonicalize(filename);
 	}
@@ -151,7 +156,7 @@ AutomationScriptLoadResult LoadLocalScripts(std::string const& references, agi::
 										  .error = false});
 			continue;
 		}
-		AppendLoadAttempt(result, LoadAutomationScript(location->filename, true, services));
+		AppendLoadAttempt(result, LoadAutomationScript(CanonicalScriptPath(location->filename), true, services));
 	}
 	return result;
 }

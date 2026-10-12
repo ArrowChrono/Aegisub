@@ -47,6 +47,8 @@ std::string ShortNameFallback(path const& p) {
 
 std::wstring TrimQueryPath(path const& p) {
 	auto native = p.native();
+	if (native.size() >= MAX_PATH && !native.starts_with(L"\\\\?\\") && !native.starts_with(L"\\\\.\\"))
+		native = p.lexically_normal().native();
 	auto const root_len = p.root_path().native().size();
 	while (native.size() > root_len) {
 		auto const ch = native.back();

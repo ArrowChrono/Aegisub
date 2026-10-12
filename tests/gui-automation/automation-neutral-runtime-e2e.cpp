@@ -22,6 +22,7 @@
 #include <libaegisub/cajun/elements.h>
 #include <libaegisub/cajun/writer.h>
 #include <libaegisub/dispatch.h>
+#include <libaegisub/fs.h>
 #include <libaegisub/log.h>
 #include <libaegisub/path.h>
 #include <libaegisub/scope_exit.h>
@@ -566,7 +567,35 @@ json::Object ExerciseCollections(fs::path const& fixtures, fs::path const& artif
 	global.RemoveAll();
 	results.Check("shared_loaded_lookup_clears_removed_scopes", !IsAutomationScriptLoaded(loaded_filename, global.GetScripts(), local.GetScripts()));
 	results.Check("collection_cleanup_deactivates_published_features", registry->macros.empty() && registry->filters.empty() && registry->macro_activations == registry->macro_deactivations && registry->filter_activations == registry->filter_deactivations);
+	results.Begin("local_reference_parent_traversal_beyond_windows_path_limit");
+	auto reference_source = fs::absolute(artifacts / "reference-source");
+	fs::create_directories(reference_source);
+	auto script_filename = fs::path(u8"local \u03a9.lua");
+	fs::copy_file(fixtures / "collection.lua", reference_source / script_filename, fs::copy_options::overwrite_existing);
+	auto recovery_directory = reference_source;
+	std::string parent_reference;
+	while (recovery_directory.native().size() < 238) {
+		recovery_directory /= "recovery";
+		parent_reference += "../";
+	}
+	fs::create_directories(recovery_directory);
+	auto reference = parent_reference + agi::fs::PathToGenericString(script_filename);
+	auto query = recovery_directory / agi::fs::PathFromString(reference);
+	results.Check("existing_script_has_over_limit_query_and_short_target", query.native().size() >= 260 && query.lexically_normal().native().size() < 260 && fs::is_regular_file(reference_source / script_filename));
+	results.Check("over_limit_query_finds_existing_script", agi::fs::FileExists(query));
+	auto recovered = LoadLocalScripts("~" + reference + "|~" + parent_reference + "missing.lua", recovery_directory, "", services);
+	std::ofstream reference_log(artifacts / "reference-load.log", std::ios::binary | std::ios::trunc);
+	for (auto const& diagnostic : recovered.diagnostics) reference_log << diagnostic.message << '\n';
+	reference_log.close();
+	results.Check("recovery_loads_existing_lua_and_reports_only_missing_reference", recovered.scripts.size() == 1 && recovered.error_count == 0 && recovered.diagnostics.size() == 1 && recovered.scripts.front()->GetLoadedState());
+	attach(*recovered.scripts.front());
+	local.Add(std::move(recovered.scripts.front()));
+	auto recovered_outcome = registry->Find("Collection/Edit").Run(context);
+	results.Check("recovered_lua_macro_changes_subtitle", recovered_outcome == AutomationInvocationOutcome::Completed && context.selection->GetActiveLine()->Text.get() == "collection-v1");
+	local.RemoveAll();
 	json::Object evidence;
+	evidence["reference_query_chars"] = static_cast<json::Integer>(query.native().size());
+	evidence["reference_target_chars"] = static_cast<json::Integer>(query.lexically_normal().native().size());
 	evidence["change_notifications"] = collection_changes;
 	evidence["macro_activations"] = registry->macro_activations;
 	evidence["macro_deactivations"] = registry->macro_deactivations;
