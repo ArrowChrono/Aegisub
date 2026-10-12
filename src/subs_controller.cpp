@@ -15,6 +15,7 @@
 // Aegisub Project http://www.aegisub.org/
 
 #include "subs_controller.h"
+#include "project_save_references.h"
 
 #include "ass_attachment.h"
 #include "ass_dialogue.h"
@@ -439,11 +440,12 @@ void SubsController::AutoSave() {
 	auto choice_sink = context->GetSingleChoiceInteractionSink();
 	auto subs_copy = new AssFile(*core.ass);
 	auto fps = core.project->Timecodes();
-	autosave_queue->Async([subs_copy, name, directory, status_sink, choice_sink, fps] {
+	autosave_queue->Async([subs_copy, name, directory, status_sink, choice_sink, fps, source_paths = *core.path] {
 		wxString msg;
 		std::unique_ptr<AssFile> subs(subs_copy);
 
 		try {
+			aegisub::RelocateProjectReferences(subs->Properties, source_paths, directory);
 			agi::fs::CreateDirectory(directory);
 			auto path = directory / agi::fs::PathFromString(agi::format("%s.%s.AUTOSAVE.ass",
 				agi::fs::PathToString(name),
