@@ -28,6 +28,7 @@
 // Aegisub Project http://www.aegisub.org/
 
 #include "video_controller.h"
+#include "audio_playback_section.h"
 
 #include "ass_dialogue.h"
 #include "ass_file.h"
@@ -90,7 +91,7 @@ constexpr int PausedPrefetchMaxFrames = 16;
 }
 
 VideoController::VideoController(agi::Context *c)
-	: context(c), playback_timer(CreateVideoControllerTimer([this] { OnPlayTimer(); })), visual_subtitle_update_timer(std::make_unique<UiDeadlineTimer>([this] { OnVisualSubtitleUpdateTimer(); })), paused_prefetch_timer(CreateVideoControllerTimer([this] { OnPausedPrefetchTimer(); })), playAudioOnStep(OPT_GET("Audio/Plays When Stepping Video")) {
+	: context(c), playback_timer(CreateVideoControllerTimer([this] { OnPlayTimer(); })), visual_subtitle_update_timer(std::make_unique<UiDeadlineTimer>([this] { OnVisualSubtitleUpdateTimer(); })), paused_prefetch_timer(CreateVideoControllerTimer([this] { OnPausedPrefetchTimer(); })), playAudioOnStep(OPT_GET(aegisub::audio_playback_section::StepOption)) {
 	auto core = context->GetCore();
 	ui_activation.AddConnections(
 		core.ass->AddCommitDetailsListener(&VideoController::OnSubtitlesCommit, this),
@@ -486,11 +487,9 @@ void VideoController::PlayInspectionStepAudio(bool play_audio, int delta) {
 		return;
 
 	auto core = context->GetCore();
-	if (delta > 0) {
-		core.audioController->PlayRange(TimeRange(TimeAtFrame(frame_n - 1), TimeAtFrame(frame_n)));
-	}
-	else if (delta < 0) {
-		core.audioController->PlayRange(TimeRange(TimeAtFrame(frame_n), TimeAtFrame(frame_n + 1)));
+	if (delta) {
+		auto const range = aegisub::audio_playback_section::SteppedFrame(core.project->Timecodes(), frame_n, delta);
+		core.audioController->PlayRange(TimeRange(range.begin, range.end));
 	}
 }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <libaegisub/vfr.h>
+
 #include <algorithm>
 #include <limits>
 
@@ -12,10 +14,17 @@ inline constexpr char AfterOption[] = "Audio/Play/Section/After";
 inline constexpr char BeginOption[] = "Audio/Play/Section/Begin";
 inline constexpr char EndOption[] = "Audio/Play/Section/End";
 
+inline constexpr char StepOption[] = "Audio/Plays When Stepping Video";
+
 struct Range {
 	int begin;
 	int end;
 };
+
+inline Range SteppedFrame(agi::vfr::Framerate const& timecodes, int target_frame, int direction) {
+	auto const first = direction > 0 ? target_frame - 1 : target_frame;
+	return {timecodes.TimeAtFrame(first), timecodes.TimeAtFrame(first + 1)};
+}
 
 inline int NormalizeDuration(int duration_ms) {
 	return std::clamp(duration_ms, 0, MaximumDurationMs);
