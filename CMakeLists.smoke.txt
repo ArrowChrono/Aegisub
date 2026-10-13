@@ -533,6 +533,14 @@ if(WIN32)
     target_compile_definitions(scene-cache-playback-smoke PRIVATE CMAKE_BUILD NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(scene-cache-playback-smoke PRIVATE OpenGL::GL)
 
+    add_executable(video-presenter-d3d11-smoke EXCLUDE_FROM_ALL
+        tests/smoke/opengl_presenter_d3d11_smoke.cpp
+        src/opengl_presenter_d3d11.cpp
+    )
+    target_compile_definitions(video-presenter-d3d11-smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_features(video-presenter-d3d11-smoke PRIVATE cxx_std_20)
+    target_link_libraries(video-presenter-d3d11-smoke PRIVATE OpenGL::GL d3d11 dxgi)
+
     add_executable(scene-cache-subtitle-commit-smoke EXCLUDE_FROM_ALL
         tests/smoke/scene_cache_subtitle_commit_smoke.cpp
         src/ass_dialogue.cpp

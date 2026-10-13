@@ -861,12 +861,12 @@ class DiagnosticReadbackState final {
 		context.resetContext();
 	}
 
-	void PrepareFrontRead() const {
+	void PrepareRead(bool read_back_buffer) const {
 		if (pack_buffer_supported)
 			gl.fFunctions.fBindBuffer(pixel_pack_buffer, 0);
 		for (auto name : pack_names)
 			glPixelStorei(name, name == GL_PACK_ALIGNMENT ? 1 : 0);
-		glReadBuffer(GL_FRONT);
+		glReadBuffer(read_back_buffer ? GL_BACK : GL_FRONT);
 	}
 };
 
@@ -1347,7 +1347,7 @@ bool Presenter::CaptureTileDiagnostics(
 	FrameTarget const& target,
 	ContentFrame const& frame,
 	std::filesystem::path const& capture_directory,
-	std::string& error) noexcept try {
+	std::string& error, bool read_back_buffer) noexcept try {
 	error.clear();
 	if (!TileDiagnosticsEnabled()) {
 		error = "audio tile diagnostics are disabled";
@@ -1427,7 +1427,7 @@ bool Presenter::CaptureTileDiagnostics(
 		metadata << "pre_capture_gl_error=" << previous_error << '\n';
 	}
 	DiagnosticReadbackState restore_state(*gl, *gpu_context, ReadGlString(GL_VERSION));
-	restore_state.PrepareFrontRead();
+	restore_state.PrepareRead(read_back_buffer);
 	std::vector<std::uint8_t> front_pixels(static_cast<std::size_t>(frame_bytes));
 	glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, front_pixels.data());
 	auto const front_error = glGetError();

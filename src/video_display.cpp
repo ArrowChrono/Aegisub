@@ -58,6 +58,9 @@
 #include "utils.h"
 #include "ui_deadline_timer.h"
 #include "video_render_opengl_proc_loader.h"
+#ifdef _WIN32
+#include "opengl_presenter_d3d11.h"
+#endif
 #include "video_renderer_factory.h"
 #include "video_renderer_error.h"
 #include "video_renderer_opengl.h"
@@ -2419,7 +2422,40 @@ void VideoDisplay::DoRender() try {
 	bool swapped = false;
 	{
 		perf_trace::VideoUiDurationScope swap_trace("video_display.swap");
-		swapped = SwapBuffers();
+#ifdef _WIN32
+		bool const initialize_presentation = !dxgi_presentation_attempted;
+		bool record_presentation_backend = initialize_presentation;
+		if (!dxgi_presentation_attempted) {
+			dxgi_presentation_attempted = true;
+			if (ReadEnvFlagDefaultOn("AEGISUB_ENABLE_DXGI_PRESENTATION") && OpenGLPresenterD3D11::IsSupportedForCurrentContext()) {
+				try {
+					dxgi_presenter = std::make_unique<OpenGLPresenterD3D11>(GetHandle());
+				}
+				catch (std::exception const& error) {
+					LOG_W("video/display/presentation") << "DXGI presentation initialization failed: " << error.what();
+				}
+			}
+		}
+		if (dxgi_presenter) {
+			try {
+				dxgi_presenter->Present(canvas_width, canvas_height);
+				swapped = true;
+				if (initialize_presentation)
+					LOG_I("video/display/presentation") << "Using D3D11/DXGI flip presentation";
+			}
+			catch (std::exception const& error) {
+				LOG_W("video/display/presentation") << "DXGI presentation failed; reverting to native OpenGL: " << error.what();
+				dxgi_presenter.reset();
+				record_presentation_backend = true;
+			}
+		}
+		if (!swapped)
+#endif
+			swapped = SwapBuffers();
+#ifdef _WIN32
+		if (record_presentation_backend)
+			perf_trace::ObserveVideoUiDuration("video_display.presentation_backend", 0.0, dxgi_presenter ? 1 : 0);
+#endif
 		swap_trace.SetDetails(swapped ? 1 : 0, presented_new_frame ? 1 : 0);
 	}
 	last_render_succeeded = swapped;
@@ -3441,6 +3477,10 @@ void VideoDisplay::Unload() {
 	CancelReleaseToolFeedback();
 	ResetRenderers();
 	bool const context_active = glContext && glContext->IsOK() && SetCurrent(*glContext);
+#ifdef _WIN32
+	dxgi_presenter.reset();
+	dxgi_presentation_attempted = false;
+#endif
 	DestroySceneCache();
 #ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
 	DestroySkiaOverlayBacking();

@@ -66,6 +66,9 @@ class AsyncVideoProvider;
 class VideoColorZoomPreview;
 class OpenGLText;
 class OpenGLTextTextureDeleter;
+#ifdef _WIN32
+class OpenGLPresenterD3D11;
+#endif
 #ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
 class SkiaSurfaceProvider;
 class SkiaTextLayoutCache;
@@ -185,6 +188,10 @@ class VideoDisplay final : public wxGLCanvas {
 
 	/// The OpenGL context for this display
 	std::unique_ptr<wxGLContext> glContext;
+#ifdef _WIN32
+	std::unique_ptr<OpenGLPresenterD3D11> dxgi_presenter;
+	bool dxgi_presentation_attempted = false;
+#endif
 	/// Trace-only presentation configuration, sampled once per activated context.
 	bool presentation_configuration_traced = false;
 

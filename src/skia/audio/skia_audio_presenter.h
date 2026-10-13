@@ -204,7 +204,7 @@ public:
 		FrameTarget const& target,
 		ContentFrame const& frame,
 		std::filesystem::path const& capture_directory,
-		std::string& error) noexcept;
+		std::string& error, bool read_back_buffer = false) noexcept;
 	void SetFailureInjection(FailureInjection failure_injection) noexcept;
 	void SetContentCacheBudget(std::size_t budget_bytes);
 	void Fail(SkiaGlContextToken context, SkiaGlDeviceFailure failure, std::string detail) noexcept;

@@ -33,6 +33,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "../../opengl_presenter_d3d11.h"
 #endif
 
 #ifdef HAVE_OPENGL_GL_H
@@ -51,6 +52,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <exception>
@@ -139,6 +141,16 @@ int RequestedAudioSwapInterval() noexcept {
 		? static_cast<int>(std::clamp<long>(parsed, 0, 4))
 		: 0;
 }
+
+#ifdef _WIN32
+bool DxgiPresentationEnabled() noexcept {
+	auto const *value = std::getenv("AEGISUB_ENABLE_DXGI_PRESENTATION");
+	if (!value || !*value)
+		return true;
+	auto const first = static_cast<char>(std::tolower(static_cast<unsigned char>(*value)));
+	return first != '0' && first != 'f' && first != 'n';
+}
+#endif
 
 bool ConfigureCurrentSwapInterval(int interval) noexcept {
 #ifdef _WIN32
@@ -300,6 +312,10 @@ struct SkiaAudioDisplay::Impl {
 	std::atomic<bool> content_ready_event_pending { false };
 	std::unique_ptr<wxGLContext> context;
 	std::unique_ptr<Presenter> presenter;
+#ifdef _WIN32
+	std::unique_ptr<OpenGLPresenterD3D11> dxgi_presenter;
+	bool dxgi_presentation_attempted = false;
+#endif
 	ContentWorker content_worker;
 	agi::signal::Connection audio_open_connection;
 	agi::signal::Connection playback_position_connection;
@@ -506,12 +522,16 @@ SkiaAudioDisplay::~SkiaAudioDisplay() {
 	if (!impl)
 		return;
 	CancelMiddleSeek();
-	if (!impl->presenter)
-		return;
-	if (impl->context && impl->context->IsOK() && SetCurrent(*impl->context))
-		impl->presenter->Release(impl->ContextToken());
-	else
-		impl->presenter->Abandon();
+	auto const context_active = impl->context && impl->context->IsOK() && SetCurrent(*impl->context);
+#ifdef _WIN32
+	impl->dxgi_presenter.reset();
+#endif
+	if (impl->presenter) {
+		if (context_active)
+			impl->presenter->Release(impl->ContextToken());
+		else
+			impl->presenter->Abandon();
+	}
 	impl->presenter.reset();
 	impl->context.reset();
 }
@@ -1210,7 +1230,39 @@ void SkiaAudioDisplay::OnPaint(wxPaintEvent&) try {
 	bool swapped = false;
 	{
 		perf_trace::AudioUiDurationScope swap_trace("audio_display.swap");
-		swapped = SwapBuffers();
+#ifdef _WIN32
+		bool record_presentation_backend = !impl->dxgi_presentation_attempted;
+		if (!impl->dxgi_presentation_attempted) {
+			impl->dxgi_presentation_attempted = true;
+			if (DxgiPresentationEnabled() && OpenGLPresenterD3D11::IsSupportedForCurrentContext()) {
+				try {
+					impl->dxgi_presenter = std::make_unique<OpenGLPresenterD3D11>(GetHandle());
+				}
+				catch (std::exception const& error) {
+					LOG_W("audio/display/presentation") << "DXGI presentation initialization failed: " << error.what();
+				}
+			}
+		}
+		if (impl->dxgi_presenter) {
+			try {
+				impl->dxgi_presenter->Present(target.width, target.height, static_cast<unsigned>(RequestedAudioSwapInterval()));
+				swapped = true;
+			}
+			catch (std::exception const& error) {
+				LOG_W("audio/display/presentation") << "DXGI presentation failed; reverting to native OpenGL: " << error.what();
+				impl->dxgi_presenter.reset();
+				record_presentation_backend = true;
+			}
+		}
+		if (!swapped)
+#endif
+			swapped = SwapBuffers();
+#ifdef _WIN32
+		if (record_presentation_backend) {
+			perf_trace::ObserveAudioUiDuration("audio_display.presentation_backend", 0.0, impl->dxgi_presenter ? 1 : 0);
+			LOG_I("audio/display/presentation") << (impl->dxgi_presenter ? "Using D3D11/DXGI flip presentation" : "Using native OpenGL presentation");
+		}
+#endif
 		swap_trace.SetDetails(swapped ? 1 : 0, impl->swap_interval_configured ? impl->swap_interval + 1 : 0);
 	}
 	if (!swapped) {
@@ -2139,8 +2191,12 @@ void SkiaAudioDisplay::CaptureTileDiagnostics() try {
 	LOG_I("audio/display/tile-diagnostics") << "Begin " << agi::fs::PathToString(directory.filename())
 											<< ", trace frame " << impl->trace_frame_sequence;
 	std::string error;
+	bool read_back_buffer = false;
+#ifdef _WIN32
+	read_back_buffer = static_cast<bool>(impl->dxgi_presenter);
+#endif
 	auto const captured = impl->presenter->CaptureTileDiagnostics(
-		impl->ContextToken(), impl->diagnostic_frame_target, *frame, directory, error);
+		impl->ContextToken(), impl->diagnostic_frame_target, *frame, directory, error, read_back_buffer);
 
 	std::ofstream metadata(directory / "display.txt", std::ios::binary);
 	metadata.imbue(std::locale::classic());

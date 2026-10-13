@@ -1465,6 +1465,10 @@ set_source_files_properties(libaegisub/common/native_library.cpp PROPERTIES
 # aegisub_core carries the framework-agnostic core (PUBLIC libaegisub + boost/...).
 # libass is runtime-loaded (headers via BUILD_INTERFACE only); see aegisub_stage_libass_runtime.
 target_link_libraries(Aegisub PRIVATE ${CMAKE_DL_LIBS} aegisub_core aegisub_features luajit CLI11::CLI11)
+if(WIN32)
+    target_sources(Aegisub PRIVATE src/opengl_presenter_d3d11.cpp)
+    target_link_libraries(Aegisub PRIVATE d3d11 dxgi)
+endif()
 if(WITH_DISCORD_PRESENCE)
     add_library(aegisub_discord_presence STATIC
         src/discord_presence_model.cpp
