@@ -24,9 +24,34 @@
 
 #ifdef WITH_UCHARDET
 #include <uchardet/uchardet.h>
+#include <unicode/utf8.h>
 #endif
 
 namespace agi { namespace charset {
+#ifdef WITH_UCHARDET
+namespace {
+bool IsUtf8Text(agi::read_file_mapping& file) {
+	bool non_ascii = false;
+	for (uint64_t offset = 0; offset < file.size();) {
+		auto remaining = file.size() - offset;
+		auto length = static_cast<int32_t>(std::min<uint64_t>(65539, remaining));
+		auto limit = static_cast<int32_t>(std::min<uint64_t>(65536, remaining));
+		auto bytes = file.read(offset, length);
+		int32_t index = 0;
+		while (index < limit) {
+			UChar32 codepoint;
+			U8_NEXT(bytes, index, length, codepoint);
+			if (codepoint < 0 || (codepoint < 32 && codepoint != '\t' && codepoint != '\n' && codepoint != '\r'))
+				return false;
+			non_ascii = non_ascii || codepoint > 127;
+		}
+		offset += index;
+	}
+	return non_ascii;
+}
+}
+#endif
+
 std::string Detect(agi::fs::path const& file) {
 	agi::read_file_mapping fp(file);
 
@@ -51,6 +76,7 @@ std::string Detect(agi::fs::path const& file) {
 	}
 
 #ifdef WITH_UCHARDET
+	if (IsUtf8Text(fp)) return "utf-8";
 	agi::scoped_holder<uchardet_t> ud(uchardet_new(), uchardet_delete);
 	for (uint64_t offset = 0; offset < fp.size(); ) {
 		auto read = std::min<uint64_t>(65536, fp.size() - offset);

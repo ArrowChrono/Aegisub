@@ -18,17 +18,23 @@
 #include "../../src/automation/engine/automation_script_instance.h"
 #include "../../src/automation/lua_workspace_run.h"
 #include "../../src/options.h"
+#include "../../src/subtitle_format.h"
 
 #include <libaegisub/cajun/elements.h>
 #include <libaegisub/cajun/writer.h>
+#include <libaegisub/charset.h>
 #include <libaegisub/dispatch.h>
 #include <libaegisub/fs.h>
 #include <libaegisub/log.h>
 #include <libaegisub/path.h>
 #include <libaegisub/scope_exit.h>
+#include <libaegisub/scoped_ptr.h>
 #include <libaegisub/vfr.h>
 
 #include <lua.hpp>
+#ifdef WITH_UCHARDET
+#include <uchardet/uchardet.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -98,6 +104,13 @@ class Results final {
 		cases.emplace_back(std::move(value));
 		checks.clear();
 		active_case.clear();
+	}
+	void Skip(std::string const& id, std::string const& reason) {
+		Finish();
+		json::Object value;
+		value["id"] = id;
+		value["skipped"] = reason;
+		cases.emplace_back(std::move(value));
 	}
 	void Write(fs::path const& directory, bool success, std::string const& failure,
 			   json::Object evidence) {
@@ -707,6 +720,96 @@ json::Object ExerciseServiceScopes(fs::path const& fixtures, fs::path const& art
 	return evidence;
 }
 
+void RoundTripSrtEncoding(fs::path const& artifacts, Results& results, std::string const& id,
+						  std::string const& source_bytes, std::string const& text, std::string const& expected_encoding) {
+	results.Begin(id);
+	std::string const input = "1\r\n00:00:01,234 --> 00:00:02,345\r\n" + text + "\r\n\r\n";
+	auto source = artifacts / (id + ".srt");
+	std::ofstream(source, std::ios::binary) << source_bytes;
+	auto encoding = agi::charset::Detect(source);
+	AssFile loaded;
+	std::string read_error;
+	try {
+		SubtitleFormat::GetReader(source, encoding)->ReadFile(&loaded, source, {}, encoding, {});
+	}
+	catch (agi::Exception const& exception) {
+		read_error = exception.GetMessage();
+	}
+	catch (std::exception const& exception) {
+		read_error = exception.what();
+	}
+	json::Object detection;
+	detection["encoding"] = encoding;
+	detection["read_error"] = read_error;
+	detection["expected_text"] = text;
+	detection["actual_text"] = loaded.Events.empty() ? "" : std::string(loaded.Events.front().Text);
+	std::ofstream evidence(artifacts / (id + "-detection.json"), std::ios::binary);
+	agi::JsonWriter::Write(detection, evidence);
+	evidence.close();
+	results.Check("opens_with_complete_unicode", read_error.empty() && loaded.Events.size() == 1 && loaded.Events.front().Text == text);
+	results.Check("expected_encoding_selected", encoding == expected_encoding);
+	results.Check("source_milliseconds_preserved", loaded.Events.front().Start.GetMillisecond() == 1234 && loaded.Events.front().End.GetMillisecond() == 2345);
+	auto saved = artifacts / (id + "-saved.srt");
+	SubtitleFormat::GetWriter(saved)->WriteFile(&loaded, saved, {}, "UTF-8");
+	std::ifstream saved_input(saved, std::ios::binary);
+	std::string const saved_bytes((std::istreambuf_iterator<char>(saved_input)), std::istreambuf_iterator<char>());
+	results.Check("saved_bytes_match_unicode_and_timing", saved_bytes == "\xef\xbb\xbf" + input);
+	AssFile reopened;
+	auto reopened_encoding = agi::charset::Detect(saved);
+	SubtitleFormat::GetReader(saved, reopened_encoding)->ReadFile(&reopened, saved, {}, reopened_encoding, {});
+	results.Check("saved_file_reopens_without_unicode_loss", reopened.Events.size() == 1 && reopened.Events.front().Text == text && reopened.Events.front().Start.GetMillisecond() == 1234 && reopened.Events.front().End.GetMillisecond() == 2345);
+}
+
+void ExerciseSrtEncoding(fs::path const& artifacts, Results& results) {
+	std::string const prefix = "1\r\n00:00:01,234 --> 00:00:02,345\r\n";
+	std::string const suffix = "\r\n\r\n";
+	std::string const unicode = "Unicode \xf0\x9f\x98\x80\xe2\x80\x94";
+	RoundTripSrtEncoding(artifacts, results, "srt_utf8_without_bom_round_trip", prefix + unicode + suffix, unicode, "utf-8");
+	std::string const boundary = std::string(65535 - prefix.size(), 'x') + "\xf0\x9f\x98\x80\xe2\x80\x94";
+	RoundTripSrtEncoding(artifacts, results, "srt_utf8_mapping_boundary_round_trip", prefix + boundary + suffix, boundary, "utf-8");
+	std::u16string const utf16 = u"1\r\n00:00:01,234 --> 00:00:02,345\r\nUnicode \U0001f600\u2014\r\n\r\n";
+	std::string utf16_bytes = "\xff\xfe";
+	for (auto value : utf16) {
+		utf16_bytes.push_back(static_cast<char>(value & 0xff));
+		utf16_bytes.push_back(static_cast<char>(value >> 8));
+	}
+	RoundTripSrtEncoding(artifacts, results, "srt_utf16_bom_round_trip", utf16_bytes, unicode, "utf-16le");
+#ifdef WITH_UCHARDET
+	std::string const legacy = "caf\xe9 \x93legacy\x94";
+	std::string const legacy_unicode = "caf\xc3\xa9 \xe2\x80\x9clegacy\xe2\x80\x9d";
+	RoundTripSrtEncoding(artifacts, results, "srt_windows1252_round_trip", prefix + legacy + suffix, legacy_unicode, "WINDOWS-1252");
+	results.Begin("srt_invalid_utf8_keeps_legacy_detection");
+	json::Object invalid_detection;
+	for (auto const& [id, bytes] : std::vector<std::pair<std::string, std::string>>{
+			 {"overlong", "\xc0\xaf"}, {"surrogate", "\xed\xa0\x80"}, {"out_of_range", "\xf4\x90\x80\x80"}, {"truncated", "\xf0\x9f\x98"}, {"invalid_after_mapping_boundary", std::string(65535, 'x') + "\xf0\x9f\x98\x80\xed\xa0\x80"}}) {
+		auto source = artifacts / ("invalid-" + id + ".srt");
+		auto source_bytes = prefix + bytes;
+		std::ofstream(source, std::ios::binary) << source_bytes;
+		agi::scoped_holder<uchardet_t> detector(uchardet_new(), uchardet_delete);
+		for (size_t offset = 0; offset < source_bytes.size(); offset += 65536)
+			uchardet_handle_data(detector, source_bytes.data() + offset, std::min<size_t>(65536, source_bytes.size() - offset));
+		uchardet_data_end(detector);
+		std::string guessed = uchardet_get_charset(detector);
+		if (guessed.empty()) guessed = "binary";
+		auto encoding = agi::charset::Detect(source);
+		json::Object value;
+		value["heuristic_encoding"] = guessed;
+		value["actual_encoding"] = encoding;
+		invalid_detection[id] = std::move(value);
+		std::ofstream invalid_evidence(artifacts / "invalid-encoding-detection.json", std::ios::binary);
+		agi::JsonWriter::Write(invalid_detection, invalid_evidence);
+		results.Check(id + "_retains_heuristic_result", encoding == guessed);
+	}
+#else
+	results.Skip("srt_windows1252_round_trip", "WITH_UCHARDET is disabled");
+	results.Skip("srt_invalid_utf8_keeps_legacy_detection", "WITH_UCHARDET is disabled");
+#endif
+	results.Begin("srt_binary_magic_keeps_binary_detection");
+	auto binary = artifacts / "binary-magic.srt";
+	std::ofstream(binary, std::ios::binary) << "\x1a\x45\xdf\xa3" << prefix << unicode << suffix;
+	results.Check("matroska_magic_not_overridden_by_utf8", agi::charset::Detect(binary) == "binary");
+}
+
 json::Object Run(fs::path const& artifacts, Results& results) {
 	fs::path const fixtures = "tests/gui-automation/automation-neutral-runtime/fixtures";
 	agi::Options options("", R"({"Path":{"Automation":{"Include":"?data/automation/include"}}})", agi::Options::FLUSH_SKIP);
@@ -723,6 +826,7 @@ json::Object Run(fs::path const& artifacts, Results& results) {
 		config::opt = nullptr;
 		config::path = nullptr;
 	});
+	ExerciseSrtEncoding(artifacts, results);
 	auto services = std::make_shared<RuntimeServices>();
 	auto registry = std::make_shared<FeatureRegistry>();
 	AutomationEngineRegistry::Register(std::make_unique<LuaAutomationEngine>());

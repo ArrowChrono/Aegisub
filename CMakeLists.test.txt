@@ -44,6 +44,10 @@ add_executable(automation-neutral-runtime-e2e EXCLUDE_FROM_ALL
 )
 target_compile_features(automation-neutral-runtime-e2e PRIVATE cxx_std_20)
 target_link_libraries(automation-neutral-runtime-e2e PRIVATE aegisub_core luajit)
+if(WITH_UCHARDET)
+    target_compile_definitions(automation-neutral-runtime-e2e PRIVATE WITH_UCHARDET)
+    target_link_libraries(automation-neutral-runtime-e2e PRIVATE uchardet::libuchardet)
+endif()
 if(BUILD_TESTING)
     add_test(NAME automation_neutral_runtime
         COMMAND automation-neutral-runtime-e2e
