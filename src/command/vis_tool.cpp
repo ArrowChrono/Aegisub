@@ -28,6 +28,7 @@
 #include "../visual_tool_rotatexy.h"
 #include "../visual_tool_rotatez.h"
 #include "../visual_tool_scale.h"
+#include "../visual_tool_shear.h"
 #include "../visual_tool_vector_clip.h"
 
 #include <libaegisub/make_unique.h>
@@ -133,6 +134,45 @@ namespace {
 		STR_MENU("Vector Clip")
 		STR_DISP("Vector Clip")
 		STR_HELP("Clip subtitles to a vectorial area")
+	};
+
+	struct visual_mode_shear final : public visual_tool_command<VisualToolShear> {
+		CMD_NAME("video/tool/shear")
+		CMD_ICON(visual_shear)
+		STR_MENU("Shear")
+		STR_DISP("Shear")
+		STR_HELP("Shear subtitles on X and Y axes")
+	};
+
+	template <VisualShearAxis Axis>
+	struct visual_shear_reset : public Command {
+		CMD_TYPE(COMMAND_VALIDATE)
+
+		bool Validate(const agi::Context *c) override {
+			auto *display = c->GetUI().videoDisplay;
+			return display && display->CanResetShearTool(Axis);
+		}
+
+		void operator()(agi::Context *c) override {
+			if (auto *display = c->GetUI().videoDisplay)
+				display->ResetShearTool(Axis);
+		}
+	};
+
+	struct visual_shear_reset_x final : public visual_shear_reset<VisualShearAxis::X> {
+		CMD_NAME("video/tool/shear/reset/x")
+		CMD_ICON(visual_shear)
+		STR_MENU("Shear: Reset X")
+		STR_DISP("Shear: Reset X")
+		STR_HELP("Set X shear to zero for the selected subtitles")
+	};
+
+	struct visual_shear_reset_y final : public visual_shear_reset<VisualShearAxis::Y> {
+		CMD_NAME("video/tool/shear/reset/y")
+		CMD_ICON(visual_shear)
+		STR_MENU("Shear: Reset Y")
+		STR_DISP("Shear: Reset Y")
+		STR_HELP("Set Y shear to zero for the selected subtitles")
 	};
 
 	template<VisualScaleAxis Axis>
@@ -393,6 +433,9 @@ namespace cmd {
 		reg(agi::make_unique<visual_scale_normalize_y>());
 		reg(agi::make_unique<visual_mode_clip>());
 		reg(agi::make_unique<visual_mode_vector_clip>());
+		reg(agi::make_unique<visual_mode_shear>());
+		reg(agi::make_unique<visual_shear_reset_x>());
+		reg(agi::make_unique<visual_shear_reset_y>());
 		reg(agi::make_unique<visual_mode_measure>());
 		reg(agi::make_unique<measure_mode_segment>());
 		reg(agi::make_unique<measure_mode_perspective>());

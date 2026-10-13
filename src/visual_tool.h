@@ -72,7 +72,6 @@ enum class VisualNudgeMagnitude {
 class VisualToolBase {
 	void OnCommit(int type, AssDialogue const* changed);
 	void OnSeek(int new_frame);
-	bool CancelInteraction(bool release_capture);
 	void UpdateScriptResolution();
 	void UpdateLayoutResolution();
 
@@ -109,6 +108,7 @@ class VisualToolBase {
 	virtual void DoRefresh() { }
 
 protected:
+	bool CancelInteraction(bool release_capture);
 	enum class GeometryEditKind {
 		Affine,
 		Translation,

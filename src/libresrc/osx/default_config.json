@@ -680,6 +680,8 @@
 				"Rotate Step Large" : 15.0,
 				"Scale Step" : 1.0,
 				"Scale Step Large" : 10.0,
+				"Shear Step" : 0.01,
+				"Shear Step Large" : 0.1,
 				"Origin Step" : 1.0,
 				"Origin Step Large" : 10.0,
 				"Perspective Step" : 1.0,

@@ -1353,6 +1353,7 @@ add_executable(Aegisub WIN32
     src/visual_tool_rotatexy.cpp
     src/visual_tool_rotatez.cpp
     src/visual_tool_scale.cpp
+    src/visual_tool_shear.cpp
     src/visual_tool_vector_clip.cpp
     # src/watched_file.cpp  ← split into watched_file_core.cpp (core) and watched_file_wx.cpp (exe)
     # --- Files moved back from aegisub_core (wx-coupled public APIs) ---

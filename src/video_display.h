@@ -82,6 +82,7 @@ struct VisualGuideViewport;
 class VisualToolBase;
 class UiDeadlineTimer;
 enum class VisualScaleAxis;
+enum class VisualShearAxis;
 enum class VisualNudgeMagnitude;
 class wxComboBox;
 class wxTextCtrl;
@@ -482,6 +483,8 @@ public:
 	bool CanNormalizeScaleTool(VisualScaleAxis axis) const;
 	/// Normalize every selected line on one axis using the current Scale tool.
 	bool NormalizeScaleTool(VisualScaleAxis axis);
+	bool CanResetShearTool(VisualShearAxis axis) const;
+	bool ResetShearTool(VisualShearAxis axis);
 	/// Whether the Measure tool's Perspective submode can Apply right now.
 	bool CanApplyMeasurePerspective() const;
 	/// Apply the Measure tool's Perspective target to the active line.

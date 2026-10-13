@@ -75,6 +75,7 @@
 #include "visual_tool.h"
 #include "visual_tool_measure.h"
 #include "visual_tool_scale.h"
+#include "visual_tool_shear.h"
 
 #include <libaegisub/color.h>
 #include <libaegisub/make_unique.h>
@@ -3392,6 +3393,16 @@ bool VideoDisplay::CanNormalizeScaleTool(VisualScaleAxis axis) const {
 bool VideoDisplay::NormalizeScaleTool(VisualScaleAxis axis) {
 	auto *scale_tool = dynamic_cast<VisualToolScale *>(tool.get());
 	return scale_tool && scale_tool->NormalizeScale(axis);
+}
+
+bool VideoDisplay::CanResetShearTool(VisualShearAxis axis) const {
+	auto *shear_tool = dynamic_cast<VisualToolShear const *>(tool.get());
+	return shear_tool && shear_tool->CanReset(axis);
+}
+
+bool VideoDisplay::ResetShearTool(VisualShearAxis axis) {
+	auto *shear_tool = dynamic_cast<VisualToolShear *>(tool.get());
+	return shear_tool && shear_tool->Reset(axis);
 }
 
 bool VideoDisplay::CanApplyMeasurePerspective() const {

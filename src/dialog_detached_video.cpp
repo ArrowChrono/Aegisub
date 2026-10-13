@@ -56,6 +56,7 @@
 #include "visual_tool_rotatexy.h"
 #include "visual_tool_rotatez.h"
 #include "visual_tool_scale.h"
+#include "visual_tool_shear.h"
 #include "visual_tool_vector_clip.h"
 
 #include <libaegisub/format_path.h>
@@ -76,6 +77,7 @@ enum class SavedVisualTool {
 	RotateZ,
 	RotateXY,
 	Scale,
+	Shear,
 	Clip,
 	VectorClip,
 };
@@ -106,6 +108,8 @@ SavedVisualToolState DetectVisualTool(VideoDisplay *display) {
 		return state(SavedVisualTool::RotateXY);
 	if (display->ToolIsType(typeid(VisualToolScale)))
 		return state(SavedVisualTool::Scale);
+	if (display->ToolIsType(typeid(VisualToolShear)))
+		return state(SavedVisualTool::Shear);
 	if (display->ToolIsType(typeid(VisualToolClip)))
 		return state(SavedVisualTool::Clip);
 	if (display->ToolIsType(typeid(VisualToolVectorClip)))
@@ -142,6 +146,9 @@ void RestoreVisualTool(VideoDisplay *display, agi::Context *context, SavedVisual
 			break;
 		case SavedVisualTool::Scale:
 			display->SetTool(agi::make_unique<VisualToolScale>(display, context));
+			break;
+		case SavedVisualTool::Shear:
+			display->SetTool(agi::make_unique<VisualToolShear>(display, context));
 			break;
 		case SavedVisualTool::Clip:
 			display->SetTool(agi::make_unique<VisualToolClip>(display, context));

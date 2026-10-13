@@ -106,6 +106,19 @@ namespace {
 		{nullptr}
 	};
 
+	const char *added_hotkeys_visual_shear[][3] = {
+		{"video/tool/nudge/left", "Visual Shear", "Left"},
+		{"video/tool/nudge/right", "Visual Shear", "Right"},
+		{"video/tool/nudge/up", "Visual Shear", "Up"},
+		{"video/tool/nudge/down", "Visual Shear", "Down"},
+		{"video/tool/nudge/left/large", "Visual Shear", "Alt-Left"},
+		{"video/tool/nudge/right/large", "Visual Shear", "Alt-Right"},
+		{"video/tool/nudge/up/large", "Visual Shear", "Alt-Up"},
+		{"video/tool/nudge/down/large", "Visual Shear", "Alt-Down"},
+		{"video/tool/shear/reset/x", "Visual Shear", "Ctrl-Home"},
+		{"video/tool/shear/reset/y", "Visual Shear", "Ctrl-End"},
+		{nullptr}};
+
 #ifdef __WXMAC__
 	const char *added_hotkeys_minimize[][3] = {
 		{"app/minimize", "Default", "Ctrl-M"},
@@ -154,6 +167,10 @@ namespace {
 		for (auto const& entry : hk_map) {
 			auto const& cmd = entry.first;
 			auto const& combo = entry.second;
+			if (combo.Context() != "Visual Rotate Z" && combo.Context() != "Visual Rotate XY" && combo.Context() != "Visual Scale") {
+				rebuilt.insert(entry);
+				continue;
+			}
 			bool remapped = false;
 
 			for (size_t i = 0; i < 4; ++i) {
@@ -227,6 +244,15 @@ void init() {
 	if (std::find(begin(migrations), end(migrations), "visual_tool_nudge_alt_large") == end(migrations)) {
 		migrate_visual_tool_nudge_large_to_alt();
 		migrations.emplace_back("visual_tool_nudge_alt_large");
+	}
+
+	if (std::ranges::find(migrations, "visual_tool_shear") == end(migrations)) {
+		auto const& hotkeys = inst->GetHotkeyMap();
+		if (std::ranges::none_of(hotkeys, [](auto const& entry) {
+				return entry.second.Context() == "Visual Shear";
+			}))
+			migrate_hotkeys(added_hotkeys_visual_shear);
+		migrations.emplace_back("visual_tool_shear");
 	}
 
 	if (std::find(begin(migrations), end(migrations), "duplicate -> split") == end(migrations)) {

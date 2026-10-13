@@ -779,6 +779,8 @@ void BuildVisualToolsPage(OptionPage *p) {
 	binder->AddDouble(_("Rotate large step (degrees)"), "Tool/Visual/Nudge/Rotate Step Large", 0.01, 180, 0.1, 2);
 	binder->AddDouble(_("Scale step (percent)"), "Tool/Visual/Nudge/Scale Step", 0.01, 100, 0.1, 2);
 	binder->AddDouble(_("Scale large step (percent)"), "Tool/Visual/Nudge/Scale Step Large", 0.01, 100, 0.1, 2);
+	binder->AddDouble(_("Shear step"), "Tool/Visual/Nudge/Shear Step", 0.001, 10, 0.01, 3);
+	binder->AddDouble(_("Shear large step"), "Tool/Visual/Nudge/Shear Step Large", 0.001, 10, 0.01, 3);
 	binder->AddDouble(_("Origin step (pixels)"), "Tool/Visual/Nudge/Origin Step", 0.01, 1000, 0.1, 2);
 	binder->AddDouble(_("Origin large step (pixels)"), "Tool/Visual/Nudge/Origin Step Large", 0.01, 1000, 0.1, 2);
 	binder->AddDouble(_("Perspective quad step (pixels)"), "Tool/Visual/Nudge/Perspective Step", 0.01, 1000, 0.1, 2);
