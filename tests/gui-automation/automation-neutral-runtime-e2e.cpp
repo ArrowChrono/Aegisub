@@ -25,6 +25,7 @@
 #include <libaegisub/charset.h>
 #include <libaegisub/dispatch.h>
 #include <libaegisub/fs.h>
+#include <libaegisub/io.h>
 #include <libaegisub/log.h>
 #include <libaegisub/path.h>
 #include <libaegisub/scope_exit.h>
@@ -720,6 +721,56 @@ json::Object ExerciseServiceScopes(fs::path const& fixtures, fs::path const& art
 	return evidence;
 }
 
+void ExerciseAtomicSaveBoundary(fs::path const& fixtures, fs::path const& artifacts, Results& results) {
+#ifdef _WIN32
+	results.Begin("atomic_ass_save_temporary_path_boundary");
+	auto directory = fs::absolute(artifacts / "atomic-save-boundary");
+	fs::create_directories(directory);
+	auto prefix_length = directory.native().size() + 1;
+	Require(prefix_length < 232, "Atomic-save artifact root is too long for the boundary scenario");
+	auto destination = directory / (std::string(248 - prefix_length - 4, 'x') + ".ass");
+	results.Check("destination_is_valid_but_legacy_temporary_path_crosses_limit", destination.native().size() == 248);
+	auto bytes = [](fs::path const& path) {
+		std::ifstream input(path, std::ios::binary);
+		Require(input.is_open(), "Cannot reopen atomic-save evidence");
+		return std::string(std::istreambuf_iterator<char>(input), {});
+	};
+	auto original = bytes(fixtures / "session.ass");
+	std::ofstream(destination, std::ios::binary) << original;
+	auto updated = original;
+	auto position = updated.find("First line");
+	Require(position != std::string::npos, "Missing independent ASS fixture text");
+	updated.replace(position, 10, "Atomic boundary Ω😀");
+	{
+		agi::io::Save staged(destination, true);
+		staged.Get().write(updated.data(), static_cast<std::streamsize>(updated.size()));
+		results.Check("staged_save_preserves_complete_original_bytes", bytes(destination) == original);
+		staged.Close();
+	}
+	results.Check("explicit_close_replaces_complete_destination_bytes", bytes(destination) == updated);
+	auto reopened = ReadAssFileForCore(destination, "utf-8");
+	std::vector<std::string> expected{
+		"Dialogue: 0,0:00:01.00,0:00:03.00,Default,Alice,0,0,0,,Atomic boundary Ω😀",
+		"Dialogue: 1,0:00:03.20,0:00:05.40,Emphasis,Bob,0,0,0,,Second line",
+		"Comment: 0,0:00:00.00,0:00:00.00,Default,,0,0,0,code once,return \"stored-source\""};
+	results.Check("real_reader_reopens_complete_staged_events", DialogueData(reopened) == expected);
+	Line(reopened, 0).Text = "ASS writer boundary Ω😀";
+	WriteAssFileForCore(&reopened, destination, agi::vfr::Framerate(), "utf-8", {});
+	auto saved = ReadAssFileForCore(destination, "utf-8");
+	expected[0] = "Dialogue: 0,0:00:01.00,0:00:03.00,Default,Alice,0,0,0,,ASS writer boundary Ω😀";
+	results.Check("actual_ass_writer_replaces_and_reopens_complete_events", DialogueData(saved) == expected);
+	results.Check("actual_ass_writer_preserves_exact_timestamps", Line(saved, 0).Start == 1000 && Line(saved, 0).End == 3000 && Line(saved, 1).Start == 3200 && Line(saved, 1).End == 5400);
+	std::vector<std::string> styles;
+	for (auto const& style : saved.Styles) styles.push_back(style.GetEntryData());
+	results.Check("actual_ass_writer_preserves_complete_style_definitions", styles == std::vector<std::string>{
+																						  "Style: Default,Arial,32,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,20,20,20,1",
+																						  "Style: Emphasis,Arial,36,&H0000FFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,2,20,20,20,1"});
+	results.Check("both_atomic_save_paths_clean_same_directory_temporary_files", std::distance(fs::directory_iterator(directory), fs::directory_iterator{}) == 1);
+#else
+	results.Skip("atomic_ass_save_temporary_path_boundary", "Windows file-stream path boundary");
+#endif
+}
+
 void RoundTripSrtEncoding(fs::path const& artifacts, Results& results, std::string const& id,
 						  std::string const& source_bytes, std::string const& text, std::string const& expected_encoding) {
 	results.Begin(id);
@@ -826,6 +877,7 @@ json::Object Run(fs::path const& artifacts, Results& results) {
 		config::opt = nullptr;
 		config::path = nullptr;
 	});
+	ExerciseAtomicSaveBoundary(fixtures, artifacts, results);
 	ExerciseSrtEncoding(artifacts, results);
 	auto services = std::make_shared<RuntimeServices>();
 	auto registry = std::make_shared<FeatureRegistry>();
