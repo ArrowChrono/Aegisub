@@ -61,43 +61,6 @@ namespace {
 		return root;
 	}
 
-	void add_toolbar_item(std::vector<std::string>& out, std::string item) {
-		agi::util::strings::trim_inplace(item);
-		if (item.empty() || item == "-") {
-			if (!out.empty() && !out.back().empty())
-				out.emplace_back();
-			return;
-		}
-
-		out.emplace_back(std::move(item));
-	}
-
-	std::vector<std::string> parse_configurable_toolbar_items(std::string const& raw) {
-		std::vector<std::string> items;
-		agi::util::strings::for_each_split_any(raw, "\r\n", false, [&](agi::util::strings::view line) {
-			agi::util::strings::for_each_split_any(line, ",;", false, [&](agi::util::strings::view item) {
-				add_toolbar_item(items, std::string(item));
-			});
-		});
-
-		while (!items.empty() && items.back().empty())
-			items.pop_back();
-
-		return items;
-	}
-
-	std::vector<std::string> normalize_configurable_toolbar_items(std::vector<std::string> const& raw) {
-		std::vector<std::string> items;
-		items.reserve(raw.size());
-		for (auto const& item : raw)
-			add_toolbar_item(items, item);
-
-		while (!items.empty() && items.back().empty())
-			items.pop_back();
-
-		return items;
-	}
-
 	wxString strip_accelerators(wxString label) {
 		label.Replace(wxS("&&"), wxS("\001"));
 		label.Replace(wxS("&"), wxS(""));
@@ -270,9 +233,7 @@ namespace {
 		std::vector<std::string> GetConfiguredCommands() const {
 			if (!command_option.empty()) {
 				auto opt = OPT_GET(command_option);
-				if (opt->GetType() == agi::OptionType::ListString)
-					return normalize_configurable_toolbar_items(opt->GetListString());
-				return parse_configurable_toolbar_items(opt->GetString());
+				return toolbar::NormalizeCommandButtonCommands(toolbar::LoadCommandButtonCommands(*opt));
 			}
 
 			json::Object const& root = get_root();
@@ -493,11 +454,7 @@ namespace {
 
 		void Populate() {
 			auto opt = OPT_GET(command_option);
-			std::vector<std::string> command_names;
-			if (opt->GetType() == agi::OptionType::ListString)
-				command_names = normalize_configurable_toolbar_items(opt->GetListString());
-			else
-				command_names = parse_configurable_toolbar_items(opt->GetString());
+			auto command_names = toolbar::NormalizeCommandButtonCommands(toolbar::LoadCommandButtonCommands(*opt));
 
 			commands.reserve(command_names.size());
 			bool needs_onidle = false;

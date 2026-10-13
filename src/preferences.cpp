@@ -1274,23 +1274,6 @@ class CommandRenderer final : public wxDataViewCustomRenderer {
 	bool HasEditorCtrl() const override { return true; }
 };
 
-std::string NormalizeCommandButtonValue(std::string value) {
-	agi::util::strings::trim_inplace(value);
-	return value == "-" ? std::string() : value;
-}
-
-std::vector<std::string> LoadCommandButtonCommands() {
-	auto opt = OPT_GET(kCommandButtonCommandsOption);
-	if (opt->GetType() == agi::OptionType::ListString)
-		return opt->GetListString();
-
-	std::vector<std::string> commands;
-	agi::util::strings::for_each_split_any(opt->GetString(), "\r\n,;", false, [&](agi::util::strings::view item) {
-		commands.emplace_back(NormalizeCommandButtonValue(std::string(item)));
-	});
-	return commands;
-}
-
 class CommandButtonDataViewModel final : public wxDataViewVirtualListModel {
 	Preferences *parent;
 	std::vector<std::string> commands;
@@ -1310,7 +1293,7 @@ class CommandButtonDataViewModel final : public wxDataViewVirtualListModel {
 
 	public:
 	explicit CommandButtonDataViewModel(Preferences *parent)
-		: wxDataViewVirtualListModel(static_cast<unsigned int>(LoadCommandButtonCommands().size())), parent(parent), commands(LoadCommandButtonCommands()) {
+		: wxDataViewVirtualListModel(static_cast<unsigned int>(toolbar::LoadCommandButtonCommands(*OPT_GET(kCommandButtonCommandsOption)).size())), parent(parent), commands(toolbar::LoadCommandButtonCommands(*OPT_GET(kCommandButtonCommandsOption))) {
 	}
 
 	unsigned int GetColumnCount() const override { return 3; }
@@ -1366,7 +1349,7 @@ class CommandButtonDataViewModel final : public wxDataViewVirtualListModel {
 		else if (col == 1) {
 			wxDataViewIconText text;
 			text << variant;
-			cmd_name = NormalizeCommandButtonValue(from_wx(text.GetText()));
+			cmd_name = toolbar::NormalizeCommandButtonValue(from_wx(text.GetText()));
 		}
 		else {
 			return false;
@@ -1379,7 +1362,7 @@ class CommandButtonDataViewModel final : public wxDataViewVirtualListModel {
 	}
 
 	unsigned AppendCommand(std::string command) {
-		commands.emplace_back(NormalizeCommandButtonValue(std::move(command)));
+		commands.emplace_back(toolbar::NormalizeCommandButtonValue(std::move(command)));
 		RowAppended();
 		MarkDirty();
 		return static_cast<unsigned>(commands.size() - 1);
