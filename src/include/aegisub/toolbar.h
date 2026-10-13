@@ -16,9 +16,7 @@
 /// @brief Dynamic toolbar generator.
 /// @ingroup menu toolbar
 
-#include <libaegisub/option_value.h>
-#include <libaegisub/string_utils.h>
-#include <vector>
+#include <libaegisub/command_button_config.h>
 #include <string>
 #include <utility>
 
@@ -31,37 +29,11 @@ class wxWindow;
 class wxPanel;
 
 namespace toolbar {
-inline std::string NormalizeCommandButtonValue(std::string value) {
-	agi::util::strings::trim_inplace(value);
-	return value == "-" ? std::string() : value;
-}
+using agi::command_buttons::LoadCommandButtonCommands;
+using agi::command_buttons::NormalizeCommandButtonCommands;
+using agi::command_buttons::NormalizeCommandButtonValue;
 
-inline std::vector<std::string> LoadCommandButtonCommands(agi::OptionValue const& option) {
-	if (option.GetType() == agi::OptionType::ListString)
-		return option.GetListString();
-	std::vector<std::string> commands;
-	agi::util::strings::for_each_split_any(option.GetString(), "\r\n,;", false, [&](agi::util::strings::view item) {
-		commands.emplace_back(NormalizeCommandButtonValue(std::string(item)));
-	});
-	return commands;
-}
-
-inline std::vector<std::string> NormalizeCommandButtonCommands(std::vector<std::string> const& raw) {
-	std::vector<std::string> commands;
-	commands.reserve(raw.size());
-	for (auto const& item : raw) {
-		auto value = NormalizeCommandButtonValue(item);
-		if (!value.empty())
-			commands.emplace_back(std::move(value));
-		else if (!commands.empty() && !commands.back().empty())
-			commands.emplace_back();
-	}
-	if (!commands.empty() && commands.back().empty())
-		commands.pop_back();
-	return commands;
-}
-
-	/// Add the named toolbar to a window
+/// Add the named toolbar to a window
 	/// @param frame Frame to attach the toolbar to
 	/// @param name Name of the toolbar
 	/// @param context Project context

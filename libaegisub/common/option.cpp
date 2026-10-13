@@ -17,6 +17,7 @@
 /// @ingroup libaegisub
 
 #include "libaegisub/option.h"
+#include "libaegisub/command_button_config.h"
 
 #include "libaegisub/cajun/reader.h"
 #include "libaegisub/cajun/writer.h"
@@ -77,8 +78,13 @@ class ConfigVisitor final : public json::ConstVisitor {
 	}
 
 	void Visit(const json::Array& array) {
-		if (array.empty())
+		if (array.empty()) {
+			if (ignore_errors && name == "Subtitle/Edit Box/Command Buttons/Commands") {
+				values.push_back(agi::make_unique<OptionValueListString>(name, std::vector<std::string>{}));
+				return;
+			}
 			return Error("Cannot infer the type of an empty array");
+		}
 
 		json::Object const& front = array.front();
 		if (front.size() != 1)
@@ -243,7 +249,11 @@ void Options::LoadConfig(std::istream& stream, bool ignore_errors) {
 		else {
 			if (ignore_errors) {
 				try {
-					(*dst_it)->Set((*src_it).get());
+					if ((*dst_it)->GetName() == "Subtitle/Edit Box/Command Buttons/Commands" &&
+						(*dst_it)->GetType() == OptionType::ListString && (*src_it)->GetType() == OptionType::String)
+						(*dst_it)->SetListString(command_buttons::LoadCommandButtonCommands(**src_it));
+					else
+						(*dst_it)->Set((*src_it).get());
 				}
 				catch (agi::InternalError const& e) {
 					LOG_E("option/load/config_visitor") << "Error loading option from user configuration: " << e.GetMessage();
