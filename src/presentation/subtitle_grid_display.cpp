@@ -4,12 +4,21 @@
 #include <libaegisub/character_count.h>
 #include <libaegisub/vfr.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <string_view>
 
 namespace aegisub::presentation {
 namespace {
+
+agi::Color blend(agi::Color fg, agi::Color bg, double alpha) {
+	auto channel = [](unsigned char foreground, unsigned char background, double ratio) -> unsigned char {
+		double value = static_cast<double>(background) + (static_cast<double>(foreground) - static_cast<double>(background)) * ratio;
+		return value < 0.0 ? 0 : (value > 255.0 ? 255 : static_cast<unsigned char>(value));
+	};
+	return agi::Color(channel(fg.r, bg.r, alpha), channel(fg.g, bg.g, alpha), channel(fg.b, bg.b, alpha), bg.a);
+}
 
 // Empty cell for 0 (layer 0 / margin default-from-style). Non-zero values,
 // including negatives, are shown.
@@ -146,4 +155,22 @@ std::string FormatSubtitleGridCps(double cps, bool show_decimal) {
 	return buffer;
 }
 
+SubtitleGridCpsColors ResolveSubtitleGridCpsColors(
+	double cps,
+	int warning_threshold,
+	int error_threshold,
+	agi::Color error_color,
+	agi::Color row_background,
+	agi::Color text_color) {
+	SubtitleGridCpsColors colors{.background = row_background, .text = text_color};
+	if (cps < 0 || cps > 100 || !(cps > warning_threshold))
+		return colors;
+
+	int maximum = std::max(warning_threshold, error_threshold);
+	double alpha = std::min((cps - warning_threshold + 1) / (maximum - warning_threshold + 1), 1.0);
+	colors.background = blend(error_color, row_background, alpha);
+	colors.text = blend(agi::Color(0, 0, 0), text_color, alpha);
+	colors.highlighted = true;
+	return colors;
+}
 }

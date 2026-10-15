@@ -332,26 +332,6 @@ struct GridColumnMarginVert final : GridColumnMargin {
 	COLUMN_PROJECTION_ID(aegisub::presentation::SubtitleGridColumnIdMarginVertical)
 };
 
-wxColor blend(wxColor fg, wxColor bg, double alpha) {
-	return wxColor(
-		wxColor::AlphaBlend(fg.Red(), bg.Red(), alpha),
-		wxColor::AlphaBlend(fg.Green(), bg.Green(), alpha),
-		wxColor::AlphaBlend(fg.Blue(), bg.Blue(), alpha));
-}
-
-/// Backend-agnostic blend on agi::Color (the painter's color type). Matches
-/// the wxColor blend above byte-for-byte so the CPS column looks identical
-/// under wxDC and (future) D2D backends. wxColor::AlphaBlend uses
-/// bg + (fg - bg) * alpha with truncation (no rounding), so we match that
-/// exactly rather than rounding, to avoid 1-off differences.
-agi::Color blend(agi::Color fg, agi::Color bg, double alpha) {
-	auto ch = [](unsigned char f, unsigned char b, double a) -> unsigned char {
-		double l = static_cast<double>(b) + (static_cast<double>(f) - static_cast<double>(b)) * a;
-		return l < 0.0 ? 0 : (l > 255.0 ? 255 : static_cast<unsigned char>(l));
-	};
-	return agi::Color(ch(fg.r, bg.r, alpha), ch(fg.g, bg.g, alpha), ch(fg.b, bg.b, alpha), bg.a);
-}
-
 class GridColumnCPS final : public GridColumn {
 	const agi::OptionValue *ignore_whitespace = OPT_GET("Subtitle/Character Counter/Ignore Whitespace");
 	const agi::OptionValue *ignore_punctuation = OPT_GET("Subtitle/Character Counter/Ignore Punctuation");
@@ -404,17 +384,12 @@ public:
 		painter.MeasureText(std::wstring(str.wx_str()), ext_w, ext_h);
 		auto tc = painter.CurrentTextColor();
 
-		int cps_min = cps_warn->GetInt();
-		int cps_max = std::max<int>(cps_min, cps_error->GetInt());
-		if (cps > cps_min) {
-			double alpha = std::min((double)(cps - cps_min + 1) / (cps_max - cps_min + 1), 1.0);
-			// Blend the CPS warning color over the current row background, then
-			// blend the text color toward black at the same ratio -- mirrors
-			// the original dc.SetBrush(blend(...)) / dc.SetTextForeground(blend(...))
-			// sequence exactly, via the backend-agnostic blend overload.
-			painter.FillRectangle(x, y + 1, width, ext_h + 3,
-				blend(bg_color->GetColor(), painter.CurrentRowBackground(), alpha));
-			painter.SetTextColor(blend(from_wx(*wxBLACK), tc, alpha));
+		auto const colors = aegisub::presentation::ResolveSubtitleGridCpsColors(
+			cps, cps_warn->GetInt(), cps_error->GetInt(), bg_color->GetColor(),
+			painter.CurrentRowBackground(), tc);
+		if (colors.highlighted) {
+			painter.FillRectangle(x, y + 1, width, ext_h + 3, colors.background);
+			painter.SetTextColor(colors.text);
 		}
 
 		x += (width + 2 - ext_w) / 2;

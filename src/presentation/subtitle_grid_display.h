@@ -4,6 +4,8 @@
 
 #include "../time_display_mode.h"
 
+#include <libaegisub/color.h>
+
 #include <string>
 #include <string_view>
 
@@ -45,4 +47,17 @@ double CalculateSubtitleGridCps(
 
 std::string FormatSubtitleGridCps(double cps, bool show_decimal);
 
+struct SubtitleGridCpsColors {
+	agi::Color background;
+	agi::Color text;
+	bool highlighted = false;
+};
+
+SubtitleGridCpsColors ResolveSubtitleGridCpsColors(
+	double cps,
+	int warning_threshold,
+	int error_threshold,
+	agi::Color error_color,
+	agi::Color row_background,
+	agi::Color text_color);
 }
