@@ -5157,7 +5157,7 @@ msgstr "'%s' non ha %d caratteri usati.\n"
 #: ../src/font_file_lister.cpp:176
 #, c-format
 msgid "'%s' is missing the following glyphs used: %s\n"
-msgstr "'%s' non ha i seguenti caratteri usati:\n"
+msgstr "'%s' non ha i seguenti caratteri usati: %s\n"
 
 #: ../src/font_file_lister.cpp:187
 msgid "Used in styles:\n"
