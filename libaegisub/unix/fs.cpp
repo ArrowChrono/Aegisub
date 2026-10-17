@@ -72,6 +72,10 @@ bool TryGetFileInfo(path const& p, FileInfo& out, std::error_code& ec) {
 	out.modified_time = st.st_mtime;
 	return true;
 }
+
+void Rename(path const& from, path const& to, std::error_code& ec) {
+	bfs::rename(from, to, ec);
+}
 }
 
 std::string ShortName(path const& p) {

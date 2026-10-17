@@ -23,11 +23,16 @@
 #include "libaegisub/scoped_ptr.h"
 #include "libaegisub/util.h"
 
-using agi::charset::ConvertW;
 using agi::charset::ConvertLocal;
+using agi::charset::ConvertW;
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+
+#include <cstring>
+#include <filesystem>
+#include <limits>
+#include <memory>
 
 #undef CreateDirectory
 
@@ -92,6 +97,47 @@ bool TryGetFileInfo(path const& p, FileInfo& out, std::error_code& ec) {
 	out.size = (static_cast<uintmax_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
 	out.modified_time = FileTimeToUnixTime(data.ftLastWriteTime);
 	return true;
+}
+
+void Rename(path const& from, path const& to, std::error_code& ec) {
+	std::filesystem::rename(from, to, ec);
+	if (ec.value() != ERROR_ACCESS_DENIED)
+		return;
+
+	auto const legacy_error = ec;
+	auto const absolute_to = std::filesystem::absolute(to, ec);
+	if (ec)
+		return;
+	auto const& name = absolute_to.native();
+	if (name.size() > ((std::numeric_limits<DWORD>::max)() - sizeof(FILE_RENAME_INFO)) / sizeof(wchar_t)) {
+		ec.assign(ERROR_FILENAME_EXCED_RANGE, std::system_category());
+		return;
+	}
+	auto const name_bytes = name.size() * sizeof(wchar_t);
+	auto const buffer_bytes = sizeof(FILE_RENAME_INFO) + name_bytes;
+	auto buffer = std::make_unique<unsigned char[]>(buffer_bytes);
+	auto *info = reinterpret_cast<FILE_RENAME_INFO *>(buffer.get());
+	info->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+	info->RootDirectory = nullptr;
+	info->FileNameLength = static_cast<DWORD>(name_bytes);
+	std::memcpy(info->FileName, name.data(), name_bytes);
+
+	auto raw = CreateFileW(from.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+						   nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+	if (raw == INVALID_HANDLE_VALUE) {
+		ec.assign(GetLastError(), std::system_category());
+		return;
+	}
+	scoped_holder<HANDLE, decltype(&CloseHandle)> source(raw, CloseHandle);
+	if (SetFileInformationByHandle(source, FileRenameInfoEx, info, static_cast<DWORD>(buffer_bytes))) {
+		ec.clear();
+		return;
+	}
+	auto const error = GetLastError();
+	if (error == ERROR_INVALID_FUNCTION || error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SAME_DEVICE)
+		ec = legacy_error;
+	else
+		ec.assign(error, std::system_category());
 }
 }
 

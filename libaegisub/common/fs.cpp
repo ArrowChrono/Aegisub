@@ -208,7 +208,7 @@ namespace {
 	}
 
 	void Rename(const path& from, const path& to) {
-		CHECKED_CALL(bfs::rename(from, to, ec), from, to);
+		CHECKED_CALL(detail::Rename(from, to, ec), from, to);
 	}
 
 	path UniquePath(path const& model) {

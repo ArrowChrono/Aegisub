@@ -18,8 +18,15 @@
 #include <util.h>
 
 #include <libaegisub/fs.h>
+#include <libaegisub/scoped_ptr.h>
 
 #include <filesystem>
+#include <fstream>
+
+#ifdef _WIN32
+#include <Windows.h>
+#undef CreateDirectory
+#endif
 #include <set>
 
 using namespace agi::fs;
@@ -119,6 +126,93 @@ TEST(lagi_fs, rename_overwrites) {
 	EXPECT_TRUE(FileExists("data/rename_out"));
 	EXPECT_EQ(expected_value, util::read_written_rand("data/rename_out"));
 }
+
+#ifdef _WIN32
+namespace {
+bool WriteRenameContents(path const& file, char const *contents) {
+	std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+	stream << contents;
+	stream.close();
+	return stream.good();
+}
+
+std::string ReadRenameContents(path const& file) {
+	std::ifstream stream(file, std::ios::binary);
+	return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+}
+
+void CheckRenameOpenTarget(DWORD access) {
+	auto const source = path("data/rename_open_in");
+	auto const target = path("data/rename_open_out");
+	std::string const old_contents = "old target";
+	std::string const new_contents = "replacement source contents";
+	ASSERT_TRUE(WriteRenameContents(source, new_contents.c_str()));
+	ASSERT_TRUE(WriteRenameContents(target, old_contents.c_str()));
+
+	auto raw = CreateFileW(target.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+						   nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+	ASSERT_NE(INVALID_HANDLE_VALUE, raw) << GetLastError();
+	agi::scoped_holder<HANDLE, decltype(&CloseHandle)> held_target(raw, CloseHandle);
+	BY_HANDLE_FILE_INFORMATION before{};
+	ASSERT_TRUE(GetFileInformationByHandle(held_target, &before)) << GetLastError();
+
+	ASSERT_NO_THROW(Rename(source, target));
+	EXPECT_FALSE(FileExists(source));
+	EXPECT_EQ(new_contents, ReadRenameContents(target));
+
+	BY_HANDLE_FILE_INFORMATION after{};
+	ASSERT_TRUE(GetFileInformationByHandle(held_target, &after)) << GetLastError();
+	EXPECT_EQ(before.dwVolumeSerialNumber, after.dwVolumeSerialNumber);
+	EXPECT_EQ(before.nFileIndexHigh, after.nFileIndexHigh);
+	EXPECT_EQ(before.nFileIndexLow, after.nFileIndexLow);
+	EXPECT_EQ(0u, after.nFileSizeHigh);
+	EXPECT_EQ(old_contents.size(), after.nFileSizeLow);
+	if (access & GENERIC_READ) {
+		char buffer[64]{};
+		DWORD read = 0;
+		ASSERT_TRUE(ReadFile(held_target, buffer, sizeof buffer, &read, nullptr)) << GetLastError();
+		EXPECT_EQ(old_contents, std::string(buffer, read));
+	}
+}
+}
+
+TEST(lagi_fs, rename_overwrites_metadata_open_target) {
+	CheckRenameOpenTarget(FILE_READ_ATTRIBUTES);
+}
+
+TEST(lagi_fs, rename_overwrites_read_open_target) {
+	CheckRenameOpenTarget(GENERIC_READ);
+}
+
+TEST(lagi_fs, rename_preserves_target_without_delete_sharing) {
+	auto const source = path("data/rename_no_share_in");
+	auto const target = path("data/rename_no_share_out");
+	ASSERT_TRUE(WriteRenameContents(source, "new source"));
+	ASSERT_TRUE(WriteRenameContents(target, "old target"));
+	auto raw = CreateFileW(target.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+						   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	ASSERT_NE(INVALID_HANDLE_VALUE, raw) << GetLastError();
+	agi::scoped_holder<HANDLE, decltype(&CloseHandle)> held_target(raw, CloseHandle);
+
+	EXPECT_THROW(Rename(source, target), FileSystemError);
+	EXPECT_EQ("new source", ReadRenameContents(source));
+	EXPECT_EQ("old target", ReadRenameContents(target));
+}
+
+TEST(lagi_fs, rename_preserves_read_only_target) {
+	auto const source = path("data/rename_read_only_in");
+	auto const target = path("data/rename_read_only_out");
+	ASSERT_TRUE(WriteRenameContents(source, "new source"));
+	ASSERT_TRUE(WriteRenameContents(target, "old target"));
+	ASSERT_TRUE(SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_READONLY)) << GetLastError();
+
+	EXPECT_THROW(Rename(source, target), AccessDenied);
+	EXPECT_NE(0u, GetFileAttributesW(target.c_str()) & FILE_ATTRIBUTE_READONLY);
+	EXPECT_EQ("new source", ReadRenameContents(source));
+	EXPECT_EQ("old target", ReadRenameContents(target));
+	EXPECT_TRUE(SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL)) << GetLastError();
+}
+#endif
 
 TEST(lagi_fs, copy) {
 	int expected_value = util::write_rand("data/copy_in");

@@ -20,5 +20,5 @@ struct FileInfo {
 };
 
 bool TryGetFileInfo(path const& path, FileInfo& out, std::error_code& ec);
-
+void Rename(path const& from, path const& to, std::error_code& ec);
 }
