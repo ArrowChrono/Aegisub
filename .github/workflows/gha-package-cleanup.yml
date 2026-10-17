@@ -46,43 +46,33 @@ jobs:
           $page = 1
           do {
             $uri = "$api" + "?package_type=nuget&per_page=100&page=$page"
-            $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri)
+            $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri | Write-Output)
             $packages += $batch
             $page++
           } while ($batch.Count -eq 100)
 
+          Write-Host "Found $($packages.Count) NuGet package(s); keep=$keep; dry-run=$dryRun"
+          $matchedVersions = 0
+          $candidateCount = 0
+          $deletedCount = 0
           foreach ($package in $packages) {
-            # GitHub's versions endpoint rejects names containing whitespace
-            # with 422 "The package parameter is required." Such names can
-            # never be vcpkg cache packages, so skip them outright.
-            if ($package.name -match '\s') {
-              Write-Host "skipping package with invalid name: '$($package.name)'"
-              continue
-            }
-
             $encodedName = [uri]::EscapeDataString($package.name)
+            $versions = @()
+            $page = 1
 
-            try {
-              $versions = @()
-              $page = 1
+            do {
+              $uri = "$api/nuget/$encodedName/versions?per_page=100&page=$page"
+              $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri | Write-Output)
+              $versions += $batch
+              $page++
+            } while ($batch.Count -eq 100)
 
-              do {
-                $uri = "$api/nuget/$encodedName/versions?per_page=100&page=$page"
-                $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri)
-                $versions += $batch
-                $page++
-              } while ($batch.Count -eq 100)
-
-              $vcpkgVersions = @(
-                $versions |
-                  Where-Object { $_.name -match '-vcpkg[0-9a-f]+$' } |
-                  Sort-Object created_at -Descending
-              )
-            } catch {
-              # One unreadable package must not abort the whole cleanup.
-              Write-Host "skipping $($package.name): $($_.Exception.Message)"
-              continue
-            }
+            $vcpkgVersions = @(
+              $versions |
+                Where-Object { $_.name -match '-vcpkg[0-9a-f]+$' } |
+                Sort-Object created_at -Descending
+            )
+            $matchedVersions += $vcpkgVersions.Count
 
             if ($vcpkgVersions.Count -eq 0) {
               continue
@@ -91,6 +81,7 @@ jobs:
             Write-Host "$($package.name): $($vcpkgVersions.Count) vcpkg version(s)"
 
             $oldVersions = @($vcpkgVersions | Select-Object -Skip $keep)
+            $candidateCount += $oldVersions.Count
             foreach ($version in $oldVersions) {
               if ($dryRun) {
                 Write-Host "  [dry-run] delete $($version.name) ($($version.created_at))"
@@ -99,11 +90,8 @@ jobs:
 
               Write-Host "  deleting $($version.name) ($($version.created_at))"
               $deleteUri = "$api/nuget/$encodedName/versions/$($version.id)"
-              try {
-                Invoke-RestMethod -Method Delete -Headers $headers -Uri $deleteUri
-              } catch {
-                # Keep going; the next scheduled run will retry.
-                Write-Host "  failed to delete $($version.name): $($_.Exception.Message)"
-              }
+              Invoke-RestMethod -Method Delete -Headers $headers -Uri $deleteUri
+              $deletedCount++
             }
           }
+          Write-Host "Cleanup completed: packages=$($packages.Count); matched=$matchedVersions; candidates=$candidateCount; deleted=$deletedCount; dry-run=$dryRun"
