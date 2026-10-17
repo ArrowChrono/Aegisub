@@ -80,7 +80,7 @@ TEST(timing_processor_plan, late_overflow_does_not_mutate_input) {
 	TimingProcessorParameters settings;
 	settings.lead_out_enabled = true;
 	settings.lead_out_ms = std::numeric_limits<int>::max();
-	EXPECT_THROW(aegisub::PrepareTimingProcessor(input, settings, {}, {}), std::overflow_error);
+	EXPECT_THROW(static_cast<void>(aegisub::PrepareTimingProcessor(input, settings, {}, {})), std::overflow_error);
 	EXPECT_EQ((std::vector<std::pair<int, int>>{{1000, 2000}, {3000, 4000}, {5000, 6000}}), Milliseconds(input));
 }
 
@@ -89,12 +89,12 @@ TEST(timing_processor_plan, rejects_parameters_that_cannot_be_calculated_safely)
 	TimingProcessorParameters settings;
 	settings.lead_in_enabled = true;
 	settings.lead_in_ms = -1;
-	EXPECT_THROW(aegisub::PrepareTimingProcessor(input, settings, {}, {}), std::invalid_argument);
+	EXPECT_THROW(static_cast<void>(aegisub::PrepareTimingProcessor(input, settings, {}, {})), std::invalid_argument);
 	settings.lead_in_ms = 0;
 	settings.adjacent_enabled = true;
 	settings.adjacent_bias_percent = 101;
-	EXPECT_THROW(aegisub::PrepareTimingProcessor(input, settings, {}, {}), std::invalid_argument);
+	EXPECT_THROW(static_cast<void>(aegisub::PrepareTimingProcessor(input, settings, {}, {})), std::invalid_argument);
 	settings.adjacent_bias_percent = 50;
 	settings.keyframes_enabled = true;
-	EXPECT_THROW(aegisub::PrepareTimingProcessor(input, settings, {}, {}), std::invalid_argument);
+	EXPECT_THROW(static_cast<void>(aegisub::PrepareTimingProcessor(input, settings, {}, {})), std::invalid_argument);
 }

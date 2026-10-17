@@ -80,7 +80,7 @@ TEST(shift_times_plan, later_overflow_does_not_publish_candidates_or_mutate_inpu
 
 TEST(shift_times_plan, rejects_unsupported_parameters_and_missing_frame_reference) {
 	std::vector<ShiftTimesLine> const input{{.start = 105, .end = 205}};
-	EXPECT_THROW(aegisub::PrepareShiftTimes(input, {.amount = 7, .mode = 3}, {}), std::invalid_argument);
-	EXPECT_THROW(aegisub::PrepareShiftTimes(input, {.amount = 7, .fields = -1}, {}), std::invalid_argument);
-	EXPECT_THROW(aegisub::PrepareShiftTimes(input, {.by_time = false}, {}), std::invalid_argument);
+	EXPECT_THROW(static_cast<void>(aegisub::PrepareShiftTimes(input, {.amount = 7, .mode = 3}, {})), std::invalid_argument);
+	EXPECT_THROW(static_cast<void>(aegisub::PrepareShiftTimes(input, {.amount = 7, .fields = -1}, {})), std::invalid_argument);
+	EXPECT_THROW(static_cast<void>(aegisub::PrepareShiftTimes(input, {.by_time = false}, {})), std::invalid_argument);
 }
