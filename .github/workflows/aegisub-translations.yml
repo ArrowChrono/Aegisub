@@ -20,8 +20,14 @@ jobs:
     - name: checkout code
       uses: actions/checkout@v6
 
+    - name: install gettext
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends gettext
+
     - name: show gettext version
-      run: msgfmt --version | head -1
+      shell: bash
+      run: msgfmt --version
 
     - name: build translations
       shell: bash
