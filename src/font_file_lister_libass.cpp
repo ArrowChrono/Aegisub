@@ -81,15 +81,53 @@ LibassVariantMetadata ClassifyLibassVariant(
 	result.matched_bold = bold;
 	return result;
 }
+
+void SetPrimaryMatch(CollectionResult& result, LibassFontFace const& face,
+					 std::string const& requested_name, LibassFontRequest const& request,
+					 std::string_view provider_name) {
+	if (!face.path.empty()) result.primary_path = agi::fs::PathFromString(face.path);
+	result.matched_facename = face.families.empty() ? requested_name : face.families.front();
+	result.matched_facename_full = face.fullnames.empty() ? std::string() : face.fullnames.front();
+	result.matched_names = face.families;
+	result.face_index = face.face_index;
+	result.matched_weight = face.weight;
+	result.fake_bold = request.weight > face.weight + 150 && !face.bold;
+	result.fake_italic = request.italic && !face.italic;
+	auto const variant = ClassifyLibassVariant(face, result.fake_bold, result.fake_italic);
+	result.matched_bold = variant.matched_bold;
+	result.matched_italic = variant.matched_italic;
+	result.realized_status = variant.status;
+	if (variant.role != FontVariantRole::Unknown) result.realized_role = variant.role;
+	result.noncanonical_variant = variant.status != FontVariantStatus::Canonical;
+	result.path_source = "libass-" + std::string(provider_name);
+}
+
+void AddFontSource(CollectionResult& result, ILibassFontProvider const& provider,
+				   size_t index, bool primary, std::string const& requested_name) {
+	auto const& face = provider.GetLibassFaces()[index];
+	if (face.path.empty()) {
+		auto data = provider.GetLibassFontData(index);
+		if (data && !data->empty()) {
+			if (primary) result.primary_memory_data = data;
+			FontMemoryFont memory_font;
+			memory_font.facename = !face.fullnames.empty() ? face.fullnames.front() : !face.families.empty() ? face.families.front()
+																											 : requested_name;
+			memory_font.data = std::move(data);
+			result.memory_fonts.push_back(std::move(memory_font));
+		}
+		return;
+	}
+	auto path = agi::fs::PathFromString(face.path);
+	if (std::ranges::find(result.paths, path) == result.paths.end())
+		result.paths.push_back(std::move(path));
+}
 }
 
 LibassFontFileLister::LibassFontFileLister(
 	FontCollectorEventSink& event_sink,
 	std::unique_ptr<ILibassFontProvider> provider,
 	bool collect_match_candidates)
-: provider(std::move(provider))
-, collect_match_candidates(collect_match_candidates)
-{
+	: provider(std::move(provider)), collect_match_candidates(collect_match_candidates) {
 	FontCollectorEvent event;
 	event.type = FontCollectorEventType::FontBackendInfo;
 	event.message = this->provider
@@ -179,44 +217,23 @@ CollectionResult LibassFontFileLister::GetFontPaths(
 			font_collector::unicode::AppendRuneToUtf8(result.missing, rune);
 	}
 
-	if (selection.faces.empty())
+	if (selection.faces.empty()) {
+		auto const ranking = RankLibassFamilyFaces(faces, request,
+												   [this](std::string_view family) { return provider->GetLibassSubstitutions(family); });
+		if (ranking.face) {
+			auto family = std::make_shared<CollectionResult>(result);
+			family->match_ambiguous = ranking.ambiguous;
+			SetPrimaryMatch(*family, faces[*ranking.face], facename, request, provider->GetLibassProviderName());
+			AddFontSource(*family, *provider, *ranking.face, true, facename);
+			result.glyphless_family = std::move(family);
+		}
 		return result;
+	}
 
 	auto const& first = faces[selection.faces.front()];
-	result.matched_facename = first.families.empty() ? facename : first.families.front();
-	result.matched_facename_full = first.fullnames.empty() ? std::string() : first.fullnames.front();
-	result.matched_names = first.families;
-	result.face_index = first.face_index;
-	result.matched_weight = first.weight;
-	result.fake_bold = request.weight > first.weight + 150 && !first.bold;
-	result.fake_italic = request.italic && !first.italic;
-	auto const variant = ClassifyLibassVariant(
-		first, result.fake_bold, result.fake_italic);
-	result.matched_bold = variant.matched_bold;
-	result.matched_italic = variant.matched_italic;
-	result.realized_status = variant.status;
-	if (variant.role != FontVariantRole::Unknown)
-		result.realized_role = variant.role;
-	result.noncanonical_variant = variant.status != FontVariantStatus::Canonical;
-	result.path_source = "libass-" + std::string(provider->GetLibassProviderName());
-
-	for (auto index : selection.faces) {
-		auto const& face = faces[index];
-		if (face.path.empty()) {
-			auto data = provider->GetLibassFontData(index);
-			if (data && !data->empty()) {
-				FontMemoryFont memory_font;
-				memory_font.facename = !face.fullnames.empty() ? face.fullnames.front() :
-				                           !face.families.empty() ? face.families.front() : facename;
-				memory_font.data = std::move(data);
-				result.memory_fonts.push_back(std::move(memory_font));
-			}
-			continue;
-		}
-		auto path = agi::fs::PathFromString(face.path);
-		if (std::find(result.paths.begin(), result.paths.end(), path) == result.paths.end())
-			result.paths.push_back(std::move(path));
-	}
+	SetPrimaryMatch(result, first, facename, request, provider->GetLibassProviderName());
+	for (auto index : selection.faces)
+		AddFontSource(result, *provider, index, index == selection.faces.front(), facename);
 
 	return result;
 }

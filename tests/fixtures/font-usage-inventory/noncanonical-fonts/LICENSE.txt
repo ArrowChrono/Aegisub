@@ -1,0 +1,8 @@
+CC0 1.0 Universal
+
+To the extent possible under law, the authors have waived all copyright and
+related or neighboring rights to the Aegisub GDI Variant Fixture fonts and
+their generator. The fixtures contain only simple test outlines authored for
+this repository.
+
+https://creativecommons.org/publicdomain/zero/1.0/

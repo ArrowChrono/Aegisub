@@ -50,6 +50,7 @@
 #include "selection_controller.h"
 #include "scoped_no_composited.h"
 #include "dialog_detached_video.h"
+#include "dialog_font_usage_inventory.h"
 #include "dialog_manager.h"
 #include "font_family_catalog_cache.h"
 #include "libresrc/libresrc.h"
@@ -981,6 +982,7 @@ void FrameMain::OnFontChangeDebounce(wxTimerEvent &) {
 		grid->NotifySystemFontsChanged();
 	// Kick a background rebuild so the next interactive use is warm.
 	font_family_catalog_cache::WarmAsync();
+	NotifyFontUsageInventorySystemFontsChanged(context.get());
 	context->GetCore().project->ReloadSubtitlesProvider();
 }
 

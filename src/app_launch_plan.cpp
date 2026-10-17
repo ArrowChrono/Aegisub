@@ -306,10 +306,11 @@ void AddSingleInputOptions(
 	input_group->require_option(1, 1);
 }
 
-void AddFontCollectorCommonOptions(
+void AddFontCollectorAnalysisOptions(
 	CLI::App& command,
-	aegisub::fontcollector_subcommand::Options& options) {
-	command.add_option("inputs", options.inputs, "ASS/SSA subtitle files or directories")
+	aegisub::fontcollector_subcommand::Options& options,
+	char const *input_help) {
+	command.add_option("inputs", options.inputs, input_help)
 		->required()
 		->expected(1, -1)
 		->check(NonEmptyValue());
@@ -332,11 +333,30 @@ void AddFontCollectorCommonOptions(
 		->check(NonEmptyValue());
 	command.add_flag("--exclude-system-fonts", options.exclude_system_fonts,
 		"Match only additional fonts (libass matcher only)");
+}
+
+void AddFontCollectorCommonOptions(
+	CLI::App& command,
+	aegisub::fontcollector_subcommand::Options& options) {
+	AddFontCollectorAnalysisOptions(command, options, "ASS/SSA subtitle files or directories");
 	command.add_flag("--details", options.details,
 		"Print ASS font usage and matched font details");
 	command.add_flag("--json", options.json, "Print structured JSON output for automation");
 	command.add_flag("-r,--recursive", options.recursive,
 		"Recursively scan input directories for .ass/.ssa files");
+}
+
+void AddFontCollectorInventoryOptions(
+	CLI::App& command,
+	aegisub::fontcollector_subcommand::Options& options) {
+	AddFontCollectorAnalysisOptions(command, options, "ASS subtitle files or directories");
+	command.add_flag("--json", options.json, "Explicitly request the default UTF-8 JSON output");
+	command.add_flag("-r,--recursive", options.recursive,
+					 "Recursively scan input directories for .ass files");
+	command.add_option("--low-frequency-threshold", options.low_frequency_threshold,
+					   "Mark usage counts below this threshold; 0 disables low-frequency hints")
+		->transform(NonNegativeInteger())
+		->default_str("5");
 }
 
 void AddFontCollectorNormalizationOptions(
@@ -494,11 +514,13 @@ struct FontCollectorCliState {
 	Options validate_options;
 	Options list_options;
 	Options normalize_options;
+	Options inventory_options;
 	CLI::App* check = nullptr;
 	CLI::App* collect = nullptr;
 	CLI::App* validate = nullptr;
 	CLI::App* list = nullptr;
 	CLI::App* normalize = nullptr;
+	CLI::App *inventory = nullptr;
 
 	FontCollectorCliState() {
 		check_options.operation = Operation::Check;
@@ -507,6 +529,7 @@ struct FontCollectorCliState {
 		validate_options.strict = true;
 		list_options.operation = Operation::List;
 		normalize_options.operation = Operation::Normalize;
+		inventory_options.operation = Operation::Inventory;
 	}
 };
 
@@ -522,8 +545,8 @@ constexpr char const* kHeadlessModeDescription =
 	"Run automation and inspection without the GUI";
 constexpr char const* kGuiTestModeDescription =
 	"Run or host deterministic GUI automation";
-constexpr char const* kFontCollectorModeDescription =
-	"Collect, validate, list, or normalize fonts used by ASS/SSA subtitle scripts";
+constexpr char const *kFontCollectorModeDescription =
+	"Collect, validate, list, inventory, or normalize fonts used by ASS/SSA subtitle scripts";
 
 void RegisterHeadless(CLI::App& app, HeadlessCliState& state) {
 	ConfigureRoot(app);
@@ -610,6 +633,10 @@ void RegisterFontCollector(CLI::App& app, FontCollectorCliState& state) {
 	state.normalize = app.add_subcommand(
 		"normalize", "Build a read-only ASS font-name normalization plan");
 	AddFontCollectorNormalizationOptions(*state.normalize, state.normalize_options);
+
+	state.inventory = app.add_subcommand(
+		"inventory", "Report aggregate font usage in ASS scripts as UTF-8 JSON");
+	AddFontCollectorInventoryOptions(*state.inventory, state.inventory_options);
 }
 
 void ApplyFontCollector(FontCollectorCliState& state, AppLaunchPlan& plan) {
@@ -623,6 +650,8 @@ void ApplyFontCollector(FontCollectorCliState& state, AppLaunchPlan& plan) {
 		plan.fontcollector_options.emplace(std::move(state.list_options));
 	else if (*state.normalize)
 		plan.fontcollector_options.emplace(std::move(state.normalize_options));
+	else if (*state.inventory)
+		plan.fontcollector_options.emplace(std::move(state.inventory_options));
 }
 
 void RegisterGuiTest(CLI::App& app, GuiTestCliState& state) {

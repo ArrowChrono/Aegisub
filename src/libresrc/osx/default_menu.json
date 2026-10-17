@@ -58,6 +58,7 @@
         { "command" : "subtitle/attachment" },
         { "command" : "tool/font_collector" },
         { "command" : "tool/font_portability_audit" },
+        { "command" : "tool/font_usage_inventory" },
         {},
         { "command" : "app/exit", "special" : "exit" }
     ],

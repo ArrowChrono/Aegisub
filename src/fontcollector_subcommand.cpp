@@ -4,6 +4,7 @@
 
 #include "fontcollector_subcommand.h"
 #include "fontcollector_cli_encoding.h"
+#include "font_usage_inventory.h"
 
 #include <libaegisub/fs.h>
 #include <libaegisub/cajun/elements.h>
@@ -1839,6 +1840,45 @@ AegisubFontCollectorMatcher ParseMatcherOption(std::string const& matcher) {
 		: AEGISUB_FONTCOLLECTOR_MATCHER_PLATFORM;
 }
 
+int RunInventory(aegisub::fontcollector_subcommand::Options const& options) {
+	font_usage_inventory::Options request;
+	for (auto const& input : options.inputs)
+		request.inputs.push_back(Utf8ToPath(input));
+	request.recursive = options.recursive;
+	request.low_frequency_threshold = options.low_frequency_threshold;
+	request.encoding = options.encoding;
+	request.matcher = options.matcher == "libass"
+						  ? FontCollectorMatcher::Libass
+						  : FontCollectorMatcher::Platform;
+	request.provider_options.include_system_fonts = !options.exclude_system_fonts;
+	auto write_result = [](font_usage_inventory::Result const& result) {
+		agi::JsonWriter::Write(font_usage_inventory::ToJson(result), std::cout);
+		std::cout << '\n';
+		return result.result;
+	};
+	auto fail_invalid_option = [&](std::string message) {
+		return write_result(font_usage_inventory::InvalidOptions(request, std::move(message)));
+	};
+	if (options.matcher != "platform" && options.matcher != "libass")
+		return fail_invalid_option("invalid font matcher");
+	if (request.matcher != FontCollectorMatcher::Libass &&
+		(!options.additional_fonts.empty() || !options.additional_fonts_recursive.empty() ||
+		 options.exclude_system_fonts)) {
+		return fail_invalid_option("private font options require --matcher libass");
+	}
+	request.provider_options.additional_font_files = ExpandFontInputs(options.additional_fonts, false);
+	auto recursive_fonts = ExpandFontInputs(options.additional_fonts_recursive, true);
+	for (auto& path : recursive_fonts)
+		AddUnique(request.provider_options.additional_font_files, std::move(path));
+	if ((!options.additional_fonts.empty() || !options.additional_fonts_recursive.empty()) &&
+		request.provider_options.additional_font_files.empty()) {
+		return fail_invalid_option("no supported files found in additional font paths");
+	}
+	if (options.exclude_system_fonts && request.provider_options.additional_font_files.empty())
+		return fail_invalid_option("--exclude-system-fonts requires --additional-fonts");
+	return write_result(font_usage_inventory::Scan(request));
+}
+
 int RunFontCollector(aegisub::fontcollector_subcommand::Options const& options) {
 	auto requested_matcher = ParseMatcherOption(options.matcher);
 	auto provider_name = ProviderName(requested_matcher);
@@ -2067,6 +2107,8 @@ int Run(Options const& options) {
 			return RunFontCollector(options);
 		case Operation::Normalize:
 			return RunNormalization(options);
+		case Operation::Inventory:
+			return RunInventory(options);
 	}
 
 	std::cerr << "fontcollector failed: invalid operation\n";

@@ -17,6 +17,27 @@
 Generated runtime data belongs under `build-dir/tests-runtime`; the source
 tree should contain only test sources and reusable fixtures.
 
+## Font usage inventory
+
+After building Aegisub, run the real-process inventory contract suite from the
+repository root, using a fresh artifact directory:
+
+```powershell
+python tests/smoke/font_usage_inventory_e2e.py `
+  build-dir/RelWithDebInfo/Aegisub.exe `
+  build-dir/artifacts/font-usage-inventory-cli
+```
+
+The suite uses distributable fixture fonts without installing them, an
+independent three-file interval-count oracle, real Windows exclusive read locks,
+and bounded subprocesses. It requires Windows; source fixtures remain read-only.
+See the [native inventory E2E guide](gui-automation/font-usage-inventory-native.md)
+for GUI capabilities, repeatable commands, session-font authorization and known
+unproved acceptance partitions. wxStyledTextCtrl is not a native Scintilla HWND;
+the unsupported SCI-message proposal is not a passing GUI test.
+
+## Perspective renderers
+
 Perspective's Windows renderer checks use xy-VSFilter through its CSRI DLL.
 Place the matching architecture's DLL at `artifacts/xy-vsfilter/VSFilter.dll`
 and run the following from the repository root after configuring `build-dir`:

@@ -11,6 +11,7 @@ enum class Operation {
 	Validate,
 	List,
 	Normalize,
+	Inventory,
 };
 
 struct Options {
@@ -29,6 +30,7 @@ struct Options {
 	std::string destination;
 	bool copy_to_script_directory = false;
 	std::string normalization_target = "localized";
+	int low_frequency_threshold = 5;
 };
 
 int Run(Options const& options);

@@ -33,6 +33,7 @@
 
 #include "../compat.h"
 #include "../dialog_manager.h"
+#include "../dialog_font_usage_inventory.h"
 #include "../dialog_styling_assistant.h"
 #include "../dialog_translation.h"
 #include "../dialogs.h"
@@ -124,6 +125,18 @@ struct tool_font_variant_audit final : public Command {
 
 	void operator()(agi::Context *c) override {
 		ShowFontVariantAuditDialog(c);
+	}
+};
+
+struct tool_font_usage_inventory final : public Command {
+	CMD_NAME("tool/font_usage_inventory")
+	CMD_ICON(font_collector_button)
+	STR_MENU("Font Usage List...")
+	STR_DISP("Font Usage List")
+	STR_HELP("Show font usage in saved subtitle files")
+
+	void operator()(agi::Context *c) override {
+		ShowFontUsageInventoryDialog(c);
 	}
 };
 
@@ -323,6 +336,7 @@ namespace cmd {
 		reg(agi::make_unique<tool_font_collector>());
 		reg(agi::make_unique<tool_font_name_normalization>());
 		reg(agi::make_unique<tool_font_portability_audit>());
+		reg(agi::make_unique<tool_font_usage_inventory>());
 		reg(agi::make_unique<tool_font_variant_audit>());
 		reg(agi::make_unique<tool_line_select>());
 		reg(agi::make_unique<tool_resampleres>());

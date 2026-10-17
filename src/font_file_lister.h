@@ -86,6 +86,8 @@ struct CollectionResult {
 	std::string matched_facename_full;
 	/// Matched family aliases reported by the platform provider.
 	std::vector<std::string> matched_names;
+	agi::fs::path primary_path;
+	std::shared_ptr<std::vector<char> const> primary_memory_data;
 	int face_index = -1;
 	/// Font weight selected by the platform matcher.
 	int matched_weight = 0;
@@ -118,12 +120,15 @@ struct CollectionResult {
 	bool noncanonical_variant = false;
 	std::vector<FontCollectorMatchCandidate> match_candidates;
 	bool match_ambiguous = false;
+	std::shared_ptr<CollectionResult const> glyphless_family;
 };
 
 struct FontCollectorMatchedFont {
 	std::string facename;
 	std::string facename_full;
 	std::vector<std::string> names;
+	agi::fs::path primary_path;
+	std::shared_ptr<std::vector<char> const> primary_memory_data;
 	int face_index = -1;
 	int weight = 0;
 	bool bold = false;
@@ -144,6 +149,7 @@ struct FontCollectorMatchedFont {
 	bool noncanonical_variant = false;
 	std::vector<FontCollectorMatchCandidate> match_candidates;
 	bool match_ambiguous = false;
+	std::shared_ptr<FontCollectorMatchedFont const> glyphless_family;
 };
 
 struct FontCollectorAssFontUsage {
@@ -171,6 +177,7 @@ struct FontCollectorAssFontUsage {
 	std::vector<std::string> styles;
 	std::vector<int> lines;
 	std::vector<int> override_lines;
+	std::vector<std::pair<int, int>> event_times;
 	FontCollectorMatchedFont matched;
 };
 
@@ -396,6 +403,7 @@ class FontCollector {
 		std::vector<int> lines;                       ///< Dialogue lines which use this font request
 		std::vector<int> override_lines;              ///< Lines on which overrides select this font request
 		std::vector<std::string> styles;              ///< ASS styles which resolve to this font request
+		std::vector<std::pair<int, int>> event_times;
 	};
 
 	using MissingStyleLines = std::map<std::string, std::vector<int>>;
@@ -424,6 +432,7 @@ class FontCollector {
 		std::vector<int> matching_lines;
 		FontCollectorEvent event;
 		UsageData const *usage = nullptr;
+		std::shared_ptr<FontCollectorMatchedFont> internal_target;
 	};
 
 	/// Message callback provider by caller

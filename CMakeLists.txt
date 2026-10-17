@@ -731,7 +731,6 @@ set(AEGISUB_SHARED_HEADLESS_ENTRY_BOOTSTRAP_SOURCES
     src/automation_process_supervisor.cpp
     src/automation_scenario.cpp
     src/automation_scenario_runner.cpp
-    src/fontcollector_cli_encoding.cpp
     src/headless_service_output.cpp
     src/headless_process_entry.cpp
     src/headless_runtime_bootstrap.cpp
@@ -1017,6 +1016,8 @@ set(AEGISUB_CORE_SOURCES
     # Fonts (cross-platform core)
     src/font_collector_core.cpp
     src/font_collector_unicode.cpp
+    src/font_usage_inventory.cpp
+    src/fontcollector_cli_encoding.cpp
     src/ass_font_state.cpp
     src/font_face_selection.cpp
     src/font_family_catalog.cpp
@@ -1328,6 +1329,8 @@ add_executable(Aegisub WIN32
     src/video_overlay_draw_context_legacy_gl.h
     src/video_box.cpp
     src/watched_file_wx.cpp
+    src/font_usage_inventory_watcher.cpp
+    src/dialog_font_usage_inventory.cpp
     src/video_controller_timer.cpp
     src/video_controller.cpp
     src/video_color_zoom_preview.cpp

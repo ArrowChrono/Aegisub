@@ -48,6 +48,7 @@ The preferred command form is:
 
 ```powershell
 Aegisub.exe fontcollector list <file-or-dir> [more...] [--recursive] [--details] [--json]
+Aegisub.exe fontcollector inventory <file-or-dir> [more...] [--recursive] [--low-frequency-threshold N] [--json]
 Aegisub.exe fontcollector check <file-or-dir> [more...] [--recursive] [--details] [--json] [--strict]
 Aegisub.exe fontcollector validate <file-or-dir> [more...] [--recursive] [--details] [--json]
 Aegisub.exe fontcollector normalize <file-or-dir> [more...] [--target localized|english] [--recursive] [--details] [--json]
@@ -102,19 +103,128 @@ actually selected. An equal-score tie is reported as an ambiguous match; a
 score is a ranking heuristic and is not proof that the renderer chose the same
 face.
 
-Directory inputs scan immediate `.ass` and `.ssa` children; add `--recursive` to include subdirectories. `validate` is strict by default and exits with `20` when fonts, styles, glyphs, or copies are missing.
+Except for `inventory`, directory inputs scan immediate `.ass` and `.ssa` children; add `--recursive` to include subdirectories. `validate` is strict by default and exits with `20` when fonts, styles, glyphs, or copies are missing.
 
 `normalize` is read-only. It scans style font names and non-empty explicit `\fn` tags, then reports safe canonical-name changes and unsafe findings without writing the input file. `--target` defaults to `localized`; use `--target english` for verified English Win32 family names. Full, PostScript, and typographic names remain informational and are never treated as safe ASS family aliases.
 
-Output defaults to concise human-readable text. It reports actionable issues with input file paths and source line numbers, then prints one summary line per input file. Use `--details` to include provider/cache/search events plus full ASS font usage and matched font details. Use `--json` for automation.
+Except for `inventory`, output defaults to concise human-readable text. It reports actionable issues with input file paths and source line numbers, then prints one summary line per input file. Use `--details` to include provider/cache/search events plus full ASS font usage and matched font details. Use `--json` for automation.
 
-`list` is the font inventory mode, shaped after ACGrip's ListAssFonts output. Installed fonts are printed as `localized display name <ASS font name>` using the matched names reported by the native API; unresolved fonts are printed as their ASS font name and colored red when stdout is an interactive Windows console. Fonts with missing glyphs are colored blue. Missing glyph reports are written to stderr as `AssFontInfo 'Font,bold,italic' Dialogue #... is missing characters: ...`. `list --details` adds ASS weight/italic, install status, styles, source lines, matched family/full names, provider source, and matched font paths under each font.
+`list` is the legacy per-file font list, shaped after ACGrip's ListAssFonts output. Installed fonts are printed as `localized display name <ASS font name>` using the matched names reported by the native API; unresolved fonts are printed as their ASS font name and colored red when stdout is an interactive Windows console. Fonts with missing glyphs are colored blue. Missing glyph reports are written to stderr as `AssFontInfo 'Font,bold,italic' Dialogue #... is missing characters: ...`. `list --details` adds ASS weight/italic, install status, styles, source lines, matched family/full names, provider source, and matched font paths under each font.
+
+### Aggregate font usage inventory
+
+`inventory` is a read-only, one-shot scan of saved `.ass` files. File extensions
+are matched case-insensitively; explicit `.ssa` inputs are not supported by this
+command. Directory inputs scan only their immediate children unless
+`--recursive` is given. Recursive scans do not follow directory symlinks or
+junctions. Duplicate references to the same normalized file are analyzed once.
+The GUI's Font Usage List uses the same analysis and aggregation core.
+
+The command always writes one UTF-8 JSON document to stdout. `--json` is an
+equivalent explicit spelling, not a different output mode. General logs and
+progress belong on stderr. There is no watch mode, and `--details`, `--quiet`,
+`--strict`, collection destinations and normalization targets are not accepted.
+The existing matcher, encoding and libass private-font options described above
+apply; the default matcher remains `platform`.
+
+`--low-frequency-threshold` accepts a decimal integer from `0` through
+`2147483647`, defaults to `5`, and marks counts strictly below the threshold.
+`0` disables only low-frequency hints, not font errors or warnings. For example:
+
+```powershell
+Aegisub.exe fontcollector inventory samples/subtitles --recursive --low-frequency-threshold 6
+Aegisub.exe fontcollector inventory samples/a.ass samples/b.ass --matcher libass --additional-fonts samples/fonts --exclude-system-fonts --json
+```
+
+Usage counts are not dialogue row counts. Each file contributes the number of
+distinct exact `(start_ms, end_ms)` pairs that actually use a font. Duplicate
+events at the same times, repeated font switches and confirmed family aliases
+or bold/italic variants count once within that file. Different files contribute
+independently. Unused styles, comments, empty text and pure drawing content do
+not contribute. Names are localized using the system display language rather
+than the application's interface language. Records are sorted deterministically
+by English name, then available localized or requested name, with identity
+evidence breaking ties.
+
+The JSON contract is separate from the existing diagnostic schema:
+
+```json
+{
+  "format": "font_usage_inventory",
+  "schema_version": 1,
+  "locale": "zh-CN",
+  "matcher": "platform",
+  "provider": "gdi-dwrite",
+  "recursive": false,
+  "low_frequency_threshold": 5,
+  "complete": true,
+  "result": 0,
+  "inputs": [{"path": "samples/a.ass", "kind": "file"}],
+  "files": [{"input": "samples/a.ass", "status": "ok"}],
+  "fonts": [],
+  "diagnostics": []
+}
+```
+
+`locale` and `provider` above are illustrative; actual values describe the
+language and provider used by the scan. Each `fonts[]` record includes
+`ass_names`, nullable `localized_name` and `english_name`, `display_name`,
+`usage_count`, `is_low_usage`, `missing_font`, `missing_codepoints`, `warnings`,
+`display_state`, `reasons`, per-file `sources` and per-request `requests`. The sum of
+`sources[].usage_count` equals the record's `usage_count`. Original ASS name
+spellings are preserved; display-name fallbacks do not replace missing metadata
+with fabricated names.
+
+`requests[]` retains raw ASS tags as strings, normalized request attributes,
+source styles/lines, matched names/face index and actual font-source paths,
+including successful requests without warnings. Diagnostics use `file` for
+their source filename, consistent with the existing collector reports.
+
+`display_state` is one of `missing_font`, `missing_glyphs`, `warning`,
+`low_usage` and `normal`, in that priority order. All applicable reasons are
+retained, and `is_low_usage` remains independent of a higher-priority state.
+Missing codepoints are sorted unique integers, an empty array after a successful
+check with no missing glyphs, or `null` when unknown for a missing font.
+Diagnostics and warning/reason objects include stable codes and readable
+messages. Inventory reason messages use English independently of the GUI
+language; `locale` selects font-name metadata, not the language of these messages.
+Consumers should inspect codes rather than parse messages. Failed
+files have `status: "error"` and structured diagnostics instead of fabricated
+successful empty results. An empty directory and a successfully analyzed file
+with no actual font usage are successful empty inventories.
+
+When libass finds the requested family but none of the required glyphs, inventory
+uses internal requested-family evidence to report missing glyphs rather than a
+missing font. This does not change the old commands' output or the public C ABI.
+
+Inventory distinguishes usage problems from variant metadata. The existing
+`noncanonical_font_variant` and `implicit_variant_fallback` codes remain in
+root `diagnostics` with their messages and source/request evidence, but their
+inventory severity is `info`; they do not appear in a font row's `warnings` or
+`reasons` and do not make it yellow. Intrinsic weight outside 400/700, CFF outline
+format, or a different physical B/I role alone does not establish an incorrect
+ASS font request. Synthetic bold/italic and an observed ambiguous match remain
+warnings. This inventory-only policy does not alter schema-2 diagnostics,
+severity, strict exits or collection behavior of the existing commands.
+
+| Result | Exit code | `complete` |
+| --- | --- | --- |
+| Successful scan, including empty results and font findings | `0` | `true` |
+| Invalid parsed options or unsupported explicit input type | `1` | `false` |
+| Missing inputs, unreadable directories, or file read/parse failures | `5` | `false` |
+
+Invalid parsed global options stop the scan. Otherwise mixed inputs retain
+valid results and all diagnostics, using the fixed exit-code priority
+`5 > 1 > 0`. Font findings never produce the strict audit exit code `20`.
+CLI11 syntax errors retain normal CLI error handling and occur before JSON
+execution, so they do not promise an inventory document. Existing `list --json`
+and other command schemas remain unchanged.
 
 ## Batch Resolution
 
 Multi-file CLI runs use the native session batch API. The collector first analyzes every ASS file, merges font requests by `(facename, bold, italic)`, unions their codepoints, resolves each merged request once, and then maps the result back to each input file. This keeps provider/cache work low while preserving per-file diagnostics.
 
-Text output is grouped by input file. JSON output is always a schema-versioned object:
+For `list`, `check`, `validate` and `collect`, text output is grouped by input file. Their JSON output is a schema-versioned object:
 
 ```json
 {

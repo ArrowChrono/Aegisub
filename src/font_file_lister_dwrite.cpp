@@ -4,7 +4,6 @@
 
 #include "font_file_lister.h"
 #include "font_matching_libass.h"
-#include "perf_trace.h"
 #include "skia_runtime/dwrite_runtime.h"
 
 #include <dwrite.h>
@@ -556,7 +555,8 @@ std::string pick_localized_family_name(std::vector<DWriteLocalizedName> const& n
 DWriteBridge::TextFormatFace DWriteBridge::ResolveTextFormatFaceFromGdiFace(
 	std::string_view gdi_face_utf8,
 	int request_weight,
-	bool italic) const {
+	bool italic,
+	bool capture_gdi_selected_face) const {
 	TextFormatFace result;
 	if (!available_ || !gdi_interop)
 		return result;
@@ -664,7 +664,7 @@ DWriteBridge::TextFormatFace DWriteBridge::ResolveTextFormatFaceFromGdiFace(
 				HGDIOBJ previous = SelectObject(hdc, hfont);
 				if (previous && previous != HGDI_ERROR) {
 					auto restore_font = agi::make_scope_exit([&] { SelectObject(hdc, previous); });
-					if (perf_trace::IsCategoryEnabled(perf_trace::Category::Log)) {
+					if (capture_gdi_selected_face) {
 						wchar_t selected[LF_FACESIZE] = {};
 						if (GetTextFaceW(hdc, LF_FACESIZE, selected) > 0) {
 							result.gdi_selected_face =

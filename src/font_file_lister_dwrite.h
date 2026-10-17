@@ -111,7 +111,8 @@ public:
 	TextFormatFace ResolveTextFormatFaceFromGdiFace(
 		std::string_view gdi_face_utf8,
 		int request_weight = FW_DONTCARE,
-		bool italic = false) const;
+		bool italic = false,
+		bool capture_gdi_selected_face = false) const;
 	bool BuildFontCatalog(std::vector<FontMatchCandidate>& faces,
 	                      std::vector<IDWriteFontFace *>& dwrite_faces,
 	                      std::vector<std::string> const& additional_font_files,

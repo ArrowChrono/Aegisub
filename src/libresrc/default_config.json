@@ -586,6 +586,10 @@
 			"Action" : 0,
 			"Matcher" : 0
 		},
+		"Font Usage Inventory" : {
+			"Recursive" : false,
+			"Low Frequency Threshold" : 5
+		},
 		"Import" : {
 			"Text" : {
 				"Actor Separator" : ":",

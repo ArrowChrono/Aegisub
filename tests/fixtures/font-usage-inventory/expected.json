@@ -1,0 +1,68 @@
+{
+  "family": "Aegisub GDI Variant Fixture",
+  "missing_family": "Aegisub Inventory Absent Face 8F4D7A21",
+  "nonrecursive_sources": {
+    "a.ass": 2,
+    "b.ASS": 1
+  },
+  "recursive_sources": {
+    "a.ass": 2,
+    "b.ASS": 1,
+    "c.ass": 2
+  },
+  "threshold_states": {
+    "0": {
+      "3": "normal",
+      "5": "normal"
+    },
+    "5": {
+      "3": "low_usage",
+      "5": "normal"
+    },
+    "6": {
+      "3": "low_usage",
+      "5": "low_usage"
+    }
+  },
+  "missing_codepoints": [
+    66
+  ],
+  "warning_codes": [
+    "fake_bold",
+    "noncanonical_font_variant"
+  ],
+  "fallback": {
+    "family": "Aegisub Aardvark Fallback Fixture",
+    "primary_file": "zz-primary-a.ttf",
+    "fallback_file": "00-fallback-b.ttf",
+    "primary_codepoints": [
+      32,
+      65
+    ],
+    "fallback_codepoints": [
+      32,
+      66
+    ],
+    "primary_face_index": 0,
+    "fallback_face_index": 0,
+    "win32_family_name_records": [
+      {
+        "locale": "en-US",
+        "name": "Aegisub GDI Variant Fixture"
+      }
+    ],
+    "localized_name_by_primary_language": {
+      "en": "Aegisub GDI Variant Fixture"
+    },
+    "localized_name_default": null,
+    "english_name": "Aegisub GDI Variant Fixture",
+    "display_name": "Aegisub GDI Variant Fixture<Aegisub GDI Variant Fixture>",
+    "matched_full_name": "Aegisub GDI Variant Fixture Regular",
+    "usage_count": 2,
+    "sources": {
+      "a-only.ass": 1,
+      "ab-with-fallback.ass": 1
+    }
+  },
+  "short_missing_family": "Aegisub Inv Absent 8F4D7A21"
+}

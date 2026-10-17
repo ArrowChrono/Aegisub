@@ -1108,7 +1108,6 @@ TEST(host_boundary_policy, shared_headless_entry_bootstrap_sources_live_in_named
 		"src/automation_process_supervisor.cpp",
 		"src/automation_scenario.cpp",
 		"src/automation_scenario_runner.cpp",
-		"src/fontcollector_cli_encoding.cpp",
 		"src/headless_service_output.cpp",
 		"src/headless_process_entry.cpp",
 		"src/headless_runtime_bootstrap.cpp",

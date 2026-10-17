@@ -206,6 +206,37 @@ bool IsImplicitVariantFallback(
 	return result.implicit_variant_fallback;
 }
 
+FontCollectorMatchedFont MatchedFont(CollectionResult const& result,
+									 bool implicit_variant_fallback, std::string const& missing_text,
+									 std::vector<uint32_t> const& missing_codepoints) {
+	FontCollectorMatchedFont matched;
+	matched.facename = result.matched_facename;
+	matched.facename_full = result.matched_facename_full;
+	matched.names = result.matched_names;
+	matched.primary_path = result.primary_path;
+	matched.primary_memory_data = result.primary_memory_data;
+	matched.face_index = result.face_index;
+	matched.weight = result.matched_weight;
+	matched.bold = result.matched_bold;
+	matched.italic = result.matched_italic;
+	matched.paths = result.paths;
+	matched.memory_fonts = result.memory_fonts;
+	matched.path_source = result.path_source;
+	matched.fake_bold = result.fake_bold;
+	matched.fake_italic = result.fake_italic;
+	matched.missing_text = missing_text;
+	matched.missing_codepoints = missing_codepoints;
+	matched.requested_weight = result.requested_weight;
+	matched.backend_requested_weight = result.backend_requested_weight;
+	matched.realized_role = result.realized_role;
+	matched.realized_status = result.realized_status;
+	matched.implicit_variant_fallback = implicit_variant_fallback;
+	matched.noncanonical_variant = result.noncanonical_variant;
+	matched.match_candidates = result.match_candidates;
+	matched.match_ambiguous = result.match_ambiguous;
+	return matched;
+}
+
 int SourceLineNumber(AssDialogue const& line, int dialogue_index) {
 	return line.Row >= 0 ? line.Row + 1 : dialogue_index;
 }
@@ -499,29 +530,21 @@ void FontCollector::ApplyResolvedFontUsage(FileAnalysis& analysis, StyleInfo con
 		usage.styles = data.styles;
 		usage.lines = data.lines;
 		usage.override_lines = data.override_lines;
-		usage.matched.facename = res.matched_facename;
-		usage.matched.facename_full = res.matched_facename_full;
-		usage.matched.names = res.matched_names;
-		usage.matched.face_index = res.face_index;
-		usage.matched.weight = res.matched_weight;
-		usage.matched.bold = res.matched_bold;
-		usage.matched.italic = res.matched_italic;
-		usage.matched.paths = res.paths;
-		usage.matched.memory_fonts = res.memory_fonts;
-		usage.matched.path_source = res.path_source;
-		usage.matched.fake_bold = res.fake_bold;
-		usage.matched.fake_italic = res.fake_italic;
-		usage.matched.missing_text = missing_text;
-		usage.matched.missing_codepoints = missing_codepoints;
-		usage.matched.requested_weight = res.requested_weight;
-		usage.matched.backend_requested_weight = res.backend_requested_weight;
-		usage.matched.realized_role = res.realized_role;
-		usage.matched.realized_status = res.realized_status;
-		usage.matched.implicit_variant_fallback = implicit_variant_fallback;
-		usage.matched.noncanonical_variant = res.noncanonical_variant;
-		usage.matched.match_candidates = res.match_candidates;
-		usage.matched.match_ambiguous = res.match_ambiguous;
-
+		usage.event_times = data.event_times;
+		usage.matched = MatchedFont(res, implicit_variant_fallback, missing_text, missing_codepoints);
+		if (res.glyphless_family) {
+			auto const& family = *res.glyphless_family;
+			auto glyphless = std::make_shared<FontCollectorMatchedFont>(
+				MatchedFont(family, IsImplicitVariantFallback(request, family), missing_text, missing_codepoints));
+			usage.matched.glyphless_family = glyphless;
+			if (!missing_codepoints.empty()) {
+				MissingGlyphQuery query;
+				query.style = style;
+				query.missing_codepoints = missing_codepoints;
+				query.internal_target = std::move(glyphless);
+				missing_queries.push_back(std::move(query));
+			}
+		}
 	}
 
 	auto make_event = [&](FontCollectorEventType type) {
@@ -616,6 +639,10 @@ void FontCollector::StoreMissingGlyphLines(FontCollectorDetails *details, std::v
 		return;
 
 	for (auto const& query : queries) {
+		if (query.internal_target) {
+			query.internal_target->missing_lines = query.matching_lines;
+			continue;
+		}
 		if (!query.usage)
 			continue;
 
@@ -686,7 +713,11 @@ void FontCollector::ProcessDialogueLine(FileAnalysis& analysis, const AssDialogu
 	if (line->Comment) return;
 
 	ForEachLineTextSpan(*analysis.file, *line, index, analysis.wrap_style, [&](StyleInfo const& style, bool overriden, int span_wrap_style, std::string_view text) {
+		bool const has_codepoint = ForEachAssTextCodepoint(text, span_wrap_style, [](uint32_t) { return true; });
 		auto& usage = analysis.used_styles[style];
+		auto const time = std::pair<int, int>(line->Start, line->End);
+		if (has_codepoint && (usage.event_times.empty() || usage.event_times.back() != time))
+			usage.event_times.push_back(time);
 		if (usage.lines.empty() || usage.lines.back() != index)
 			usage.lines.push_back(index);
 		if (overriden) {
@@ -696,8 +727,7 @@ void FontCollector::ProcessDialogueLine(FileAnalysis& analysis, const AssDialogu
 		}
 
 		AppendTextCodepoints(text, span_wrap_style, usage);
-		return false;
-	}, &analysis.missing_style_lines);
+		return false; }, &analysis.missing_style_lines);
 }
 
 void FontCollector::PrintUsage(FontCollectorEventSink const& sink, UsageData const& data) {

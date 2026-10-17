@@ -1006,7 +1006,8 @@ void SubsStyledTextEditCtrl::SetStyles() {
 		if (!dwrite_face_bridge)
 			dwrite_face_bridge = std::make_unique<DWriteBridge>(DWriteBridgeMode::SystemOnly);
 		auto resolved = dwrite_face_bridge->ResolveTextFormatFaceFromGdiFace(
-			from_wx(fontname), FW_NORMAL, false);
+			from_wx(fontname), FW_NORMAL, false,
+			perf_trace::IsCategoryEnabled(perf_trace::Category::Log));
 		directwrite_resolve_request_face = fontname;
 		// GdiFallback returns the unproven GDI face together with weight/italic
 		// measured from GDI's own substitution for it — DirectWrite substitutes

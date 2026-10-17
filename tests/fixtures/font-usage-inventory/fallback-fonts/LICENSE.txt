@@ -1,0 +1,8 @@
+CC0 1.0 Universal
+
+The fallback fixture is derived from the repository's Aegisub GDI Variant
+Fixture regular font. Both fixtures and their generators are dedicated to
+the public domain under CC0 1.0. The fallback changes the test character map
+to space and B and gives the font a distinct family and face name.
+
+https://creativecommons.org/publicdomain/zero/1.0/

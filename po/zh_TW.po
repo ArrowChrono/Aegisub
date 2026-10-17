@@ -6655,6 +6655,225 @@ msgstr "自動更新："
 #~ msgid "&Forums"
 #~ msgstr "論壇(&F)…"
 
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Font Usage List..."
+msgstr "字型使用清單…"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Font Usage List"
+msgstr "字型使用清單"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Show font usage in saved subtitle files"
+msgstr "顯示已儲存字幕檔案中的字型使用情況"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "All sources failed; results are unavailable."
+msgstr "所有來源均讀取失敗，結果無法使用。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Automatic updates are unavailable. Press F5 to retry."
+msgstr "自動更新無法使用，按 F5 重試。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Choose directory"
+msgstr "選擇目錄"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Choose directory..."
+msgstr "選擇目錄…"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Copy"
+msgstr "複製"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Copy font names list"
+msgstr "複製字型名稱清單"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Copy full list"
+msgstr "複製完整清單"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Enter a whole number from 0 to 2147483647. The last valid value was restored."
+msgstr "請輸入 0 到 2147483647 之間的整數。已還原最近有效值。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "Ignored unsupported items: %zu"
+msgstr "已忽略不支援的項目：%zu"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Low-frequency threshold"
+msgstr "低頻閾值"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "Multiple sources (%zu items)"
+msgstr "多個來源（%zu 項）"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "No ASS files found."
+msgstr "未找到 ASS 檔案。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "No fonts are actually used."
+msgstr "沒有實際使用的字型。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "No source selected"
+msgstr "尚未指定來源"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "No supported sources were dropped. Choose a directory or an ASS file."
+msgstr "拖入的來源均不受支援。請選擇目錄或 ASS 檔案。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Recursive subdirectories"
+msgstr "遞迴子目錄"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Results are incomplete."
+msgstr "結果不完整。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Scan failed; any displayed results are outdated."
+msgstr "掃描失敗，目前顯示的結果已過期。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Scanning..."
+msgstr "正在掃描…"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Updating..."
+msgstr "正在更新…"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Inspecting dropped sources..."
+msgstr "正在檢查拖入的來源…"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Could not inspect dropped sources."
+msgstr "無法檢查拖入的來源。"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "; "
+msgstr "；"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid ", "
+msgstr "、"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Not found"
+msgstr "未找到"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "Missing glyphs: %s"
+msgstr "缺字：%s"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Warning: synthetic bold"
+msgstr "警告：合成粗體"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Warning: synthetic italic"
+msgstr "警告：合成斜體"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Warning: implicit non-regular variant fallback"
+msgstr "警告：隱含的非常規字型變體回退"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Warning: non-standard font variant (not a font match failure)"
+msgstr "警告：非標準字型變體（不代表比對錯誤）"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Warning: ambiguous font match"
+msgstr "警告：字型比對存在歧義"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Low usage"
+msgstr "低頻"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "Warning: %s"
+msgstr "警告：%s"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "%s · Not found"
+msgstr "%s · 未找到"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "%s · Missing glyphs"
+msgstr "%s · 缺字"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "%s · Warning"
+msgstr "%s · 警告"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "%s · Low usage"
+msgstr "%s · 低頻"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "Reasons: %s"
+msgstr "原因：%s"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "ASS requested names: %s"
+msgstr "ASS 請求名稱：%s"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "GDI returned/matched names: %s"
+msgstr "GDI 傳回/比對名稱：%s"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "Matched names: %s"
+msgstr "比對名稱：%s"
+
+#: ../src/dialog_font_usage_inventory.cpp
+msgid "Sources:"
+msgstr "來源："
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "Matched files: %s"
+msgstr "比對檔案：%s"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "%d–%d"
+msgstr "%d–%d"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "%llu use"
+msgid_plural "%llu uses"
+msgstr[0] "%llu 次"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid " · Line %s"
+msgid_plural " · Lines %s"
+msgstr[0] " · 第 %s 行"
+
+#: ../src/dialog_font_usage_inventory.cpp
+#, c-format
+msgid "Matched font weights: %s"
+msgstr "比對字型字重：%s"
+
 #: ../src/dialog_font_portability_audit.cpp
 msgid "Font selection cannot be proven unchanged for all affected text; report only, not applied automatically."
 msgstr "無法證明所有受影響文字的字型選擇保持不變；僅報告，不自動套用。"
