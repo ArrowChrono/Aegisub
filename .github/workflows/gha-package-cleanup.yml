@@ -20,7 +20,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.PACKAGES_CLEANUP_TOKEN }}
       ORG: ArrowChrono
-      KEEP_VERSIONS: '2'
+      KEEP_VERSIONS: '1'
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
     steps:
       - name: Delete old vcpkg NuGet package versions
