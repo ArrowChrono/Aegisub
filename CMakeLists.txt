@@ -1386,6 +1386,9 @@ add_executable(Aegisub WIN32
     ${AEGISUB_SHARED_HEADLESS_ENTRY_BOOTSTRAP_SOURCES}
 )
 add_dependencies(Aegisub aegisub_generated_resources)
+if(WIN32)
+    target_sources(Aegisub PRIVATE src/watched_file_win.cpp)
+endif()
 if(WITH_SKIA_VIDEO_TOOLS OR WITH_SKIA_AUDIO_DISPLAY)
     target_sources(Aegisub PRIVATE
         src/skia/skia_gl_contract.cpp

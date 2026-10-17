@@ -4,6 +4,9 @@
 
 #include "watched_file.h"
 
+#ifdef _WIN32
+std::unique_ptr<FileSystemWatcherBackend> CreateWinFileSystemWatcherBackend();
+#else
 #include "compat.h"
 
 #include <libaegisub/fs.h>
@@ -85,9 +88,12 @@ public:
 #endif
 
 } // namespace
+#endif
 
 std::unique_ptr<FileSystemWatcherBackend> CreateWxFileSystemWatcherBackend() {
-#if wxUSE_FSWATCHER
+#ifdef _WIN32
+	return CreateWinFileSystemWatcherBackend();
+#elif wxUSE_FSWATCHER
 	return agi::make_unique<WxFileSystemWatcherBackend>();
 #else
 	return CreateNullFileSystemWatcherBackend();

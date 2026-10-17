@@ -177,6 +177,35 @@ TEST(watched_file, rename_events_match_both_old_and_new_target_paths) {
 	EXPECT_EQ(2, callback_count);
 }
 
+TEST(watched_file, directory_invalidation_rescans_target_and_ignores_other_directories) {
+	auto timer_host = std::make_shared<RecordingUiTimerHost>();
+	ScopedInstalledUiTimerHost timer_scope(timer_host);
+	auto backend = std::make_unique<FakeFileSystemWatcherBackend>();
+	auto *backend_ptr = backend.get();
+	WatchedFile watched_file(std::move(backend));
+	auto const target = agi::fs::PathFromString("project/subs/external.ass");
+	auto const directory = target.parent_path();
+	ASSERT_TRUE(watched_file.SetTargetPath(target));
+	auto *timer = timer_host->created_timers.front();
+	std::vector<agi::fs::path> changed;
+	watched_file.SetChangedCallback([&](agi::fs::path const& path) { changed.push_back(path); });
+
+	backend_ptr->Emit({.kind = FileSystemWatchEventKind::Invalidated, .path = agi::fs::PathFromString("project/other"), .new_path = {}});
+	EXPECT_FALSE(timer->running);
+	backend_ptr->Emit({.kind = FileSystemWatchEventKind::Modified, .path = directory, .new_path = {}});
+	EXPECT_FALSE(timer->running);
+	EXPECT_TRUE(changed.empty());
+
+	backend_ptr->Emit({.kind = FileSystemWatchEventKind::Invalidated, .path = directory, .new_path = {}});
+	ASSERT_TRUE(timer->running);
+	EXPECT_GT(timer->start_once_delay_ms, 0);
+	EXPECT_TRUE(changed.empty());
+	backend_ptr->Emit({.kind = FileSystemWatchEventKind::Invalidated, .path = directory, .new_path = {}});
+	timer->Fire();
+	ASSERT_EQ(1u, changed.size());
+	EXPECT_EQ(target, changed.front());
+}
+
 TEST(watched_file, clearing_target_stops_timer_and_resets_backend) {
 	auto timer_host = std::make_shared<RecordingUiTimerHost>();
 	ScopedInstalledUiTimerHost timer_scope(timer_host);
@@ -199,5 +228,4 @@ TEST(watched_file, clearing_target_stops_timer_and_resets_backend) {
 	EXPECT_GE(timer->stop_count, 1);
 	EXPECT_GE(backend_ptr->reset_count, 1);
 }
-
 }

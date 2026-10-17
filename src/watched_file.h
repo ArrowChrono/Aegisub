@@ -12,7 +12,8 @@ enum class FileSystemWatchEventKind {
 	Created,
 	Deleted,
 	Modified,
-	Renamed
+	Renamed,
+	Invalidated
 };
 
 struct FileSystemWatchEvent {

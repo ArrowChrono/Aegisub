@@ -132,6 +132,8 @@ void WatchedFile::ClearTargetPath() {
 }
 
 bool WatchedFile::EventAffectsTarget(FileSystemWatchEvent const& event) const {
+	if (event.kind == FileSystemWatchEventKind::Invalidated)
+		return !target_path.empty() && PathsEqual(watched_directory, event.path);
 	return !target_path.empty()
 		&& (PathsEqual(target_path, event.path) || PathsEqual(target_path, event.new_path));
 }
