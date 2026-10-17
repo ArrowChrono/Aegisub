@@ -81,7 +81,7 @@ TEST(font_variant_resolver, builds_four_canonical_requests_and_preserves_backend
 	EXPECT_TRUE(profile.automatic_pinning_reliable);
 }
 
-TEST(font_variant_resolver, resolves_catalog_alias_before_building_live_profile) {
+TEST(font_variant_resolver, preserves_requested_alias_when_building_live_profile) {
 	FontFamilyCatalog catalog({Family(7, "Localized Family", "English Family")});
 	aegisub::ass::AssFontRequest request;
 	request.family = "English Family";
@@ -93,10 +93,42 @@ TEST(font_variant_resolver, resolves_catalog_alias_before_building_live_profile)
 
 	ASSERT_TRUE(profile.has_value());
 	ASSERT_EQ(4u, resolver.requests.size());
-	EXPECT_EQ("Localized Family", resolver.requests.front().family);
-	EXPECT_EQ(128, resolver.requests.front().charset);
-	for (auto const& resolved_request : resolver.requests)
-		EXPECT_DOUBLE_EQ(22.0, resolved_request.height);
+	for (auto const& probe : resolver.requests) {
+		EXPECT_EQ("English Family", probe.family);
+		EXPECT_EQ(128, probe.charset);
+		EXPECT_DOUBLE_EQ(22.0, probe.height);
+	}
+}
+
+TEST(font_variant_resolver, same_catalog_family_aliases_are_probed_independently) {
+	FontFamilyCatalog catalog({Family(7, "Localized Family", "English Family")});
+	aegisub::ass::AssFontRequest request;
+	request.family = "English Family";
+	RecordingResolver resolver;
+	ASSERT_TRUE(BuildFontVariantProfileForRequest(resolver, catalog, request));
+	request.family = "Localized Family";
+	ASSERT_TRUE(BuildFontVariantProfileForRequest(resolver, catalog, request));
+
+	ASSERT_EQ(8u, resolver.requests.size());
+	for (std::size_t index = 0; index < resolver.requests.size(); ++index)
+		EXPECT_EQ(index < 4 ? "English Family" : "Localized Family", resolver.requests[index].family);
+}
+
+TEST(font_variant_resolver, preserves_vertical_prefix_on_requested_alias_probe) {
+	FontFamilyCatalog catalog({Family(7, "Localized Family", "English Family")});
+	aegisub::ass::AssFontRequest request;
+	request.family = "@English Family";
+	request.charset = 128;
+	request.height = 19.5;
+	RecordingResolver resolver;
+
+	ASSERT_TRUE(BuildFontVariantProfileForRequest(resolver, catalog, request));
+	ASSERT_EQ(4u, resolver.requests.size());
+	for (auto const& probe : resolver.requests) {
+		EXPECT_EQ("@English Family", probe.family);
+		EXPECT_EQ(128, probe.charset);
+		EXPECT_DOUBLE_EQ(19.5, probe.height);
+	}
 }
 
 TEST(font_variant_resolver, missing_required_capability_disables_automatic_pin) {

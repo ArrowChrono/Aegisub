@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 
@@ -57,9 +58,17 @@ bool IsExplicitNonEmptyFontTag(AssOverrideTag const& tag) {
 struct ExplicitFontSpan {
 	FontVariantAuditSource source;
 	AssFontRequest request;
+	std::string text;
 };
 
-class ExplicitFontSpanScanner {
+struct FontSpanScanResult {
+	std::vector<ExplicitFontSpan> spans;
+	std::vector<AssFontStyleBaseline> baselines;
+	bool complete = true;
+	bool unverifiable_font_state = false;
+};
+
+class FontSpanScanner {
 	AssFile const& file;
 	AssDialogue const& event;
 	std::size_t event_index;
@@ -74,17 +83,33 @@ class ExplicitFontSpanScanner {
 	std::optional<ActiveFontOverride> active_font;
 	bool bold_in_transform = false;
 	bool italic_in_transform = false;
+	FontSpanScanResult result;
 
-	std::optional<AssFontStyleBaseline> ResolveResetStyle(std::string_view name) const {
+	std::optional<AssFontStyleBaseline> ResolveResetStyle(std::string_view name) {
 		auto const* style = aegisub::ass_style_resolution::ResolveResetStyle(
 			file, std::string(name));
-		if (!style)
+		if (!style) {
+			result.complete = false;
 			return std::nullopt;
-		return aegisub::ass::MakeAssFontStyleBaseline(*style);
+		}
+		auto baseline = aegisub::ass::MakeAssFontStyleBaseline(*style);
+		result.baselines.push_back(baseline);
+		return baseline;
 	}
 
 	void ApplyTags(std::vector<AssOverrideTag> const& tags, bool in_transform) {
 		for (auto const& tag : tags) {
+			bool const changes_font = tag.Name == "\\r" || tag.Name == "\\fn" ||
+									  tag.Name == "\\b" || tag.Name == "\\i" ||
+									  tag.Name == "\\fe" || tag.Name == "\\fs";
+			if (in_transform && changes_font)
+				result.unverifiable_font_state = true;
+			if (tag.Name == "\\fs" && !tag.Params.empty() &&
+				!tag.Params.front().omitted && !tag.Params.front().empty) {
+				auto const value = tag.Params.front().Get<std::string>();
+				if (!value.empty() && (value.front() == '+' || value.front() == '-'))
+					result.unverifiable_font_state = true;
+			}
 			if (tag.Name == "\\t" && tag.Params.size() > 3 &&
 			    !tag.Params[3].omitted && !tag.Params[3].empty) {
 				if (auto const* nested = tag.Params[3].Get<AssDialogueBlockOverride*>())
@@ -121,50 +146,53 @@ class ExplicitFontSpanScanner {
 	}
 
 public:
-	ExplicitFontSpanScanner(
-		AssFile const& file,
-		AssDialogue const& event,
-		std::size_t event_index,
-		AssFontStyleBaseline event_style)
-	: file(file)
-	, event(event)
-	, event_index(event_index)
-	, evaluator(std::move(event_style))
-	{
-	}
+FontSpanScanner(
+	AssFile const& file,
+	AssDialogue const& event,
+	std::size_t event_index,
+	AssFontStyleBaseline event_style)
+	: file(file), event(event), event_index(event_index), evaluator(std::move(event_style)) {
+	result.baselines.push_back(evaluator.EventStyle());
+}
 
-	std::vector<ExplicitFontSpan> Scan() {
-		std::vector<ExplicitFontSpan> spans;
-		auto blocks = event.ParseTags();
-		for (std::size_t block_index = 0; block_index < blocks.size(); ++block_index) {
-			auto const& block = blocks[block_index];
-			if (block->GetType() == AssBlockType::OVERRIDE) {
-				ApplyTags(static_cast<AssDialogueBlockOverride const&>(*block).Tags, false);
-				continue;
-			}
-
-			if (block->GetType() != AssBlockType::PLAIN || !active_font ||
-			    !evaluator.IsValid() || block->GetText().empty())
-				continue;
-
-			ExplicitFontSpan span;
-			span.source.kind = FontVariantAuditSourceKind::OverrideSpan;
-			span.source.style = event.Style;
-			span.source.line = event.Row >= 0
-				? event.Row + 1
-				: static_cast<int>(event_index + 1);
-			span.source.entry_index = event_index;
-			span.source.block_index = block_index;
-			span.source.fn_override_index = active_font->index;
-			span.source.font_state_revision = font_state_revision;
-			span.source.comment = event.Comment;
-			span.source.in_transform = active_font->in_transform ||
-				bold_in_transform || italic_in_transform;
-			span.request = evaluator.Request();
-			spans.push_back(std::move(span));
+FontSpanScanResult Scan(bool explicit_only) {
+	auto blocks = event.ParseTags();
+	for (std::size_t block_index = 0; block_index < blocks.size(); ++block_index) {
+		auto const& block = blocks[block_index];
+		if (block->GetType() == AssBlockType::OVERRIDE) {
+			ApplyTags(static_cast<AssDialogueBlockOverride const&>(*block).Tags, false);
+			continue;
 		}
-		return spans;
+
+		if (block->GetType() != AssBlockType::PLAIN || block->GetText().empty())
+			continue;
+		if (!evaluator.IsValid()) {
+			result.complete = false;
+			continue;
+		}
+		if (explicit_only && !active_font)
+			continue;
+
+		ExplicitFontSpan span;
+		span.source.kind = FontVariantAuditSourceKind::OverrideSpan;
+		span.source.style = event.Style;
+		span.source.line = event.Row >= 0
+							   ? event.Row + 1
+							   : static_cast<int>(event_index + 1);
+		span.source.entry_index = event_index;
+		span.source.block_index = block_index;
+		if (active_font)
+			span.source.fn_override_index = active_font->index;
+		span.source.font_state_revision = font_state_revision;
+		span.source.comment = event.Comment;
+		span.source.in_transform = (active_font && active_font->in_transform) ||
+								   bold_in_transform || italic_in_transform;
+		span.request = evaluator.Request();
+		span.text = block->GetText();
+		result.spans.push_back(std::move(span));
 	}
+	return std::move(result);
+}
 };
 
 std::vector<ExplicitFontSpan> ScanExplicitFontSpans(
@@ -174,8 +202,10 @@ std::vector<ExplicitFontSpan> ScanExplicitFontSpans(
 	auto const* style = aegisub::ass_style_resolution::ResolveEventStyle(file, event.Style);
 	if (!style)
 		return {};
-	return ExplicitFontSpanScanner(
-		file, event, event_index, aegisub::ass::MakeAssFontStyleBaseline(*style)).Scan();
+	return FontSpanScanner(
+			   file, event, event_index, aegisub::ass::MakeAssFontStyleBaseline(*style))
+		.Scan(true)
+		.spans;
 }
 
 std::size_t AddSnapshot(
@@ -584,7 +614,174 @@ ReplacedExplicitVariants ReplaceExplicitVariantTags(
 	return replaced;
 }
 
+struct ObservedFontSelection {
+	FontVariantBackend backend;
+	FontVariantOutcome outcome;
+};
+
+FontVariantAuditProfileProvider CachedProfiles(FontVariantAuditProfileProvider const& provider) {
+	if (!provider)
+		return {};
+	using Key = std::tuple<std::string, int, double>;
+	return [provider, profiles = std::map<Key, std::optional<FontFamilyVariantProfile>>{}](AssFontRequest const& request) mutable {
+		auto const key = Key(request.family, request.charset, request.height);
+		auto [entry, inserted] = profiles.try_emplace(key);
+		if (inserted)
+			entry->second = provider(request);
+		return entry->second;
+	};
+}
+
+std::optional<ObservedFontSelection> ObservedSelection(
+	AssFontRequest const& request,
+	FontFamilyCatalog const& catalog,
+	FontVariantAuditProfileProvider const& profile_provider) {
+	auto const resolved = catalog.Resolve(request.family);
+	if (!resolved.family)
+		return std::nullopt;
+	auto const *record = catalog.Find(*resolved.family);
+	if (!record)
+		return std::nullopt;
+	auto profile = profile_provider
+					   ? profile_provider(request)
+					   : std::optional(record->variant_profile);
+	if (!profile || profile->evidence != FontSelectionEvidence::Observed ||
+		!profile->automatic_pinning_reliable || profile->backend == FontVariantBackend::Unknown)
+		return std::nullopt;
+	auto const& outcome = profile->For(
+		request.effective_weight == aegisub::ass::BoldFontWeight, request.italic);
+	if (outcome.status != FontVariantStatus::Canonical ||
+		outcome.role == FontVariantRole::Unknown || !outcome.entity_token)
+		return std::nullopt;
+	return ObservedFontSelection{
+		.backend = profile->backend,
+		.outcome = outcome};
+}
+
+bool SameFontSelection(
+	AssFontRequest const& before,
+	AssFontRequest const& after,
+	FontFamilyCatalog const& catalog,
+	FontVariantAuditProfileProvider const& profile_provider,
+	bool allow_family_alias_changes) {
+	if (!before.valid || !after.valid)
+		return false;
+	if (before.family == after.family && before.effective_weight == after.effective_weight &&
+		before.italic == after.italic && before.charset == after.charset && before.height == after.height)
+		return true;
+	if (before.charset != after.charset || before.height != after.height ||
+		(before.effective_weight != after.effective_weight &&
+		 (before.effective_weight != aegisub::ass::DefaultFontWeight ||
+		  after.effective_weight != aegisub::ass::BoldFontWeight)) ||
+		(before.italic && !after.italic))
+		return false;
+	if ((before.effective_weight != aegisub::ass::DefaultFontWeight &&
+		 before.effective_weight != aegisub::ass::BoldFontWeight) ||
+		(after.effective_weight != aegisub::ass::DefaultFontWeight &&
+		 after.effective_weight != aegisub::ass::BoldFontWeight))
+		return false;
+	if (before.family != after.family) {
+		if (!allow_family_alias_changes || !profile_provider ||
+			FontFamilyCatalog::SplitVerticalPrefix(before.family).first !=
+				FontFamilyCatalog::SplitVerticalPrefix(after.family).first)
+			return false;
+		auto const old_family = catalog.Resolve(before.family);
+		auto const new_family = catalog.Resolve(after.family);
+		if (!old_family.family || old_family.family != new_family.family)
+			return false;
+	}
+	auto const old_selection = ObservedSelection(before, catalog, profile_provider);
+	auto const new_selection = ObservedSelection(after, catalog, profile_provider);
+	return old_selection && new_selection &&
+		   old_selection->backend == new_selection->backend &&
+		   old_selection->outcome.entity_token == new_selection->outcome.entity_token &&
+		   old_selection->outcome.role == new_selection->outcome.role &&
+		   old_selection->outcome.realized_weight == new_selection->outcome.realized_weight &&
+		   old_selection->outcome.realized_italic == new_selection->outcome.realized_italic;
+}
+
 } // namespace
+
+void CloneFontAuditEntries(AssFile const& source, AssFile& destination) {
+	for (auto const& style : source.Styles) {
+		auto copy = std::make_unique<AssStyle>(style);
+		destination.Styles.push_back(*copy);
+		copy.release();
+	}
+	for (auto const& event : source.Events) {
+		auto copy = std::make_unique<AssDialogue>(
+			static_cast<AssDialogueBase const&>(event));
+		destination.Events.push_back(*copy);
+		copy.release();
+	}
+}
+
+bool PreservesFontSelections(
+	AssFile const& original,
+	AssFile const& candidate,
+	FontFamilyCatalog const& catalog,
+	FontVariantAuditProfileProvider const& profile_provider,
+	bool allow_family_alias_changes) {
+	if (original.Styles.size() != candidate.Styles.size() ||
+		original.Events.size() != candidate.Events.size())
+		return false;
+	auto const cached_provider = CachedProfiles(profile_provider);
+	bool changed = false;
+	auto new_style = candidate.Styles.begin();
+	for (auto const& style : original.Styles) {
+		if (style.name != new_style->name)
+			return false;
+		auto const before = AssFontStateEvaluator(aegisub::ass::MakeAssFontStyleBaseline(style)).Request();
+		auto const after = AssFontStateEvaluator(aegisub::ass::MakeAssFontStyleBaseline(*new_style)).Request();
+		changed = changed || before != after;
+		if (!SameFontSelection(before, after, catalog, cached_provider, allow_family_alias_changes))
+			return false;
+		++new_style;
+	}
+	bool const styles_changed = changed;
+	auto new_event = candidate.Events.begin();
+	for (auto const& event : original.Events) {
+		if (event.Style != new_event->Style || event.Comment != new_event->Comment)
+			return false;
+		changed = changed || event.Text != new_event->Text;
+		++new_event;
+	}
+	if (!changed)
+		return true;
+	new_event = candidate.Events.begin();
+	std::size_t event_index = 0;
+	for (auto const& event : original.Events) {
+		if (!styles_changed && event.Text == new_event->Text) {
+			++new_event;
+			++event_index;
+			continue;
+		}
+		auto const *old_style = aegisub::ass_style_resolution::ResolveEventStyle(original, event.Style);
+		auto const *candidate_style = aegisub::ass_style_resolution::ResolveEventStyle(candidate, new_event->Style);
+		if (!old_style || !candidate_style)
+			return false;
+		auto const before = FontSpanScanner(original, event, event_index,
+											aegisub::ass::MakeAssFontStyleBaseline(*old_style))
+								.Scan(false);
+		auto const after = FontSpanScanner(candidate, *new_event, event_index,
+										   aegisub::ass::MakeAssFontStyleBaseline(*candidate_style))
+							   .Scan(false);
+		if (!before.complete || !after.complete || before.spans.size() != after.spans.size())
+			return false;
+		if ((before.unverifiable_font_state || after.unverifiable_font_state) &&
+			(event.Text != new_event->Text || before.baselines != after.baselines))
+			return false;
+		for (std::size_t i = 0; i < before.spans.size(); ++i) {
+			if (before.spans[i].text != after.spans[i].text ||
+				!SameFontSelection(before.spans[i].request, after.spans[i].request,
+								   catalog, cached_provider, allow_family_alias_changes))
+				return false;
+		}
+		++new_event;
+		++event_index;
+	}
+	return true;
+}
 
 FontVariantAuditPlan BuildFontVariantAuditPlan(
 	AssFile const& file,
@@ -594,7 +791,9 @@ FontVariantAuditPlan BuildFontVariantAuditPlan(
 	FontVariantAuditProfileProvider const& profile_provider) {
 	FontVariantAuditPlan plan;
 	plan.options = options;
+	plan.catalog_snapshot = catalog;
 	plan.catalog_available = !catalog.empty();
+	auto const cached_provider = CachedProfiles(profile_provider);
 
 	std::size_t style_index = 0;
 	for (auto const& style : file.Styles) {
@@ -615,7 +814,7 @@ FontVariantAuditPlan BuildFontVariantAuditPlan(
 		request.charset = style.encoding;
 		request.height = style.fontsize;
 		AnalyzeRequest(
-			plan, catalog, profile_provider, options, std::move(source), snapshot_index, request);
+			plan, catalog, cached_provider, options, std::move(source), snapshot_index, request);
 		++plan.scanned_style_count;
 		++style_index;
 	}
@@ -627,13 +826,26 @@ FontVariantAuditPlan BuildFontVariantAuditPlan(
 			auto const snapshot_index = AddSnapshot(plan, EventSnapshot(event, event_index));
 			for (auto& span : spans) {
 				AnalyzeRequest(
-					plan, catalog, profile_provider, options, std::move(span.source), snapshot_index, span.request);
+					plan, catalog, cached_provider, options, std::move(span.source), snapshot_index, span.request);
 				++plan.scanned_override_span_count;
 			}
 		}
 		++event_index;
 	}
 
+	for (std::size_t index = 0; index < plan.findings.size(); ++index) {
+		auto& finding = plan.findings[index];
+		if (!finding.safe_to_apply)
+			continue;
+		AssFile staged;
+		CloneFontAuditEntries(file, staged);
+		auto const preflight = ApplyFontVariantAuditChanges(
+			staged, plan, std::span(&index, 1), options, cached_provider);
+		if (!preflight.success) {
+			finding.safe_to_apply = false;
+			finding.reason_code = "font_state_preservation_unproven";
+		}
+	}
 	return plan;
 }
 
@@ -644,6 +856,7 @@ FontVariantAuditApplyResult ApplyFontVariantAuditChanges(
 	FontVariantAuditOptions options,
 	FontVariantAuditProfileProvider const& profile_provider) {
 	FontVariantAuditApplyResult result;
+	auto const cached_provider = CachedProfiles(profile_provider);
 	std::unordered_set<std::size_t> seen_findings;
 	std::unordered_set<std::size_t> seen_styles;
 
@@ -690,7 +903,7 @@ FontVariantAuditApplyResult ApplyFontVariantAuditChanges(
 			result.error = "font variant audit source changed after the plan was built";
 			return result;
 		}
-		if (!LivePinStillMatches(finding, profile_provider)) {
+		if (!LivePinStillMatches(finding, cached_provider)) {
 			result.error = "font variant audit live profile changed after the plan was built";
 			return result;
 		}
@@ -779,6 +992,23 @@ FontVariantAuditApplyResult ApplyFontVariantAuditChanges(
 					std::move(block));
 			}
 		}
+	}
+
+	AssFile staged;
+	CloneFontAuditEntries(file, staged);
+	for (auto const *finding : pending_styles) {
+		auto *style = StyleAt(staged, finding->source.entry_index);
+		if (finding->pin_bold)
+			style->bold = true;
+		if (finding->pin_italic)
+			style->italic = true;
+		style->UpdateData();
+	}
+	for (auto& [event_index, pending] : pending_events)
+		EventAt(staged, event_index)->UpdateText(pending.blocks);
+	if (!PreservesFontSelections(file, staged, plan.catalog_snapshot, cached_provider)) {
+		result.error = "font variant audit cannot preserve every affected font selection";
+		return result;
 	}
 
 	for (auto const* finding : pending_styles) {

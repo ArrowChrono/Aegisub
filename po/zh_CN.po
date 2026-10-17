@@ -10878,3 +10878,7 @@ msgstr ""
 #: packages/win_installer/fragment_strings.iss:1
 msgid "Update Checker:"
 msgstr "自动更新："
+
+#: ../src/dialog_font_portability_audit.cpp
+msgid "Font selection cannot be proven unchanged for all affected text; report only, not applied automatically."
+msgstr "无法证明所有受影响文字的字体选择保持不变；仅报告，不自动应用。"

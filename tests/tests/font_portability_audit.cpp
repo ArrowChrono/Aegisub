@@ -2,12 +2,15 @@
 
 #include "../../src/ass_dialogue.h"
 #include "../../src/ass_file.h"
+#include "../../src/ass_font_state.h"
 #include "../../src/ass_style.h"
 
 #include <gtest/gtest.h>
 
 #include <array>
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -83,6 +86,15 @@ FontPortabilityAuditOptions english_names() {
 	return options;
 }
 
+FontVariantAuditProfileProvider observed_profiles(std::map<std::string, FontFamilyVariantProfile> profiles) {
+	return [profiles = std::move(profiles)](aegisub::ass::AssFontRequest const& probe)
+			   -> std::optional<FontFamilyVariantProfile> {
+		auto const found = profiles.find(probe.family);
+		if (found == profiles.end()) return std::nullopt;
+		return found->second;
+	};
+}
+
 FontPortabilityAuditPlan selection_plan() {
 	FontPortabilityAuditPlan plan;
 	plan.names.changes.resize(2);
@@ -152,13 +164,17 @@ TEST(font_portability_audit, applies_name_and_variant_to_one_style_atomically) {
 	auto& style = add_style(file, "Default", "Localized Bold");
 	auto* original_style = &style;
 	auto options = english_names();
-	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options);
+	auto provider = observed_profiles({
+		{"Localized Bold", bold_only_profile(10)},
+		{"English Bold", bold_only_profile(10)},
+	});
+	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options, {}, provider);
 	ASSERT_EQ(1u, plan.names.changes.size());
 	ASSERT_EQ(1u, plan.variants.findings.size());
 
 	std::array<std::size_t, 1> selected{0};
 	auto result = ApplyFontPortabilityAuditChanges(
-		file, plan, selected, selected, options);
+		file, plan, selected, selected, options, provider);
 
 	EXPECT_TRUE(result.success) << result.error;
 	EXPECT_TRUE(result.styles_changed);
@@ -180,13 +196,18 @@ TEST(font_portability_audit, combines_name_and_variant_edits_on_one_override_spa
 	auto& event = add_event(file, "{\\fnLocalized Bold}A");
 	auto* original_event = &event;
 	auto options = english_names();
-	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options);
+	auto provider = observed_profiles({
+		{"Regular", regular_profile(100)},
+		{"Localized Bold", bold_only_profile(20)},
+		{"English Bold", bold_only_profile(20)},
+	});
+	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options, {}, provider);
 	ASSERT_EQ(1u, plan.names.changes.size());
 	ASSERT_EQ(1u, plan.variants.findings.size());
 
 	std::array<std::size_t, 1> selected{0};
 	auto result = ApplyFontPortabilityAuditChanges(
-		file, plan, selected, selected, options);
+		file, plan, selected, selected, options, provider);
 
 	EXPECT_TRUE(result.success) << result.error;
 	EXPECT_FALSE(result.styles_changed);
@@ -226,19 +247,153 @@ TEST(font_portability_audit, applies_only_the_selected_audit_category) {
 	AssFile file;
 	auto& style = add_style(file, "Default", "Localized Bold");
 	auto options = english_names();
-	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options);
+	auto provider = observed_profiles({
+		{"Localized Bold", bold_only_profile(10)},
+		{"English Bold", bold_only_profile(10)},
+	});
+	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options, {}, provider);
 	ASSERT_EQ(1u, plan.names.changes.size());
 	ASSERT_EQ(1u, plan.variants.findings.size());
 
 	std::array<std::size_t, 1> selected_name{0};
 	auto result = ApplyFontPortabilityAuditChanges(
-		file, plan, selected_name, {}, options);
+		file, plan, selected_name, {}, options, provider);
 
 	EXPECT_TRUE(result.success) << result.error;
 	EXPECT_EQ("English Bold", style.font);
 	EXPECT_FALSE(style.bold);
 	EXPECT_EQ(1u, result.applied_name_change_count);
 	EXPECT_EQ(0u, result.applied_variant_change_count);
+}
+
+TEST(font_portability_audit, rejects_same_family_alias_entity_change_before_atomic_commit) {
+	FontFamilyCatalog catalog({family(
+		1, "Localized Regular", "English Regular", regular_profile(100))});
+	AssFile file;
+	auto& style = add_style(file, "Default", "Localized Regular");
+	auto& event = add_event(file, "Plain{\\b1}bold{\\b0}plain");
+	auto const original_style = style.GetEntryData();
+	auto const original_text = event.Text.get();
+	auto options = english_names();
+	auto build_provider = observed_profiles({
+		{"Localized Regular", regular_profile(100)},
+		{"English Regular", regular_profile(100)},
+	});
+	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options, {}, build_provider);
+	ASSERT_EQ(1u, plan.names.changes.size());
+	ASSERT_TRUE(plan.names.changes.front().safe_to_apply);
+	ASSERT_TRUE(plan.variants.findings.empty());
+	ASSERT_EQ(catalog.Resolve("Localized Regular").family, catalog.Resolve("English Regular").family);
+	auto apply_provider = observed_profiles({
+		{"Localized Regular", regular_profile(100)},
+		{"English Regular", regular_profile(200)},
+	});
+
+	std::array<std::size_t, 1> selected{0};
+	auto result = ApplyFontPortabilityAuditChanges(file, plan, selected, {}, options, apply_provider);
+
+	EXPECT_FALSE(result.success);
+	EXPECT_FALSE(result.error.empty());
+	EXPECT_FALSE(result.styles_changed);
+	EXPECT_FALSE(result.dialogue_text_changed);
+	EXPECT_EQ(0u, result.applied_name_change_count);
+	EXPECT_EQ(0u, result.applied_variant_change_count);
+	EXPECT_EQ("Localized Regular", style.font);
+	EXPECT_EQ(original_style, style.GetEntryData());
+	EXPECT_EQ(original_text, event.Text.get());
+}
+
+TEST(font_portability_audit, rejects_combined_name_and_variant_when_target_alias_entity_changes) {
+	FontFamilyCatalog catalog({family(
+		1, "Localized Bold", "English Bold", bold_only_profile(20))});
+	AssFile file;
+	auto& style = add_style(file, "Default", "Localized Bold");
+	auto const original_style = style.GetEntryData();
+	auto options = english_names();
+	auto build_provider = observed_profiles({
+		{"Localized Bold", bold_only_profile(20)},
+		{"English Bold", bold_only_profile(20)},
+	});
+	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options, {}, build_provider);
+	ASSERT_EQ(1u, plan.names.changes.size());
+	ASSERT_EQ(1u, plan.variants.findings.size());
+	ASSERT_TRUE(plan.names.changes.front().safe_to_apply);
+	ASSERT_TRUE(plan.variants.findings.front().safe_to_apply);
+	ASSERT_TRUE(file.Events.empty());
+	auto apply_provider = observed_profiles({
+		{"Localized Bold", bold_only_profile(20)},
+		{"English Bold", bold_only_profile(30)},
+	});
+
+	std::array<std::size_t, 1> selected{0};
+	auto result = ApplyFontPortabilityAuditChanges(file, plan, selected, selected, options, apply_provider);
+
+	EXPECT_FALSE(result.success);
+	EXPECT_FALSE(result.error.empty());
+	EXPECT_FALSE(result.styles_changed);
+	EXPECT_FALSE(result.dialogue_text_changed);
+	EXPECT_EQ(0u, result.applied_name_change_count);
+	EXPECT_EQ(0u, result.applied_variant_change_count);
+	EXPECT_EQ("Localized Bold", style.font);
+	EXPECT_FALSE(style.bold);
+	EXPECT_EQ(original_style, style.GetEntryData());
+	EXPECT_TRUE(file.Events.empty());
+}
+
+TEST(font_portability_audit, rejects_name_change_when_live_target_alias_is_unavailable) {
+	FontFamilyCatalog catalog({family(
+		1, "Localized Regular", "English Regular", regular_profile(100))});
+	AssFile file;
+	auto& style = add_style(file, "Default", "Localized Regular");
+	auto& event = add_event(file, "Plain text");
+	auto const original_style = style.GetEntryData();
+	auto const original_text = event.Text.get();
+	auto options = english_names();
+	auto build_provider = observed_profiles({
+		{"Localized Regular", regular_profile(100)},
+		{"English Regular", regular_profile(100)},
+	});
+	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options, {}, build_provider);
+	ASSERT_EQ(1u, plan.names.changes.size());
+	ASSERT_TRUE(plan.names.changes.front().safe_to_apply);
+	auto apply_provider = observed_profiles({{"Localized Regular", regular_profile(100)}});
+
+	std::array<std::size_t, 1> selected{0};
+	auto result = ApplyFontPortabilityAuditChanges(file, plan, selected, {}, options, apply_provider);
+
+	EXPECT_FALSE(result.success);
+	EXPECT_FALSE(result.error.empty());
+	EXPECT_EQ(0u, result.applied_name_change_count);
+	EXPECT_EQ(0u, result.applied_variant_change_count);
+	EXPECT_EQ("Localized Regular", style.font);
+	EXPECT_EQ(original_style, style.GetEntryData());
+	EXPECT_EQ(original_text, event.Text.get());
+}
+
+TEST(font_portability_audit, catalog_profile_does_not_prove_renamed_alias_without_live_provider) {
+	FontFamilyCatalog catalog({family(
+		1, "Localized Regular", "English Regular", regular_profile(100))});
+	AssFile file;
+	auto& style = add_style(file, "Default", "Localized Regular");
+	auto const original_style = style.GetEntryData();
+	auto options = english_names();
+	auto build_provider = observed_profiles({
+		{"Localized Regular", regular_profile(100)},
+		{"English Regular", regular_profile(100)},
+	});
+	auto plan = BuildFontPortabilityAuditPlan(file, catalog, options, {}, build_provider);
+	ASSERT_EQ(1u, plan.names.changes.size());
+	ASSERT_TRUE(plan.names.changes.front().safe_to_apply);
+
+	std::array<std::size_t, 1> selected{0};
+	auto result = ApplyFontPortabilityAuditChanges(file, plan, selected, {}, options);
+
+	EXPECT_FALSE(result.success);
+	EXPECT_FALSE(result.error.empty());
+	EXPECT_EQ(0u, result.applied_name_change_count);
+	EXPECT_EQ(0u, result.applied_variant_change_count);
+	EXPECT_EQ("Localized Regular", style.font);
+	EXPECT_EQ(original_style, style.GetEntryData());
 }
 
 TEST(font_portability_audit, option_mismatch_does_not_modify_the_file) {

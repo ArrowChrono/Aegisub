@@ -6,23 +6,8 @@
 
 #include <algorithm>
 #include <iterator>
-#include <memory>
 
 namespace {
-
-void CloneFontAuditEntries(AssFile const& source, AssFile& destination) {
-	for (auto const& style : source.Styles) {
-		auto copy = std::make_unique<AssStyle>(style);
-		destination.Styles.push_back(*copy);
-		copy.release();
-	}
-	for (auto const& event : source.Events) {
-		auto copy = std::make_unique<AssDialogue>(
-			static_cast<AssDialogueBase const&>(event));
-		destination.Events.push_back(*copy);
-		copy.release();
-	}
-}
 
 bool OptionsMatch(
 	FontPortabilityAuditPlan const& plan,
@@ -147,6 +132,19 @@ FontPortabilityAuditPlan BuildFontPortabilityAuditPlan(
 		file, catalog, options.name_target, style_source_lines);
 	plan.variants = BuildFontVariantAuditPlan(
 		file, catalog, options.variant, style_source_lines, profile_provider);
+	for (std::size_t index = 0; index < plan.names.changes.size(); ++index) {
+		auto& change = plan.names.changes[index];
+		if (!change.safe_to_apply)
+			continue;
+		AssFile staged;
+		CloneFontAuditEntries(file, staged);
+		auto const preflight = ApplyFontPortabilityAuditChanges(
+			staged, plan, std::span(&index, 1), {}, options, profile_provider);
+		if (!preflight.success) {
+			change.safe_to_apply = false;
+			change.reason_code = "font_state_preservation_unproven";
+		}
+	}
 	return plan;
 }
 
@@ -184,6 +182,10 @@ FontPortabilityAuditApplyResult ApplyFontPortabilityAuditChanges(
 		staged, plan.names, selected_name_change_indices);
 	if (!name_result.success) {
 		result.error = "font name audit failed: " + name_result.error;
+		return result;
+	}
+	if (!PreservesFontSelections(file, staged, plan.variants.catalog_snapshot, profile_provider, true)) {
+		result.error = "font portability audit cannot preserve every affected font selection";
 		return result;
 	}
 

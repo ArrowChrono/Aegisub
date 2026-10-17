@@ -78,6 +78,5 @@ std::optional<FontFamilyVariantProfile> BuildFontVariantProfileForRequest(
 	auto const* record = catalog.Find(*resolved.family);
 	if (!record)
 		return std::nullopt;
-	return BuildFontVariantProfileForFamily(
-		resolver, *record, request.charset, request.height);
+	return resolver.BuildProfile(request.family, request.charset, request.height);
 }

@@ -186,3 +186,37 @@ The batch API takes an array of item pointers, constructs one immutable family c
 Callers must inspect each `AegisubFontNameNormalizationBatchItem::result` (and that item's error buffer). The batch function return value is only for argument/catalog-level failures; individual input read or analysis failures do not make the batch return non-zero by themselves.
 
 JSON output for `fontcollector normalize --json` uses `schema_version: 2`. The root `summary` aggregates counts across files and includes `catalog_available` (true only when every successfully analyzed file had a usable family catalog).
+
+## GUI portability application safety
+
+The CLI `normalize` command and the name-plan C API above remain report-only;
+neither writes an ASS file. A suggested name in that report is not authority to
+apply a combined GUI name/variant change without the GUI's physical-selection
+checks.
+
+The GUI stages selected B/I and name changes on ID-preserving subtitle copies.
+Before committing anything, it replays every affected plaintext font state,
+including inherited styles, later `\fn` families, named/empty `\r`, explicit
+resets and text after drawing blocks. Changed effective requests must preserve
+observed physical entity, role, realized weight and realized italic state.
+Synthetic, unknown or incomplete evidence rejects the whole selection without
+partial changes. A single-finding preflight sets unprovable proposals to
+report-only; Apply independently checks the complete selected combination and
+the current dependency text again.
+
+Name aliases require separate live probes of the original and proposed raw
+names (including a leading `@`); one family ID or one normalized localized-name
+probe cannot establish that both names select the same entity. Without live
+alias evidence the GUI does not apply a rename. Variant-only callers without a
+live provider retain their captured Observed catalog-profile semantics; they
+do not gain a guarantee about later system-font changes.
+
+Font-affecting transforms and signed relative font sizes whose changed state
+cannot be proved by the static profile are report-only. Color-only transforms
+and isolated explicit/reset/drawing boundaries remain usable when the complete
+proof succeeds. Style changes conservatively replay all events, so an invalid
+style/reset elsewhere can prevent automatic application; span-only changes do
+not reparse completely unchanged events when all styles are unchanged.
+Planning still creates a candidate copy for each proposal; large-script
+planning performance has not been measured. No cross-platform rendering or
+pixel-equivalence guarantee is implied by local font-selection preservation.

@@ -6654,3 +6654,7 @@ msgstr "自動更新："
 
 #~ msgid "&Forums"
 #~ msgstr "論壇(&F)…"
+
+#: ../src/dialog_font_portability_audit.cpp
+msgid "Font selection cannot be proven unchanged for all affected text; report only, not applied automatically."
+msgstr "無法證明所有受影響文字的字型選擇保持不變；僅報告，不自動套用。"

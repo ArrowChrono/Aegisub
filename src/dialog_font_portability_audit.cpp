@@ -98,6 +98,8 @@ wxString NameReasonText(std::string const& reason) {
 		return _("Replace the English Win32 family name with its localized form.");
 	if (reason == "win32_family_alias")
 		return _("Replace this confirmed Win32 family alias with the selected target name.");
+	if (reason == "font_state_preservation_unproven")
+		return _("Font selection cannot be proven unchanged for all affected text; report only, not applied automatically.");
 	return to_wx(reason);
 }
 
@@ -189,6 +191,8 @@ wxString VariantReasonText(std::string const& reason) {
 		return _("The active font backend synthesizes this requested variant.");
 	if (reason == "noncanonical_variant")
 		return _("The selected backend result cannot be represented safely as an RBIZ fix.");
+	if (reason == "font_state_preservation_unproven")
+		return _("Font selection cannot be proven unchanged for all affected text; report only, not applied automatically.");
 	if (reason == "variant_profile_unavailable")
 		return _("The installed family has no reliable variant profile for this request.");
 	if (reason == "font_family_catalog_unavailable")
@@ -365,8 +369,9 @@ void DialogFontPortabilityAudit::BuildInitialPlan() {
 void DialogFontPortabilityAudit::RebuildNames() {
 	auto const options = CurrentOptions();
 	plan.options.name_target = options.name_target;
-	plan.names = BuildFontNameNormalizationPlan(
-		*context->GetCore().ass, CurrentCatalog(), options.name_target);
+	auto resolver = CreatePlatformFontVariantResolver();
+	auto live_profiles = MakeLiveProfileProvider(*resolver, CurrentCatalog());
+	plan.names = BuildFontPortabilityAuditPlan(*context->GetCore().ass, CurrentCatalog(), options, {}, live_profiles).names;
 	audit_selection.ResetNames(
 		plan.names, Includes(CurrentFilter(), FindingKind::Name));
 	RebuildVisibleFindings();

@@ -104,6 +104,7 @@ struct FontVariantAuditFinding {
 
 struct FontVariantAuditPlan {
 	FontVariantAuditOptions options;
+	FontFamilyCatalog catalog_snapshot;
 	bool catalog_available = false;
 	std::size_t scanned_style_count = 0;
 	std::size_t scanned_override_span_count = 0;
@@ -143,3 +144,12 @@ FontVariantAuditApplyResult ApplyFontVariantAuditChanges(
 	std::span<std::size_t const> selected_finding_indices,
 	FontVariantAuditOptions options = {},
 	FontVariantAuditProfileProvider const& profile_provider = {});
+
+bool PreservesFontSelections(
+	AssFile const& original,
+	AssFile const& candidate,
+	FontFamilyCatalog const& catalog,
+	FontVariantAuditProfileProvider const& profile_provider = {},
+	bool allow_family_alias_changes = false);
+
+void CloneFontAuditEntries(AssFile const& source, AssFile& destination);
