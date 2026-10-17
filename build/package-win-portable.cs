@@ -1,6 +1,6 @@
 #:package System.CommandLine@2.0.5
 #:package Spectre.Console@0.54.0
-#:package SharpCompress@0.47.2
+#:package SharpCompress@0.48.0
 #:property PublishAot=true
 
 using System.CommandLine;
