@@ -96,11 +96,15 @@ bool TryGetFileInfo(path const& p, FileInfo& out, std::error_code& ec) {
 	out = {};
 	ec.clear();
 
-	auto const query = TrimQueryPath(p);
-	if (query.empty()) {
+	auto const trimmed = TrimQueryPath(p);
+	if (trimmed.empty()) {
 		ec = std::error_code(ERROR_FILE_NOT_FOUND, std::system_category());
 		return false;
 	}
+
+	auto const query = NativePath(path(trimmed), ec);
+	if (ec)
+		return false;
 
 	WIN32_FILE_ATTRIBUTE_DATA data;
 	if (!GetFileAttributesExW(query.c_str(), GetFileExInfoStandard, &data)) {

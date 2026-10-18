@@ -192,32 +192,129 @@ TEST(lagi_io, save_cancel_removes_closed_temp_after_rename_failure) {
 }
 
 #ifdef _WIN32
+namespace {
+struct LongWindowsTestDirectory {
+	std::filesystem::path root = agi::fs::UniquePath("data/io-long-%%%%%%%%");
+	std::filesystem::path native_root = std::filesystem::path(L"\\\\?\\" + std::filesystem::absolute(root).make_preferred().native());
+	std::filesystem::path directory = root;
+	std::filesystem::path absolute_directory;
+
+	LongWindowsTestDirectory() {
+		while (std::filesystem::absolute(directory).native().size() < 200)
+			directory /= std::string(32, 'd');
+		std::filesystem::create_directories(directory);
+		absolute_directory = std::filesystem::absolute(directory).make_preferred();
+	}
+	~LongWindowsTestDirectory() { std::filesystem::remove_all(native_root); }
+
+	[[nodiscard]] std::filesystem::path Target(size_t length) const {
+		return absolute_directory / (std::string(length - absolute_directory.native().size() - 5, 'f') + ".ass");
+	}
+};
+}
+
 TEST(lagi_io, save_close_publishes_long_windows_paths) {
-	auto const root = agi::fs::UniquePath("data/save-long-%%%%%%%%");
-	auto const native_root = std::filesystem::path(L"\\\\?\\" + std::filesystem::absolute(root).make_preferred().native());
-	auto cleanup = agi::make_scope_exit([&] { std::filesystem::remove_all(native_root); });
-	auto directory = root;
-	while (std::filesystem::absolute(directory).native().size() < 200)
-		directory /= std::string(32, 'd');
-	std::filesystem::create_directories(directory);
-	auto const absolute_directory = std::filesystem::absolute(directory).make_preferred();
+	LongWindowsTestDirectory directory;
 	for (size_t length : {259U, 260U, 300U}) {
 		SCOPED_TRACE(length);
-		auto const filename = std::string(length - absolute_directory.native().size() - 5, 'f') + ".ass";
-		auto const absolute_target = absolute_directory / filename;
+		auto const absolute_target = directory.Target(length);
 		ASSERT_EQ(length, absolute_target.native().size());
 		auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
 		std::ofstream(native_target, std::ios::binary) << "original";
 		ASSERT_EQ("original", read_all(native_target));
 
-		for (auto const& target : {directory / filename, absolute_target}) {
+		for (auto const& target : {directory.directory / absolute_target.filename(), absolute_target}) {
 			agi::io::Save save(target, true);
 			save.Get() << "replacement subtitle contents";
 			EXPECT_EQ("original", read_all(native_target));
 			ASSERT_NO_THROW(save.Close());
 			EXPECT_EQ("replacement subtitle contents", read_all(native_target));
-			EXPECT_TRUE(list_matching(directory, "*_tmp_*.ass").empty());
+			EXPECT_TRUE(list_matching(directory.directory, "*_tmp_*.ass").empty());
 			std::ofstream(native_target, std::ios::binary) << "original";
+		}
+	}
+}
+
+TEST(lagi_io, file_streams_report_invalid_paths_with_failbit) {
+	std::ifstream input;
+	EXPECT_NO_THROW(agi::io::OpenFileStream(input, {}));
+	EXPECT_TRUE(input.fail());
+	std::ofstream output;
+	EXPECT_NO_THROW(agi::io::OpenFileStream(output, {}));
+	EXPECT_TRUE(output.fail());
+
+	std::ifstream throwing_input;
+	throwing_input.exceptions(std::ios::failbit);
+	EXPECT_THROW(agi::io::OpenFileStream(throwing_input, {}), std::ios_base::failure);
+	std::ofstream throwing_output;
+	throwing_output.exceptions(std::ios::failbit);
+	EXPECT_THROW(agi::io::OpenFileStream(throwing_output, {}), std::ios_base::failure);
+}
+TEST(lagi_io, file_streams_round_trip_long_windows_paths) {
+	LongWindowsTestDirectory directory;
+	for (size_t length : {259U, 260U, 300U}) {
+		SCOPED_TRACE(length);
+		auto const absolute_target = directory.Target(length);
+		ASSERT_EQ(length, absolute_target.native().size());
+		auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
+		for (auto const& target : {directory.directory / absolute_target.filename(), absolute_target, native_target}) {
+			std::ofstream(native_target, std::ios::binary) << "seed value";
+			ASSERT_EQ("seed value", read_all(native_target));
+			EXPECT_NO_THROW({
+				auto existing_input = agi::io::Open(target, true);
+				EXPECT_EQ("seed value", std::string(std::istreambuf_iterator<char>(*existing_input), {}));
+			});
+			auto output = agi::io::OpenOutputFileStream(target, std::ios::binary | std::ios::trunc);
+			ASSERT_TRUE(output.good());
+			output << "first line\nsecond line";
+			output.close();
+			ASSERT_TRUE(output.good());
+			EXPECT_EQ("first line\nsecond line", read_all(native_target));
+
+			auto append = agi::io::OpenOutputFileStream(target, std::ios::binary | std::ios::app);
+			ASSERT_TRUE(append.good());
+			append << "\nappended";
+			append.close();
+			ASSERT_TRUE(append.good());
+			auto input = agi::io::OpenInputFileStream(target, std::ios::binary);
+			ASSERT_TRUE(input.good());
+			EXPECT_EQ("first line\nsecond line\nappended", std::string(std::istreambuf_iterator<char>(input), {}));
+			auto high_level_input = agi::io::Open(target, true);
+			EXPECT_EQ("first line\nsecond line\nappended", std::string(std::istreambuf_iterator<char>(*high_level_input), {}));
+		}
+	}
+}
+
+TEST(lagi_io, long_windows_paths_preserve_file_and_directory_metadata) {
+	LongWindowsTestDirectory directory;
+	for (size_t length : {259U, 260U, 300U}) {
+		SCOPED_TRACE(length);
+		auto const absolute_target = directory.Target(length);
+		ASSERT_EQ(length, absolute_target.native().size());
+		auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
+		std::ofstream(native_target, std::ios::binary) << "existing file";
+		ASSERT_EQ("existing file", read_all(native_target));
+		auto const absolute_folder = std::filesystem::path(absolute_target).replace_extension(".dir");
+		auto const native_folder = std::filesystem::path(L"\\\\?\\" + absolute_folder.native());
+		ASSERT_TRUE(std::filesystem::create_directory(native_folder));
+		auto const expected_time = agi::fs::ModifiedTime(native_target);
+
+		for (auto const& target : {directory.directory / absolute_target.filename(), absolute_target, native_target}) {
+			EXPECT_TRUE(agi::fs::Exists(target));
+			EXPECT_TRUE(agi::fs::FileExists(target));
+			EXPECT_FALSE(agi::fs::DirectoryExists(target));
+			EXPECT_EQ(13U, agi::fs::Size(target));
+			EXPECT_EQ(expected_time, agi::fs::ModifiedTime(target));
+			auto folder = std::filesystem::path(target).replace_extension(".dir");
+			EXPECT_TRUE(agi::fs::Exists(folder));
+			EXPECT_TRUE(agi::fs::DirectoryExists(folder));
+			EXPECT_TRUE(agi::fs::DirectoryExists(folder / ""));
+			EXPECT_FALSE(agi::fs::FileExists(folder));
+			EXPECT_THROW(agi::fs::Size(folder), agi::fs::NotAFile);
+			auto const missing = target.parent_path() / (target.filename().native() + L".missing");
+			EXPECT_FALSE(agi::fs::Exists(missing));
+			EXPECT_FALSE(agi::fs::FileExists(missing));
+			EXPECT_THROW(agi::fs::Size(missing), agi::fs::FileNotFound);
 		}
 	}
 }

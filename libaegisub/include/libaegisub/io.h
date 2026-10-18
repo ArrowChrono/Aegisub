@@ -18,6 +18,7 @@
 
 #include <libaegisub/exception.h>
 #include <libaegisub/fs_fwd.h>
+#include <libaegisub/fs_native.h>
 
 #include <filesystem>
 #include <fstream>
@@ -31,7 +32,13 @@ DEFINE_EXCEPTION(IOFatal, IOError);
 
 inline void OpenFileStream(std::ifstream& stream, fs::path const& file, std::ios::openmode mode = std::ios::in) {
 #ifdef _WIN32
-	stream.open(file.c_str(), mode);
+	std::error_code error;
+	auto const native = fs::detail::NativePath(file, error);
+	if (error) {
+		stream.setstate(std::ios::failbit);
+		return;
+	}
+	stream.open(native.c_str(), mode);
 #else
 	stream.open(file, mode);
 #endif
@@ -39,7 +46,13 @@ inline void OpenFileStream(std::ifstream& stream, fs::path const& file, std::ios
 
 inline void OpenFileStream(std::ofstream& stream, fs::path const& file, std::ios::openmode mode = std::ios::out) {
 #ifdef _WIN32
-	stream.open(file.c_str(), mode);
+	std::error_code error;
+	auto const native = fs::detail::NativePath(file, error);
+	if (error) {
+		stream.setstate(std::ios::failbit);
+		return;
+	}
+	stream.open(native.c_str(), mode);
 #else
 	stream.open(file, mode);
 #endif
