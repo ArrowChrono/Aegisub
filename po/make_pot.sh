@@ -52,14 +52,14 @@ for i in 'name' 'summary' 'p' 'li' 'caption'; do
   xmlstarlet sel -t -v "//_$i" ../packages/desktop/aegisub.appdata.xml.template.in | jq -R .
 done | nl -v0 -w1 -s'|' | sed -re 's/^/aegisub.appdata.xml|/' | maybe_append
 
-grep '^_[A-Za-z0-9]*=.*' ../packages/win_installer/fragment_strings.iss.in | while read line
+grep '^_[A-Za-z0-9]*=.*' ../packages/win_installer/fragment_strings.iss.in | sed 's/\r$//' | while read line
 do
   echo "$line" \
     | sed 's/[^=]*=\(.*\)/packages\/win_installer\/fragment_strings.iss|1|"\1"/' \
     | maybe_append
 done
 
-for i in $(cat LINGUAS)
+for i in $(sed 's/\r$//' LINGUAS)
 do
   # Run msgmerge twice to workaround https://savannah.gnu.org/bugs/?58778
   msgmerge --update --backup=none --no-fuzzy-matching --sort-by-file $i.po aegisub.pot
