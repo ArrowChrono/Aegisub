@@ -66,10 +66,29 @@ class InventoryField final : public wxTextCtrl {
 
 	public:
 	InventoryField(wxWindow *parent, wxString const& value, bool summary,
-				   std::function<bool()> can_copy_list, std::function<void(bool)> copy_list)
+				   std::function<bool()> can_copy_list, std::function<void(bool)> copy_list,
+				   std::function<void(InventoryField *)> select_field)
 		: wxTextCtrl(parent, wxID_ANY, value, wxDefaultPosition, wxDefaultSize,
 					 wxBORDER_NONE | wxTE_READONLY | wxTE_MULTILINE | wxTE_NOHIDESEL | wxTE_NO_VSCROLL | (summary ? wxTE_RIGHT : 0)) {
 		SetName(summary ? wxS("Font usage status") : wxS("Font usage name"));
+		auto select = [this, select_field = std::move(select_field)] { select_field(this); };
+		for (auto type : {wxEVT_LEFT_DOWN, wxEVT_LEFT_DCLICK}) {
+			Bind(type, [select](wxMouseEvent& event) {
+				select();
+				event.Skip();
+			});
+		}
+		Bind(wxEVT_KEY_DOWN, [select](wxKeyEvent& event) {
+			constexpr std::array navigation_keys{WXK_LEFT, WXK_RIGHT, WXK_UP, WXK_DOWN,
+												 WXK_HOME, WXK_END, WXK_PAGEUP, WXK_PAGEDOWN,
+												 WXK_NUMPAD_LEFT, WXK_NUMPAD_RIGHT, WXK_NUMPAD_UP, WXK_NUMPAD_DOWN,
+												 WXK_NUMPAD_HOME, WXK_NUMPAD_END, WXK_NUMPAD_PAGEUP, WXK_NUMPAD_PAGEDOWN};
+			auto key = event.GetKeyCode();
+			if ((event.CmdDown() && key == 'A') ||
+				(event.ShiftDown() && std::ranges::find(navigation_keys, key) != navigation_keys.end()))
+				select();
+			event.Skip();
+		});
 		Bind(wxEVT_CONTEXT_MENU, [this, can_copy_list = std::move(can_copy_list)](wxContextMenuEvent&) {
 			long start = 0;
 			long end = 0;
@@ -87,7 +106,9 @@ class InventoryField final : public wxTextCtrl {
 			PopupMenu(&menu);
 		});
 		Bind(wxEVT_MENU, [this](wxCommandEvent&) { Copy(); }, wxID_COPY);
-		Bind(wxEVT_MENU, [this](wxCommandEvent&) { SelectAll(); }, wxID_SELECTALL);
+		Bind(wxEVT_MENU, [this, select](wxCommandEvent&) {
+			select();
+			SelectAll(); }, wxID_SELECTALL);
 		Bind(wxEVT_MENU, [copy_list](wxCommandEvent&) { copy_list(true); }, copy_names_id);
 		Bind(wxEVT_MENU, [copy_list = std::move(copy_list)](wxCommandEvent&) { copy_list(false); }, copy_full_id);
 	}
@@ -827,6 +848,16 @@ struct DialogFontUsageInventory::Impl {
 		return status;
 	}
 
+	void ClearOtherSelections(InventoryField *selected) {
+		if (rendering) return;
+		retained_focus.reset();
+		for (auto const& row : rows) {
+			for (auto *field : {row.name, row.summary}) {
+				if (field != selected && field->HasSelection()) field->SelectNone();
+			}
+		}
+	}
+
 	[[nodiscard]] std::vector<FieldSelection> CaptureSelections() const {
 		std::vector<FieldSelection> selections;
 		for (auto const& row : rows) {
@@ -977,7 +1008,7 @@ struct DialogFontUsageInventory::Impl {
 				panel->SetName(wxS("Font usage row"));
 				panel->SetBackgroundColour(records->GetBackgroundColour());
 				auto make_field = [this, panel](wxString const& value, bool summary) {
-					auto *field = new InventoryField(panel, value, summary, [this] { return CanCopyList(); }, [this](bool names) { CopyList(names); });
+					auto *field = new InventoryField(panel, value, summary, [this] { return CanCopyList(); }, [this](bool names) { CopyList(names); }, [this](InventoryField *selected) { ClearOtherSelections(selected); });
 					field->SetFont(records->GetFont());
 					field->SetBackgroundColour(records->GetBackgroundColour());
 					field->Enable(CanCopyList());

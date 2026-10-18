@@ -228,7 +228,8 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         Drop(Path.Combine(runtime, "copy-multi.ass")); recursiveState = false;
         ExpectInteractionCopy(display + "\r\n" + CopyMissingFamily, "multiple-names-exact-CRLF", true);
         ExpectInteractionCopy(FullInteractionRecord(display, 1, "Low usage") + "\r\n" + FullInteractionRecord(CopyMissingFamily, 1, CopyMissingReasons), "multiple-full-exact-CRLF-and-reasons");
-        RequireFieldRows([(display, "1 use · Low usage"), (CopyMissingFamily, "1 use · Not found")]);
+        var selectionRows = RequireFieldRows([(display, "1 use · Low usage"), (CopyMissingFamily, "1 use · Not found")]);
+        MultiFieldSelectionInteraction(selectionRows);
         ReviewInteraction("multiple-full-records", "Two independent readonly name/status pairs; status fields right-aligned, known low-frequency blue, missing red; no selected text obscures colors");
         LongListWheelInteraction();
 
@@ -428,6 +429,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
 
     static string SummaryText(int count, string reasons) => count + (count == 1 ? " use" : " uses") + (reasons.Contains("Not found", StringComparison.Ordinal) ? " · Not found" : reasons.Contains("Missing glyphs", StringComparison.Ordinal) ? " · Missing glyphs" : reasons.Contains("Warning", StringComparison.Ordinal) ? " · Warning" : reasons.Contains("Low usage", StringComparison.Ordinal) ? " · Low usage" : "");
     (int Start, int End) CellSelection(nint field) { var packed = unchecked((uint)Send(field, 0xB0)); return ((int)(packed & 0xFFFF), (int)(packed >> 16)); }
+    bool HasCellSelection(nint field) { var selection = CellSelection(field); return selection.Start != selection.End; }
     void SetCellSelection(nint field, int start, int end)
     {
         Send(field, 0xB1, start, end);
@@ -465,13 +467,58 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         ReviewInteraction("native-fragment-and-list-scopes", "Actual readonly name and status fields; no row-selection or double-click mode");
     }
 
+    void MultiFieldSelectionInteraction(FieldRow[] rows)
+    {
+        phase = "interaction_V07_multiple_field_selection_exclusivity";
+        var first = rows[0]; var second = rows[1];
+        SetCellSelection(first.Name, 0, Math.Min(3, first.NameText.Length));
+        Send(second.Name, 0x201, 1, Native.Position(8, 8)); Send(second.Name, 0x202, 0, Native.Position(8, 8));
+        Check(!HasCellSelection(first.Name), "Selecting another row name collapses the prior name selection");
+        Check(Native.ThreadFocus(second.Name) == second.Name, "The newly selected row name owns native thread focus");
+
+        SetCellSelection(second.Name, 0, Math.Min(3, second.NameText.Length));
+        Send(second.Status, 0x201, 1, Native.Position(8, 8)); Send(second.Status, 0x202, 0, Native.Position(8, 8));
+        Check(!HasCellSelection(second.Name), "Selecting the same row status collapses its name selection");
+        Check(Native.ThreadFocus(second.Status) == second.Status, "The same-row status field owns native thread focus");
+
+        var statusStart = second.StatusText.IndexOf("use", StringComparison.Ordinal);
+        Check(statusStart >= 0, "The independent status fixture contains a selectable use fragment");
+        SetCellSelection(second.Status, statusStart, statusStart + 3);
+        Send(second.Name, 0x201, 1, Native.Position(8, 8)); Send(second.Name, 0x202, 0, Native.Position(8, 8));
+        SetCellSelection(second.Name, 0, Math.Min(3, second.NameText.Length));
+        Check(Native.ThreadFocus(second.Name) == second.Name && HasCellSelection(second.Name), "A name fragment is selected before invoking the status context menu");
+        Check(InvokeActualMenu(second.Status, "Select All"), "The actual nonfocused status field exposes Select All");
+        Check(CellSelection(second.Status) == (0, second.StatusText.Length), "Right-click Select All selects the nonfocused status field text");
+        Check(!HasCellSelection(first.Name) && !HasCellSelection(second.Name) && !HasCellSelection(first.Status),
+            "Right-click Select All clears the previously selected name field");
+
+        Send(second.Name, 0x201, 1, Native.Position(8, 8)); Send(second.Name, 0x202, 0, Native.Position(8, 8));
+        Check(!HasCellSelection(second.Status), "Selecting the name after status Select All clears the menu-selected status range");
+
+        Check(Native.ThreadFocus(second.Name) == second.Name, "The status Copy context action starts with focus in another field");
+        SetCellSelection(second.Status, statusStart, statusStart + 3);
+        Check(Native.ThreadFocus(second.Name) == second.Name, "Selecting the status fragment does not move focus from the name field");
+        var before = Native.GetClipboardSequenceNumber();
+        Check(InvokeActualMenu(second.Status, "Copy"), "The actual status context Copy action is enabled for its selection");
+        Wait(() => Native.GetClipboardSequenceNumber() != before, "The status context Copy action publishes its selected fragment");
+        Check(ClipboardText.ReadUnicodeText(Native.GetClipboardSequenceNumber(), app!.Id) == "use", "Right-click Copy publishes the selected field fragment only");
+        Check(CellSelection(second.Status) == (statusStart, statusStart + 3), "Right-click Copy preserves the selected status fragment");
+        Check(!HasCellSelection(first.Name) && !HasCellSelection(second.Name) && !HasCellSelection(first.Status),
+            "Right-click Copy leaves the selected fragment exclusive to its field");
+    }
+
     void SameTextRefreshInteraction(string display, int count, string reasons)
     {
         phase = "interaction_V08_same_text_watch_selection_focus_restoration";
         var row = RequireFieldRows([(display, SummaryText(count, reasons))]).Single();
         var start = display.IndexOf("GDI", StringComparison.Ordinal); if (start < 0) start = 1;
         var end = Math.Min(display.Length, start + 3);
+        var status = row.StatusText;
+        var statusStart = status.IndexOf("use", StringComparison.Ordinal);
+        Check(statusStart >= 0, "The same-text refresh status fixture contains a selectable use fragment");
+        SetCellSelection(row.Status, statusStart, statusStart + 3);
         Send(row.Name, 0x201, 1, Native.Position(8, 8)); Send(row.Name, 0x202, 0, Native.Position(8, 8));
+        Check(!HasCellSelection(row.Status), "Selecting the name before refresh clears the prior status selection");
         Check(Native.ThreadFocus(row.Name) == row.Name, "A background native click gives this real field thread-local focus without foreground input");
         SetCellSelection(row.Name, start, end);
         var originalIdentity = ReadContentIdentity(row.Name) ?? throw new InvalidOperationException("Same-text watch baseline field lost its live identity");
@@ -480,6 +527,7 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         FieldRow? refreshed = null;
         Wait(() => { refreshed = ReadFieldRows()?.SingleOrDefault(value => value.NameText == display && value.StatusText == SummaryText(count, reasons)); return refreshed is not null && ReadContentIdentity(refreshed.Name) is { Enabled: true } current && Native.IsWindowEnabled(refreshed.Status) && current != originalIdentity; }, "A real same-content watched write publishes different enabled public native fields with unchanged key/text");
         Check(CellSelection(refreshed!.Name) == (start, end), "The same-key same-text native field restores its exact character selection after watched refresh");
+        Check(!HasCellSelection(refreshed.Status), "Same-text refresh restores only the selected field, leaving its paired status field unselected");
         Check(Native.ThreadFocus(refreshed.Name) == refreshed.Name, "The replacement field restores the actual thread-local focus after watched refresh");
         Check(CopyField(refreshed.Name, "same-text-watch-restored-fragment") == display[start..end], "Restored selection copies the exact same native fragment after publication");
         Write("same-text-watch-focus-selection.json", new { phase, before_instance = originalIdentity, after_instance = ReadContentIdentity(refreshed.Name), start, end, expected_text = display, expected_fragment = display[start..end], foreground_or_real_keyboard_tested = false });

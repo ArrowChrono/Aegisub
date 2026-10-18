@@ -175,6 +175,7 @@ oracles remain; no new unit tests or merely message-presence checks were added.
 | `interaction_V04_native_fields_resize_selection_preserved` | Missing and resolved one-use cases at actual initial, +25%, narrow (65% but no smaller than native min) and restored widths. HWNDs, exact selection, full values and readonly state persist. Status `EM_GETLINECOUNT` is exactly 1. Full-list clipboard expectations do not change. Selected/unselected PNGs and actual bounds are separate manual right-alignment/color evidence. |
 | `interaction_V02_V03_three_five_and_thresholds` | Exact 3/5 uses through threshold 0, 5, 6; equality at 5 is not low frequency; six makes five low frequency. Native name/status values and full-list count/reasons match independent constants. |
 | `interaction_V07_native_fragment_and_list_copy_scopes` | In the dedicated-family variant, public `EM_SETSEL/EM_GETSEL` selects the proper substring `GDI`; native `WM_COPY` must return exactly `GDI`. Both whole-list context actions preserve that fragment selection and copy scope. Real name-field Select All/Copy returns only its full name. Collapsed selection leaves clipboard sequence unchanged; values/readonly remain unchanged. No whole-record copy can satisfy the fragment oracle. |
+| `interaction_V07_multiple_field_selection_exclusivity` | With two records, a native click into another row name or the same-row status clears the old field selection. The actual status `Select All` menu action starts while another field has focus and a nonempty name selection, then verifies the full status selection; selecting the name again clears that range. Status `Copy` must publish its selected fragment without collapsing it or leaving a selection in another field. |
 | `interaction_V07_multiple_records_exact_CRLF` | Two independent records produce exact names-only CRLF and exact full-list count/all-reasons CRLF. Native fields show compact highest-priority status, not the complete reasons. |
 | `interaction_V14_nested_native_Edit_mousewheel_scroll` | A dedicated 32-family absent-font input has an independently ordered names-list oracle. A standard local `WM_MOUSEWHEEL` delivered to the actual nested Edit moves the first row upward in its containing list without changing its text; before/after PNG/coordinates are saved. No global pointer input. |
 | `interaction_V08_same_text_watch_selection_focus_restoration` | Actual background native click establishes field focus (read through target-thread `GetGUIThreadInfo`); selection is set publicly. Writing identical saved ASS content causes watched publication with different enabled public field identities. Same key/full text restores exact selection and thread-local focus, and copies the same fragment. This is not physical-keyboard validation. |
@@ -249,13 +250,19 @@ publication wait to re-read the whole tree; no dead field becomes empty text or
 an omitted good group. Host exit, still-live HWND errors and other native errors
 continue to fail. These races are recorded; other failures propagate.
 
-Native field selection uses public Edit messages. It does not depend on global
-modifier state, foreground activation or SendInput. Name-field Select All/Copy
-menu behavior is covered; the status field runs the full-list action, not its own
-native Select All/Copy. **Physical Ctrl+A/C routing is not claimed**. Selected
-native character ranges are automatically checked with EM_GETSEL, not inferred
-from drag coordinates. The readonly style, full field values and one-line status
-are public native observations, not pixel-color assertions.
+Native field ranges use public Edit messages and native clicks for focus changes.
+The multiple-field case requires selection exclusivity across two record names
+and the paired status field, then invokes status-field `Select All` and `Copy`
+through its actual context menu while another field owns focus. The `Select All`
+case verifies that the old name selection is cleared; a later name click must
+clear the status range. The same-text
+refresh case starts with a status selection, changes focus to the name field, and
+requires the replacement pair to restore only the name selection and its focus.
+Copy must leave the selected status fragment intact. These checks do not depend on
+global modifier state, foreground activation or SendInput. **Physical Ctrl+A/C
+routing is not claimed**. Selected native ranges are checked with EM_GETSEL, not
+inferred from drag coordinates. The readonly style, full field values and
+one-line status are public native observations, not pixel-color assertions.
 
 Queued F5 is followed first by a bounded observation of actual content identity,
 value or enabled-state transition, with no popup opened to drain the queue.
