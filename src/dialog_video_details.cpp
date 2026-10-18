@@ -33,6 +33,7 @@
 #include "include/aegisub/context.h"
 #include "include/aegisub/context_ui.h"
 #include "project.h"
+#include "subtitle_fps_choice.h"
 
 #include <libaegisub/ass/time.h>
 #include <libaegisub/math_utils.h>
@@ -83,7 +84,7 @@ void ShowVideoDetailsDialog(agi::Context *c) {
 	make_field(_("File name:"), core.project->VideoName().wstring());
 	// Prefer rational form (e.g. 24000/1001) so NTSC film is not mistaken for
 	// the rounded decimal 23.976 used by some tools/providers.
-	make_field(_("FPS:"), to_wx(fps.FPSDescription()));
+	make_field(_("FPS:"), to_wx(FormatVideoFpsDescription(fps)));
 	make_field(_("Resolution:"), fmt_wx("%dx%d (%d:%d)", width, height, ar_width, ar_height));
 	make_field(_("Length:"), fmt_plural(framecount, "1 frame", "%d frames (%s)",
 		framecount, agi::Time(fps.TimeAtFrame(framecount - 1)).GetAssFormatted(true)));

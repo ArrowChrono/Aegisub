@@ -1,4 +1,5 @@
 #include "subtitle_fps_choice.h"
+#include "translation_service.h"
 
 #include <libaegisub/exception.h>
 #include <libaegisub/format.h>
@@ -6,34 +7,34 @@
 namespace {
 std::string BuildVideoChoiceLabel(agi::vfr::Framerate const& fps) {
 	return fps.IsVFR()
-		? "From video (VFR)"
-		: agi::format("From video (%g)", fps.FPS());
+			   ? _("From video (VFR)")
+			   : agi::format(_("From video (%g)").c_str(), fps.FPS());
 }
 
 std::vector<std::string> build_standard_fps_labels(bool show_smpte) {
 	std::vector<std::string> choices;
 	choices.reserve(show_smpte ? 12 : 11);
-	choices.push_back("15.000 FPS");
-	choices.push_back("23.976 FPS (Decimated NTSC)");
-	choices.push_back("24.000 FPS (FILM)");
-	choices.push_back("25.000 FPS (PAL)");
-	choices.push_back("29.970 FPS (NTSC)");
+	choices.push_back(_("15.000 FPS"));
+	choices.push_back(_("23.976 FPS (Decimated NTSC)"));
+	choices.push_back(_("24.000 FPS (FILM)"));
+	choices.push_back(_("25.000 FPS (PAL)"));
+	choices.push_back(_("29.970 FPS (NTSC)"));
 	if (show_smpte)
-		choices.push_back("29.970 FPS (NTSC with SMPTE dropframe)");
-	choices.push_back("30.000 FPS");
-	choices.push_back("50.000 FPS (PAL x2)");
-	choices.push_back("59.940 FPS (NTSC x2)");
-	choices.push_back("60.000 FPS");
-	choices.push_back("119.880 FPS (NTSC x4)");
-	choices.push_back("120.000 FPS");
+		choices.push_back(_("29.970 FPS (NTSC with SMPTE dropframe)"));
+	choices.push_back(_("30.000 FPS"));
+	choices.push_back(_("50.000 FPS (PAL x2)"));
+	choices.push_back(_("59.940 FPS (NTSC x2)"));
+	choices.push_back(_("60.000 FPS"));
+	choices.push_back(_("119.880 FPS (NTSC x4)"));
+	choices.push_back(_("120.000 FPS"));
 	return choices;
 }
 }
 
 agi::SingleChoiceInteractionRequest BuildSubtitleFpsChoiceRequest(SubtitleFpsChoiceModel const& model) {
 	agi::SingleChoiceInteractionRequest request;
-	request.title = "FPS";
-	request.message = "Please choose the appropriate FPS for the subtitles:";
+	request.title = _("FPS");
+	request.message = _("Please choose the appropriate FPS for the subtitles:");
 	request.choices = model.choices;
 	request.request_id = "subtitle_fps_choice.selection";
 	return request;
@@ -98,4 +99,10 @@ agi::vfr::Framerate ResolveSubtitleFpsChoiceSelection(SubtitleFpsChoiceModel con
 	}
 
 	throw agi::InternalError("Out of bounds FPS choice index.");
+}
+
+std::string FormatVideoFpsDescription(agi::vfr::Framerate const& fps) {
+	if (fps.IsVFR())
+		return agi::format(_("VFR, avg %.3f fps").c_str(), fps.FPS());
+	return fps.FPSDescription();
 }

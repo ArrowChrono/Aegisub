@@ -16,3 +16,5 @@ struct SubtitleFpsChoiceModel {
 agi::SingleChoiceInteractionRequest BuildSubtitleFpsChoiceRequest(SubtitleFpsChoiceModel const& model);
 SubtitleFpsChoiceModel BuildSubtitleFpsChoiceModel(bool allow_vfr, bool show_smpte, agi::vfr::Framerate const& fps);
 agi::vfr::Framerate ResolveSubtitleFpsChoiceSelection(SubtitleFpsChoiceModel const& model, int selection, agi::vfr::Framerate const& fps);
+
+std::string FormatVideoFpsDescription(agi::vfr::Framerate const& fps);
