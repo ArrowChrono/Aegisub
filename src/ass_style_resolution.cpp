@@ -1,6 +1,7 @@
 // Copyright (c) 2026
 
 #include "ass_style_resolution.h"
+#include "translation_service.h"
 
 #include "ass_compat.h"
 #include "ass_dialogue.h"
@@ -8,6 +9,7 @@
 #include "ass_style.h"
 
 #include <libaegisub/string_utils.h>
+#include <libaegisub/format.h>
 
 #include <algorithm>
 #include <map>
@@ -273,12 +275,12 @@ StyleCleanPlan BuildStyleCleanPlan(StyleResolutionGraph const& graph) {
 			if (record.index >= 0 && reset_counts[record.index] == 0) {
 				delete_set.insert(record.style);
 				if (record.same_as_winner)
-					plan.notes.push_back(record.raw_name + " duplicates " + graph.styles[record.group_winner].raw_name + " and will be merged.");
+					plan.notes.push_back(agi::format(_("%s duplicates %s and will be merged.").c_str(), record.raw_name, graph.styles[record.group_winner].raw_name));
 				else
-					plan.notes.push_back(record.raw_name + " is shadowed by " + graph.styles[record.group_winner].raw_name + " and will be removed.");
+					plan.notes.push_back(agi::format(_("%s is shadowed by %s and will be removed.").c_str(), record.raw_name, graph.styles[record.group_winner].raw_name));
 			}
 			else {
-				plan.notes.push_back(record.raw_name + " is shadowed but has strict reset-tag usage, so it will be kept.");
+				plan.notes.push_back(agi::format(_("%s is shadowed but has strict reset-tag usage, so it will be kept.").c_str(), record.raw_name));
 			}
 			continue;
 		}
@@ -286,7 +288,7 @@ StyleCleanPlan BuildStyleCleanPlan(StyleResolutionGraph const& graph) {
 		if (record.raw_name != record.canonical_name && can_canonicalize_definition(record.definition_key))
 			final_names[record.style] = record.canonical_name;
 		else if (record.has_default_case_confusion)
-			plan.notes.push_back(record.raw_name + " is a case-confusing Default-like definition and will be kept unchanged.");
+			plan.notes.push_back(agi::format(_("%s is a case-confusing Default-like definition and will be kept unchanged.").c_str(), record.raw_name));
 	}
 
 	for (auto const& item : final_names) {
@@ -339,50 +341,49 @@ std::string BuildStyleIssueTooltip(StyleResolutionGraph const& graph, int style_
 	std::ostringstream tooltip;
 
 	if (record.has_compatibility_prefix)
-		tooltip << "Compatibility prefix: '" << record.raw_name << "' resolves as '" << record.definition_key << "'.\n";
+		tooltip << agi::format(_("Compatibility prefix: '%s' resolves as '%s'.\n").c_str(), record.raw_name, record.definition_key);
 	if (record.has_default_case_confusion)
-		tooltip << "Default-like definition: Event Style lookup does not use this as 'Default'. Strict \\r" << record.definition_key << " may still use it.\n";
+		tooltip << agi::format(_("Default-like definition: Event Style lookup does not use this as 'Default'. Strict \\r%s may still use it.\n").c_str(), record.definition_key);
 	if (record.shadowed) {
 		auto const& winner = graph.styles[record.group_winner];
-		tooltip << "Shadowed by later style '" << winner.raw_name << "'. Clean will use '" << winner.definition_key << "' for Event Style rendering.\n";
+		tooltip << agi::format(_("Shadowed by later style '%s'. Clean will use '%s' for Event Style rendering.\n").c_str(), winner.raw_name, winner.definition_key);
 	}
 	else {
 		bool has_shadowed = std::any_of(graph.styles.begin(), graph.styles.end(),
 			[&](auto const& other) { return other.group_winner == style_index && other.shadowed; });
 		if (has_shadowed)
-			tooltip << "Renderer winner for Event Style key '" << record.definition_key << "'.\n";
+			tooltip << agi::format(_("Renderer winner for Event Style key '%s'.\n").c_str(), record.definition_key);
 	}
 
 	if (record.same_as_winner)
-		tooltip << "The shadowed style has the same content as the winner and can be merged.\n";
+		tooltip << _("The shadowed style has the same content as the winner and can be merged.\n");
 
 	return tooltip.str();
 }
 
 std::string BuildStyleCleanPreview(StyleCleanPlan const& plan) {
 	std::ostringstream text;
-	text << "Clean style conflicts and compatibility names?\n\n";
-	text << "Rename styles: " << plan.renames.size() << "\n";
+	text << _("Clean style conflicts and compatibility names?\n\n");
+	text << agi::format(_("Rename styles: %d\n").c_str(), plan.renames.size());
 	for (auto const& rename : plan.renames)
 		text << "  " << (rename.style ? rename.style->name : "") << " -> " << rename.new_name << "\n";
 
-	text << "Update dialogue style references: " << plan.event_updates.size() << "\n";
+	text << agi::format(_("Update dialogue style references: %d\n").c_str(), plan.event_updates.size());
 	std::map<UpdateGroupKey, std::vector<int>> update_groups;
 	for (auto const& update : plan.event_updates) {
 		update_groups[{update.old_name, update.new_name, update.resolved_style_name}].push_back(update.line_number);
 	}
 	for (auto const& group : update_groups) {
-		text << "  lines " << format_line_ranges(group.second) << ": "
-			<< group.first.old_name << " -> " << group.first.new_name;
+		text << agi::format(_("  lines %s: %s -> %s").c_str(), format_line_ranges(group.second), group.first.old_name, group.first.new_name);
 		if (!group.first.resolved_style_name.empty())
-			text << " (renderer style: " << group.first.resolved_style_name << ")";
+			text << agi::format(_(" (renderer style: %s)").c_str(), group.first.resolved_style_name);
 		text << "\n";
 	}
 
-	text << "Remove shadowed styles: " << plan.deletions.size() << "\n";
+	text << agi::format(_("Remove shadowed styles: %d\n").c_str(), plan.deletions.size());
 	for (auto const& note : plan.notes)
 		text << "  " << note << "\n";
-	text << "\nReset tags are not renamed automatically. They use strict \\rStyle lookup; Clean only uses them to avoid deleting styles that may still be referenced.\n";
+	text << _("\nReset tags are not renamed automatically. They use strict \\rStyle lookup; Clean only uses them to avoid deleting styles that may still be referenced.\n");
 
 	return text.str();
 }
