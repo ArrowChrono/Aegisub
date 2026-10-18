@@ -148,7 +148,7 @@ struct video_aspect_custom final : public validator_video_loaded {
 
 		auto parsed = aegisub::video_aspect_ratio_ops::ParseCustomAspectRatio(value);
 		if (!parsed)
-			c->ShowError(from_wx(_("Invalid value! Aspect ratio must be between 0.5 and 5.0.")), "Invalid Aspect Ratio");
+			c->ShowError(from_wx(_("Invalid value! Aspect ratio must be between 0.5 and 5.0.")), from_wx(_("Invalid Aspect Ratio")));
 		else {
 			core.videoController->SetAspectRatio(parsed.value);
 			c->GetUI().frame->SetDisplayMode(1,-1);
