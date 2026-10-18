@@ -28,6 +28,8 @@
 namespace discord_presence {
 namespace {
 
+constexpr char const *N_(char const *msgid) { return msgid; }
+
 namespace asio = boost::asio;
 using namespace std::chrono_literals;
 using Error = boost::system::error_code;
@@ -127,7 +129,7 @@ struct Client::Impl {
 	mutable std::mutex mutex;
 	Request desired;
 	bool update_queued = false;
-	std::string status = "Connecting to Discord";
+	std::string status = N_("Connecting to Discord");
 	asio::io_context io;
 	asio::executor_work_guard<asio::io_context::executor_type> work{io.get_executor()};
 	asio::steady_timer retry{io};
@@ -179,7 +181,7 @@ struct Client::Impl {
 		if (!current.application_id || !current.activity) {
 			retry.cancel();
 			publish.cancel();
-			SetStatus("Disconnected");
+			SetStatus(N_("Disconnected"));
 			return;
 		}
 		if (retired)
@@ -220,7 +222,7 @@ struct Client::Impl {
 		}
 		retry.cancel();
 		if (index == endpoints.size()) {
-			SetStatus("Waiting for Discord");
+			SetStatus(N_("Waiting for Discord"));
 			Retry();
 			return;
 		}
@@ -268,7 +270,7 @@ struct Client::Impl {
 	}
 
 	void Handshake(std::shared_ptr<Connection> const& source) {
-		SetStatus("Connecting to Discord");
+		SetStatus(N_("Connecting to Discord"));
 		json::Object handshake;
 		handshake["v"] = int64_t{1};
 		handshake["client_id"] = std::to_string(*current.application_id);
@@ -276,14 +278,14 @@ struct Client::Impl {
 		source->timeout.expires_after(5s);
 		source->timeout.async_wait([this, source](Error const& error) {
 			if (!error)
-				Failed(source, "Discord connection timed out");
+				Failed(source, N_("Discord connection timed out"));
 		});
 		Read(source);
 	}
 
 	void Send(std::shared_ptr<Connection> const& source, std::string packet) {
 		if (source->writes.size() >= 16) {
-			Failed(source, "Discord is not accepting updates");
+			Failed(source, N_("Discord is not accepting updates"));
 			return;
 		}
 		source->writes.push_back(std::move(packet));
@@ -295,13 +297,13 @@ struct Client::Impl {
 		source->write_timeout.expires_after(5s);
 		source->write_timeout.async_wait([this, source](Error const& error) {
 			if (!error)
-				Failed(source, "Discord update timed out");
+				Failed(source, N_("Discord update timed out"));
 		});
 		asio::async_write(source->stream, asio::buffer(source->writes.front()),
 						  [this, source](Error const& error, size_t) {
 							  source->write_timeout.cancel();
 							  if (error) {
-								  Failed(source, "Waiting for Discord");
+								  Failed(source, N_("Waiting for Discord"));
 								  return;
 							  }
 							  source->writes.pop_front();
@@ -318,13 +320,13 @@ struct Client::Impl {
 							 if (source != connection)
 								 return;
 							 if (error) {
-								 Failed(source, "Waiting for Discord");
+								 Failed(source, N_("Waiting for Discord"));
 								 return;
 							 }
 							 auto const opcode = ReadWord(source->header.data());
 							 auto const length = ReadWord(source->header.data() + 4);
 							 if (opcode > 4 || length > 64 * 1024) {
-								 Failed(source, "Invalid Discord response");
+								 Failed(source, N_("Invalid Discord response"));
 								 return;
 							 }
 							 source->body.resize(length);
@@ -333,7 +335,7 @@ struct Client::Impl {
 												  if (source != connection)
 													  return;
 												  if (body_error) {
-													  Failed(source, "Waiting for Discord");
+													  Failed(source, N_("Waiting for Discord"));
 													  return;
 												  }
 												  Receive(source, opcode);
@@ -351,11 +353,11 @@ struct Client::Impl {
 		if (opcode == 4)
 			return;
 		if (opcode == 2) {
-			Failed(source, "Discord closed the connection");
+			Failed(source, N_("Discord closed the connection"));
 			return;
 		}
 		if (opcode != 1) {
-			Failed(source, "Invalid Discord response");
+			Failed(source, N_("Invalid Discord response"));
 			return;
 		}
 		try {
@@ -365,7 +367,7 @@ struct Client::Impl {
 			auto const& response = static_cast<json::Object const&>(root);
 			auto const event = StringField(response, "evt");
 			if (event == "ERROR") {
-				Failed(source, "Discord rejected the activity or Application ID");
+				Failed(source, N_("Discord rejected the activity or Application ID"));
 				return;
 			}
 			if (event == "READY" && StringField(response, "cmd") == "DISPATCH") {
@@ -374,10 +376,10 @@ struct Client::Impl {
 				Publish();
 			}
 			else if (StringField(response, "cmd") == "SET_ACTIVITY")
-				SetStatus("Connected");
+				SetStatus(N_("Connected"));
 		}
 		catch (std::exception const&) {
-			Failed(source, "Invalid Discord response");
+			Failed(source, N_("Invalid Discord response"));
 		}
 	}
 

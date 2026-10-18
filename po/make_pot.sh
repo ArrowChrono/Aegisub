@@ -5,9 +5,9 @@ set -e
 
 maybe_append() {
   while read -r msg; do
-    msgfile=$(echo $msg | cut -d'|' -f1)
-    msgline=$(echo $msg | cut -d'|' -f2)
-    msgid=$(echo $msg | cut -d'|' -f3-)
+    msgfile=$(printf '%s\n' "$msg" | cut -d'|' -f1)
+    msgline=$(printf '%s\n' "$msg" | cut -d'|' -f2)
+    msgid=$(printf '%s\n' "$msg" | cut -d'|' -f3-)
 
     if ! grep -Fq "msgid $msgid" aegisub.pot; then
       printf "\n#: %s:%s\nmsgid %s\nmsgstr \"\"\n\n" \
@@ -19,7 +19,7 @@ maybe_append() {
 find ../src -name \*.cpp -o -name \*.h \
   | LC_ALL=C sort \
   | TZ=UTC xgettext --files-from=- -o - --c++ --from-code=UTF-8 \
-             -k_ -kSTR_MENU -kSTR_DISP -kSTR_HELP -kfmt_tl -kfmt_plural:2,3 -kwxT -kwxPLURAL:1,2 \
+             -k_ -k_n:1,2 -kN_ -kSTR_MENU -kSTR_DISP -kSTR_HELP -kCOMMAND_GROUP:5 -kfmt_tl -kfmt_plural:2,3 -kwxT -kwxTRANSLATE -kwxPLURAL:1,2 \
   | sed 's/SOME DESCRIPTIVE TITLE./Aegisub 3.3+/' \
   | sed 's/YEAR/2005-2020/' \
   | sed "s/THE PACKAGE'S COPYRIGHT HOLDER/Rodrigo Braz Monteiro, Niels Martin Hansen, Thomas Goyne et. al./" \

@@ -1556,7 +1556,7 @@ Interface_Hotkeys::Interface_Hotkeys(wxTreebook *book, Preferences *parent)
 	  // Seed tool contexts that may have no defaults yet so users can bind commands.
 	  ,
 	  model(new HotkeyDataViewModel(parent, {
-												"Visual Vector Clip",
+												wxTRANSLATE("Visual Vector Clip"),
 											})) {
 	quick_search = new wxSearchCtrl(this, -1);
 	auto new_button = new wxButton(this, -1, _("&New"));
