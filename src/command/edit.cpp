@@ -1882,6 +1882,41 @@ struct edit_line_split_by_karaoke final : public validate_sel_nonempty {
 	}
 };
 
+struct edit_line_split_by_whitespace final : public validate_sel_nonempty {
+	CMD_NAME("edit/line/split/by_whitespace")
+	STR_MENU("Split lines by whitespace")
+	STR_DISP("Split lines by whitespace")
+	STR_HELP("Split selected lines at spaces, tabs and other whitespace, preserving times")
+
+	void operator()(agi::Context *c) override {
+		auto core = c->GetCore();
+		auto const sel = core.selectionController->GetSortedSelection();
+		auto *active = core.selectionController->GetActiveLine();
+		Selection new_sel(sel.begin(), sel.end());
+		bool changed = false;
+		for (auto *line : sel) {
+			auto parts = aegisub::subtitle_edit_ops::SplitTextByWhitespace(line->Text.get());
+			if (parts.size() < 2) continue;
+
+			auto const insert_pos = std::next(core.ass->iterator_to(*line));
+			for (size_t i = 1; i < parts.size(); ++i) {
+				auto new_line = std::make_unique<AssDialogue>(*line);
+				SubtitleGridFolding::StripMarkers(*core.ass, *new_line);
+				new_line->Text = std::move(parts[i]);
+				new_sel.insert(new_line.get());
+				core.ass->Events.insert(insert_pos, *new_line);
+				new_line.release();
+			}
+			line->Text = std::move(parts.front());
+			changed = true;
+		}
+		if (!changed) return;
+
+		core.ass->Commit(from_wx(_("split lines by whitespace")), AssFile::COMMIT_DIAG_ADDREM | AssFile::COMMIT_DIAG_FULL);
+		core.selectionController->SetSelectionAndActive(std::move(new_sel), active);
+	}
+};
+
 void split_lines(agi::Context *c, AssDialogue *&n1, AssDialogue *&n2) {
 	auto core = c->GetCore();
 	int pos = core.textSelectionController->GetSelectionStart();
@@ -2097,6 +2132,7 @@ namespace cmd {
 		reg(agi::make_unique<edit_line_paste_over>());
 		reg(agi::make_unique<edit_line_recombine>());
 		reg(agi::make_unique<edit_line_split_by_karaoke>());
+		reg(agi::make_unique<edit_line_split_by_whitespace>());
 		reg(agi::make_unique<edit_line_split_estimate>());
 		reg(agi::make_unique<edit_line_split_preserve>());
 		reg(agi::make_unique<edit_line_split_video>());

@@ -6,6 +6,9 @@
 #include <libaegisub/character_count.h>
 #include <libaegisub/string_utils.h>
 
+#include <unicode/uchar.h>
+#include <unicode/utf8.h>
+
 #include <algorithm>
 #include <ranges>
 #include <string_view>
@@ -401,6 +404,25 @@ std::pair<std::string, std::string> SplitTextAtPosition(std::string const& text,
 		agi::util::strings::trim_utf8_right_copy(std::string_view(text).substr(0, split_pos)),
 		agi::util::strings::trim_utf8_left_copy(std::string_view(text).substr(split_pos))
 	};
+}
+
+std::vector<std::string> SplitTextByWhitespace(std::string_view text) {
+	std::vector<std::string> parts;
+	size_t start = 0;
+	size_t offset = 0;
+	while (offset < text.size()) {
+		auto const begin = offset;
+		UChar32 codepoint;
+		U8_NEXT(reinterpret_cast<uint8_t const *>(text.data()), offset, text.size(), codepoint);
+		if (u_isUWhiteSpace(codepoint) != 0) {
+			if (start < begin)
+				parts.emplace_back(text.substr(start, begin - start));
+			start = offset;
+		}
+	}
+	if (start < text.size())
+		parts.emplace_back(text.substr(start));
+	return parts;
 }
 
 std::optional<int> EstimateSplitTime(int start_ms, int end_ms, std::string const& first_text, std::string const& second_text) {

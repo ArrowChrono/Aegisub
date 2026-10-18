@@ -1509,6 +1509,18 @@ msgstr "使用卡拉OK计时把行分成多个更小的行"
 msgid "splitting"
 msgstr "分割"
 
+#: ../src/command/edit.cpp
+msgid "Split lines by whitespace"
+msgstr "按空白字符分割行"
+
+#: ../src/command/edit.cpp
+msgid "Split selected lines at spaces, tabs and other whitespace, preserving times"
+msgstr "按空格、制表符等空白字符分割所选行，保留原计时"
+
+#: ../src/command/edit.cpp
+msgid "split lines by whitespace"
+msgstr "按空白字符分割行"
+
 #: ../src/command/edit.cpp:1912 ../src/command/edit.cpp:1913
 #: ../src/subs_edit_ctrl.cpp:253 ../src/subs_edit_ctrl_stc.cpp:1543
 msgid "Split at cursor (estimate times)"

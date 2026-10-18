@@ -98,6 +98,7 @@ inline std::string_view CommandHelp(std::string_view name) {
 		{"edit/line/split/after", "Split the current line into a line which ends on the current frame and a line which starts on the next frame"},
 		{"edit/line/split/before", "Split the current line into a line which ends on the previous frame and a line which starts on the current frame"},
 		{"edit/line/split/by_karaoke", "Use karaoke timing to split line into multiple smaller lines"},
+		{"edit/line/split/by_whitespace", "Split selected lines at spaces, tabs and other whitespace, preserving times"},
 		{"edit/line/split/estimate", "Split the current line at the cursor, dividing the original line's duration between the new ones"},
 		{"edit/line/split/preserve", "Split the current line at the cursor, setting both lines to the original line's times"},
 		{"edit/line/split/video", "Split the current line at the cursor, dividing the line's duration at the current video frame"},

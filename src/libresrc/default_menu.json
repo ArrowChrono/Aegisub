@@ -8,6 +8,7 @@
         { "command" : "edit/line/duplicate" },
         { "command" : "edit/line/split/before" },
         { "command" : "edit/line/split/after" },
+        { "command" : "edit/line/split/by_whitespace" },
         {},
         { "submenu" : "grid/folding", "text" : "Fold Groups" },
         { "command" : "grid/swap" },
