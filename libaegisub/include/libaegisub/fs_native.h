@@ -19,6 +19,10 @@ struct FileInfo {
 	time_t modified_time = 0;
 };
 
+#ifdef _WIN32
+path NativePath(path const& path, std::error_code& ec);
+#endif
+
 bool TryGetFileInfo(path const& path, FileInfo& out, std::error_code& ec);
 void Rename(path const& from, path const& to, std::error_code& ec);
 }

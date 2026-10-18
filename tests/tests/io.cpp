@@ -190,3 +190,35 @@ TEST(lagi_io, save_cancel_removes_closed_temp_after_rename_failure) {
 	EXPECT_EQ("preserved", read_all(target / "marker"));
 	EXPECT_TRUE(list_matching(directory.path, "target_tmp_*.txt").empty());
 }
+
+#ifdef _WIN32
+TEST(lagi_io, save_close_publishes_long_windows_paths) {
+	auto const root = agi::fs::UniquePath("data/save-long-%%%%%%%%");
+	auto const native_root = std::filesystem::path(L"\\\\?\\" + std::filesystem::absolute(root).make_preferred().native());
+	auto cleanup = agi::make_scope_exit([&] { std::filesystem::remove_all(native_root); });
+	auto directory = root;
+	while (std::filesystem::absolute(directory).native().size() < 200)
+		directory /= std::string(32, 'd');
+	std::filesystem::create_directories(directory);
+	auto const absolute_directory = std::filesystem::absolute(directory).make_preferred();
+	for (size_t length : {259U, 260U, 300U}) {
+		SCOPED_TRACE(length);
+		auto const filename = std::string(length - absolute_directory.native().size() - 5, 'f') + ".ass";
+		auto const absolute_target = absolute_directory / filename;
+		ASSERT_EQ(length, absolute_target.native().size());
+		auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
+		std::ofstream(native_target, std::ios::binary) << "original";
+		ASSERT_EQ("original", read_all(native_target));
+
+		for (auto const& target : {directory / filename, absolute_target}) {
+			agi::io::Save save(target, true);
+			save.Get() << "replacement subtitle contents";
+			EXPECT_EQ("original", read_all(native_target));
+			ASSERT_NO_THROW(save.Close());
+			EXPECT_EQ("replacement subtitle contents", read_all(native_target));
+			EXPECT_TRUE(list_matching(directory, "*_tmp_*.ass").empty());
+			std::ofstream(native_target, std::ios::binary) << "original";
+		}
+	}
+}
+#endif

@@ -20,13 +20,13 @@
 
 #include <libaegisub/access.h>
 #include "libaegisub/fs.h"
+#include "libaegisub/fs_native.h"
 #include "libaegisub/log.h"
 #include "libaegisub/make_unique.h"
 #include "libaegisub/util.h"
 
 #include <filesystem>
 #include <fstream>
-#include <cstdlib>
 
 namespace agi {
 	namespace io {
@@ -35,16 +35,14 @@ namespace agi {
 	fs::path TemporaryPath(fs::path const& file) {
 		auto temporary = fs::UniquePath(file.parent_path() / fs::PathFromString(fs::PathToString(file.stem()) + "_tmp_%%%%%%%%" + fs::PathToString(file.extension())));
 #ifdef _WIN32
-		auto absolute = std::filesystem::absolute(temporary).lexically_normal();
-		absolute.make_preferred();
-		auto const& native = absolute.native();
-		if (native.size() >= _MAX_PATH && !native.starts_with(L"\\\\?\\") && !native.starts_with(L"\\\\.\\")) {
-			if (native.starts_with(L"\\\\"))
-				return fs::path(L"\\\\?\\UNC\\" + native.substr(2));
-			return fs::path(L"\\\\?\\" + native);
-		}
-#endif
+		std::error_code error;
+		auto native = fs::detail::NativePath(temporary, error);
+		if (error)
+			throw std::filesystem::filesystem_error("absolute", temporary, error);
+		return native;
+#else
 		return temporary;
+#endif
 	}
 	}
 

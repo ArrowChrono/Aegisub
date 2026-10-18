@@ -75,6 +75,23 @@ time_t FileTimeToUnixTime(FILETIME const& ft) {
 }
 
 namespace detail {
+path NativePath(path const& p, std::error_code& ec) {
+	ec.clear();
+	if (p.native().starts_with(L"\\\\?\\") || p.native().starts_with(L"\\\\.\\"))
+		return p;
+	auto absolute = std::filesystem::absolute(p, ec);
+	if (ec)
+		return {};
+	absolute = absolute.lexically_normal();
+	absolute.make_preferred();
+	auto const& native = absolute.native();
+	if (native.size() >= MAX_PATH) {
+		if (native.starts_with(L"\\\\"))
+			return path(L"\\\\?\\UNC\\" + native.substr(2));
+		return path(L"\\\\?\\" + native);
+	}
+	return p;
+}
 bool TryGetFileInfo(path const& p, FileInfo& out, std::error_code& ec) {
 	out = {};
 	ec.clear();
@@ -100,12 +117,18 @@ bool TryGetFileInfo(path const& p, FileInfo& out, std::error_code& ec) {
 }
 
 void Rename(path const& from, path const& to, std::error_code& ec) {
-	std::filesystem::rename(from, to, ec);
+	auto const native_from = NativePath(from, ec);
+	if (ec)
+		return;
+	auto const native_to = NativePath(to, ec);
+	if (ec)
+		return;
+	std::filesystem::rename(native_from, native_to, ec);
 	if (ec.value() != ERROR_ACCESS_DENIED)
 		return;
 
 	auto const legacy_error = ec;
-	auto const absolute_to = std::filesystem::absolute(to, ec);
+	auto const absolute_to = std::filesystem::absolute(native_to, ec);
 	if (ec)
 		return;
 	auto const& name = absolute_to.native();
@@ -122,7 +145,7 @@ void Rename(path const& from, path const& to, std::error_code& ec) {
 	info->FileNameLength = static_cast<DWORD>(name_bytes);
 	std::memcpy(info->FileName, name.data(), name_bytes);
 
-	auto raw = CreateFileW(from.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	auto raw = CreateFileW(native_from.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 						   nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
 	if (raw == INVALID_HANDLE_VALUE) {
 		ec.assign(GetLastError(), std::system_category());
