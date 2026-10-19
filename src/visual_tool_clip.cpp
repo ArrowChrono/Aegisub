@@ -224,9 +224,10 @@ void VisualToolClip::CommitHold() {
 
 	auto core = c->GetCore();
 	for (auto line : core.selectionController->GetSelectedSet()) {
-		// This check is technically not correct as it could be outside of an
-		// override block... but that's rather unlikely
-		bool has_iclip = line->Text.get().find("\\iclip") != std::string::npos;
+		Vector2D p1;
+		Vector2D p2;
+		bool has_iclip;
+		GetLineClip(line, p1, p2, has_iclip);
 		SetOverride(line, has_iclip ? "\\iclip" : "\\clip", value);
 	}
 }
