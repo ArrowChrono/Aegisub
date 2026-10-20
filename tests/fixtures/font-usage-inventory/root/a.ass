@@ -1,0 +1,21 @@
+[Script Info]
+Title: Font usage inventory count oracle A
+ScriptType: v4.00+
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Aegisub GDI Variant Fixture,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+Style: Bold,Aegisub GDI Variant Fixture,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+Style: Unused,Aegisub Inventory Unused Style,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,regular,0,0,0,,A{\b1}A{\b0\i1}A{\i0}A
+Dialogue: 3,0:00:01.00,0:00:02.00,Bold,same-time-bold,1,2,3,,A
+Dialogue: 9,0:00:01.00,0:00:02.00,Default,same-time-italic,4,5,6,,{\i1}A
+Dialogue: 0,0:00:01.00,0:00:02.40,Default,different-end,0,0,0,,A
+Comment: 0,0:00:09.00,0:00:10.00,Unused,comment,0,0,0,,A
+Dialogue: 0,0:00:11.00,0:00:12.00,Default,empty,0,0,0,,
+Dialogue: 0,0:00:13.00,0:00:14.00,Default,tags-only,0,0,0,,{\fnAegisub Inventory Unused Override\b1}
+Dialogue: 0,0:00:15.00,0:00:16.00,Default,drawing-only,0,0,0,,{\p1}m 0 0 l 10 0 10 10{\p0}
