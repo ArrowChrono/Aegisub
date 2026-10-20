@@ -15,6 +15,7 @@
 #include "../../src/audio_waveform_summary_cache.h"
 
 #include <libaegisub/audio/provider.h>
+#include <libaegisub/scope_exit.h>
 
 #include <algorithm>
 #include <atomic>
@@ -449,6 +450,11 @@ struct SequencedBlockingMonoProvider final : agi::AudioProvider {
 	int64_t StartAt(size_t index) const {
 		std::lock_guard<std::mutex> lock(mutex);
 		return starts.at(index);
+	}
+
+	std::vector<int64_t> ReadStarts() const {
+		std::scoped_lock lock(mutex);
+		return starts;
 	}
 
 	void ReleaseThrough(size_t count) const {
@@ -1145,32 +1151,50 @@ TEST(lagi_audio_display, waveform_summary_cache_visible_get_shares_inflight_pref
 
 TEST(lagi_audio_display, waveform_summary_cache_visible_miss_preempts_remaining_prefetch) {
 	ScopedTestDeadline deadline("waveform visible cross-block preemption");
-	BlockingSpectrumProvider provider;
+	SequencedBlockingMonoProvider provider;
 	auto source = CreateInt16MonoAudioDisplaySource(&provider);
+	std::promise<void> prefetch_finished;
+	auto finished = prefetch_finished.get_future();
 	AudioWaveformSummaryCache cache;
 	cache.SetSource(source.get());
 	cache.SetMillisecondsPerPixel(20.0);
+	cache.SetReadyCallback([&] { prefetch_finished.set_value(); });
+	std::future<AudioWaveformSummaryCache::BlockHandle> visible;
+	auto release = agi::make_scope_exit([&] { provider.ReleaseAll(); });
 
 	cache.Prefetch(0, 3);
-	ASSERT_TRUE(WaitForBlockingProvider(provider));
-	auto visible = std::async(std::launch::async, [&] { return cache.Get(3); });
-	if (!WaitForVisibleLockContention(cache)) {
-		provider.Release();
-		EXPECT_EQ(std::future_status::ready, visible.wait_for(std::chrono::seconds(2)));
-		FAIL() << "visible waveform miss did not register build-lock contention";
-	}
+	ASSERT_TRUE(provider.WaitForCalls(1));
+	visible = std::async(std::launch::async, [&] { return cache.Get(3); });
+	ASSERT_TRUE(WaitForVisibleLockContention(cache));
 	EXPECT_EQ(std::future_status::timeout, visible.wait_for(std::chrono::milliseconds(0)));
-	provider.Release();
+	provider.ReleaseThrough(1);
+	ASSERT_TRUE(provider.WaitForCalls(2));
+	const int64_t samples_per_block = AudioWaveformSummaryBlock::width * provider.GetSampleRate() / 50;
+	EXPECT_EQ((std::vector<int64_t>{0, 3 * samples_per_block}), provider.ReadStarts());
+	ASSERT_EQ(std::future_status::ready, finished.wait_for(std::chrono::seconds(2)));
+	EXPECT_EQ(std::future_status::timeout, visible.wait_for(std::chrono::milliseconds(0)));
+	EXPECT_TRUE(cache.GetIfReady(0));
+	EXPECT_FALSE(cache.GetIfReady(1));
+	EXPECT_FALSE(cache.GetIfReady(2));
+	EXPECT_FALSE(cache.GetIfReady(3));
+	auto const pending = cache.GetMetricsSnapshot();
+	EXPECT_EQ(1u, pending.prefetch_builds);
+	EXPECT_EQ(0u, pending.visible_builds);
+	EXPECT_EQ(1u, pending.prefetch_busy_skips);
+
+	provider.ReleaseAll();
 	ASSERT_EQ(std::future_status::ready, visible.wait_for(std::chrono::seconds(2)));
 	EXPECT_TRUE(visible.get());
-	EXPECT_EQ(2, provider.fill_calls.load());
+	EXPECT_EQ((std::vector<int64_t>{0, 3 * samples_per_block}), provider.ReadStarts());
+	EXPECT_TRUE(cache.GetIfReady(0));
+	EXPECT_TRUE(cache.GetIfReady(3));
 	EXPECT_FALSE(cache.GetIfReady(1));
+	EXPECT_FALSE(cache.GetIfReady(2));
 	auto const metrics = cache.GetMetricsSnapshot();
 	EXPECT_EQ(1u, metrics.prefetch_builds);
 	EXPECT_EQ(1u, metrics.visible_builds);
-	EXPECT_GE(metrics.prefetch_busy_skips, 1u);
+	EXPECT_EQ(1u, metrics.prefetch_busy_skips);
 }
-
 TEST(lagi_audio_display, waveform_summary_cache_visible_miss_preempts_current_extreme_zoom_block) {
 	ScopedTestDeadline deadline("waveform extreme-zoom current-block preemption");
 	SequencedBlockingMonoProvider provider;
@@ -1779,33 +1803,50 @@ TEST(lagi_audio_display, spectrum_analysis_cache_visible_get_shares_inflight_pre
 
 TEST(lagi_audio_display, spectrum_analysis_cache_visible_miss_preempts_remaining_prefetch_batch) {
 	ScopedTestDeadline deadline("spectrum visible cross-block preemption");
-	BlockingSpectrumProvider provider;
+	SequencedBlockingMonoProvider provider;
 	auto source = CreateAudioDisplaySource(&provider);
+	std::promise<void> prefetch_finished;
+	auto finished = prefetch_finished.get_future();
 	AudioSpectrumAnalysisCache cache;
 	cache.SetSource(source.get());
 	cache.SetMixPolicy(AudioMixPolicy::MonoAverage);
 	cache.SetResolution(9, 7);
+	cache.SetReadyCallback([&] { prefetch_finished.set_value(); });
+	std::future<AudioSpectrumAnalysisCache::BlockHandle> visible;
+	auto release = agi::make_scope_exit([&] { provider.ReleaseAll(); });
 
-	cache.Prefetch(0, 3);
-	ASSERT_TRUE(WaitForBlockingProvider(provider));
-	auto visible = std::async(std::launch::async, [&] { return cache.Get(3); });
-	if (!WaitForVisibleLockContention(cache)) {
-		provider.Release();
-		EXPECT_EQ(std::future_status::ready, visible.wait_for(std::chrono::seconds(2)));
-		FAIL() << "visible spectrum miss did not register build-lock contention";
-	}
+	cache.Prefetch(10, 13);
+	ASSERT_TRUE(provider.WaitForCalls(1));
+	visible = std::async(std::launch::async, [&] { return cache.Get(13); });
+	ASSERT_TRUE(WaitForVisibleLockContention(cache));
 	EXPECT_EQ(std::future_status::timeout, visible.wait_for(std::chrono::milliseconds(0)));
-	provider.Release();
+	provider.ReleaseThrough(1);
+	ASSERT_TRUE(provider.WaitForCalls(2));
+	EXPECT_EQ((std::vector<int64_t>{768, 1152}), provider.ReadStarts());
+	ASSERT_EQ(std::future_status::ready, finished.wait_for(std::chrono::seconds(2)));
+	EXPECT_EQ(std::future_status::timeout, visible.wait_for(std::chrono::milliseconds(0)));
+	EXPECT_NE(nullptr, cache.GetIfReady(10));
+	EXPECT_EQ(nullptr, cache.GetIfReady(11));
+	EXPECT_EQ(nullptr, cache.GetIfReady(12));
+	EXPECT_EQ(nullptr, cache.GetIfReady(13));
+	auto const pending = cache.GetMetricsSnapshot();
+	EXPECT_EQ(1u, pending.prefetch_builds);
+	EXPECT_EQ(0u, pending.visible_builds);
+	EXPECT_EQ(1u, pending.prefetch_busy_skips);
+
+	provider.ReleaseAll();
 	ASSERT_EQ(std::future_status::ready, visible.wait_for(std::chrono::seconds(2)));
 	EXPECT_NE(nullptr, visible.get());
-	EXPECT_EQ(2, provider.fill_calls.load());
-	EXPECT_EQ(nullptr, cache.GetIfReady(1));
+	EXPECT_EQ((std::vector<int64_t>{768, 1152}), provider.ReadStarts());
+	EXPECT_NE(nullptr, cache.GetIfReady(10));
+	EXPECT_NE(nullptr, cache.GetIfReady(13));
+	EXPECT_EQ(nullptr, cache.GetIfReady(11));
+	EXPECT_EQ(nullptr, cache.GetIfReady(12));
 	auto const metrics = cache.GetMetricsSnapshot();
 	EXPECT_EQ(1u, metrics.prefetch_builds);
 	EXPECT_EQ(1u, metrics.visible_builds);
-	EXPECT_GE(metrics.prefetch_busy_skips, 1u);
+	EXPECT_EQ(1u, metrics.prefetch_busy_skips);
 }
-
 TEST(lagi_audio_display, spectrum_analysis_cache_latest_range_drops_obsolete_result) {
 	ScopedTestDeadline deadline("spectrum latest-range cancellation");
 	BlockingSpectrumProvider provider;
