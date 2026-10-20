@@ -71,10 +71,29 @@ public:
 	}
 };
 
+class RecordingFontListerProxy final : public IFontFileLister {
+	IFontFileLister& inner;
+
+	public:
+	std::vector<std::vector<uint32_t>> character_requests;
+
+	explicit RecordingFontListerProxy(IFontFileLister& inner) : inner(inner) {}
+
+	FontFileListerMatchKey GetMatchKey(aegisub::ass::AssFontRequest const& request) const override {
+		return inner.GetMatchKey(request);
+	}
+	CollectionResult GetFontPaths(std::string const& family, int bold, bool italic, std::vector<uint32_t> const& characters) override {
+		return inner.GetFontPaths(family, bold, italic, characters);
+	}
+	CollectionResult GetFontPaths(aegisub::ass::AssFontRequest const& request, std::vector<uint32_t> const& characters) override {
+		character_requests.push_back(characters);
+		return inner.GetFontPaths(request, characters);
+	}
+};
+
 class TestLibassProvider final : public ILibassFontProvider {
 public:
 	std::vector<LibassFontFace> faces;
-	mutable int face_requests = 0;
 
 	TestLibassProvider() {
 		LibassFontFace regular;
@@ -92,7 +111,6 @@ public:
 	}
 
 	std::span<LibassFontFace const> GetLibassFaces() const override {
-		++face_requests;
 		return faces;
 	}
 	bool HasLibassGlyph(size_t, uint32_t) const override { return true; }
@@ -265,14 +283,14 @@ TEST(font_collector_state, libass_equivalent_raw_weights_share_one_physical_matc
 	AddLine(file, "Default", "{\\b-1}A{\\b1}B");
 
 	FontCollectorEventSink sink;
-	auto provider = std::make_unique<TestLibassProvider>();
-	auto *provider_ptr = provider.get();
-	LibassFontFileLister lister(sink, std::move(provider));
+	LibassFontFileLister backend(sink, std::make_unique<TestLibassProvider>());
+	RecordingFontListerProxy lister(backend);
 	FontCollectorDetails details;
 	FontCollector collector(FontCollectorEventSink{}, lister);
 	collector.GetFontPaths(&file, &details);
 
-	EXPECT_EQ(1, provider_ptr->face_requests);
+	ASSERT_EQ(1u, lister.character_requests.size());
+	EXPECT_EQ((std::vector<uint32_t>{'A', 'B'}), lister.character_requests.front());
 	ASSERT_EQ(2u, details.fonts.size());
 	for (auto const& usage : details.fonts) {
 		ASSERT_TRUE(usage.matched.backend_requested_weight.has_value());
@@ -286,14 +304,15 @@ TEST(font_collector_state, libass_semantically_distinct_raw_weights_do_not_merge
 	AddLine(file, "Default", "{\\b-1}A{\\b2}B");
 
 	FontCollectorEventSink sink;
-	auto provider = std::make_unique<TestLibassProvider>();
-	auto *provider_ptr = provider.get();
-	LibassFontFileLister lister(sink, std::move(provider));
+	LibassFontFileLister backend(sink, std::make_unique<TestLibassProvider>());
+	RecordingFontListerProxy lister(backend);
 	FontCollectorDetails details;
 	FontCollector collector(FontCollectorEventSink{}, lister);
 	collector.GetFontPaths(&file, &details);
 
-	EXPECT_EQ(2, provider_ptr->face_requests);
+	ASSERT_EQ(2u, lister.character_requests.size());
+	std::ranges::sort(lister.character_requests);
+	EXPECT_EQ((std::vector<std::vector<uint32_t>>{{'A'}, {'B'}}), lister.character_requests);
 	ASSERT_EQ(2u, details.fonts.size());
 	auto minus_one = std::find_if(details.fonts.begin(), details.fonts.end(),
 		[](auto const& usage) { return usage.ass_raw_bold_tag == "-1"; });
