@@ -539,6 +539,8 @@ if(WIN32)
     )
     target_compile_definitions(video-presenter-d3d11-smoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_compile_features(video-presenter-d3d11-smoke PRIVATE cxx_std_20)
+    find_path(OPENGL_REGISTRY_INCLUDE_DIR NAMES GL/glext.h REQUIRED)
+    target_include_directories(video-presenter-d3d11-smoke PRIVATE "${OPENGL_REGISTRY_INCLUDE_DIR}")
     target_link_libraries(video-presenter-d3d11-smoke PRIVATE OpenGL::GL d3d11 dxgi)
 
     add_executable(scene-cache-subtitle-commit-smoke EXCLUDE_FROM_ALL
