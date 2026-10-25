@@ -249,6 +249,7 @@ if(GTEST_FOUND)
         src/video_session_core_ops.cpp
         src/video_session_ops.cpp
         src/video_snapshot_ops.cpp
+        src/thesaurus.cpp
         src/subtitle_timing_ops.cpp
         src/selection_anchor.cpp
         src/selection_navigation_history.cpp
@@ -374,6 +375,7 @@ if(GTEST_FOUND)
         tests/tests/subtitle_match_report.cpp
         tests/tests/syntax_highlight.cpp
         tests/tests/thesaurus.cpp
+        tests/tests/thesaurus_loader.cpp
         tests/tests/time.cpp
         tests/tests/track_choice.cpp
         tests/tests/type_name.cpp

@@ -85,6 +85,8 @@ static bool check_path(agi::fs::path const& path, std::string const& language, a
 }
 
 void Thesaurus::OnLanguageChanged() {
+	if (cancel_load)
+		cancel_load->store(true, std::memory_order_relaxed);
 	impl.reset();
 
 	auto language = OPT_GET("Tool/Thesaurus/Language")->GetString();
@@ -101,8 +103,6 @@ void Thesaurus::OnLanguageChanged() {
 
 	LOG_I("thesaurus/file") << "Using thesaurus: " << agi::fs::PathToString(dat);
 
-	if (cancel_load)
-		cancel_load->store(true, std::memory_order_relaxed);
 	cancel_load = std::make_shared<std::atomic_bool>(false);
 	auto cancel = cancel_load;
 	auto lifetime = GetAsyncUiLifetime();
