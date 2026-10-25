@@ -163,8 +163,12 @@ std::string serialise_control_value(Automation4::AutomationDialogValue const& va
 		using T = std::decay_t<decltype(data)>;
 		if constexpr (std::is_same_v<T, AutomationDialogLabel>)
 			return {};
-		else if constexpr (std::is_same_v<T, AutomationDialogEdit> || std::is_same_v<T, AutomationDialogDropdown>)
-			return inline_string_encode(data.value);
+		else if constexpr (std::is_same_v<T, AutomationDialogEdit> || std::is_same_v<T, AutomationDialogDropdown>) {
+			auto const tail = std::find_if_not(data.value.rbegin(), data.value.rend(), agi::util::strings::is_space).base();
+			auto encoded_tail = inline_string_encode(std::string(tail, data.value.end()));
+			agi::util::strings::replace_all_inplace(encoded_tail, " ", "#20");
+			return inline_string_encode(std::string(data.value.begin(), tail)) + encoded_tail;
+		}
 		else if constexpr (std::is_same_v<T, AutomationDialogColor>)
 			return inline_string_encode(data.value.GetHexFormatted(data.alpha));
 		else if constexpr (std::is_same_v<T, AutomationDialogCheckbox>)

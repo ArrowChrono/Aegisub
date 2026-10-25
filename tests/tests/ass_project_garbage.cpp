@@ -12,6 +12,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -46,6 +49,7 @@ void ExpectPersistedProjectProperties(ProjectProperties const& properties) {
 	EXPECT_EQ("media/timecodes.txt", properties.timecodes_file);
 	EXPECT_EQ("media/keyframes.txt", properties.keyframes_file);
 	EXPECT_EQ("secondary.ass", properties.secondary_subtitles_file);
+	EXPECT_EQ((std::map<std::string, std::string>{{"filter", "enabled"}}), properties.automation_settings);
 	EXPECT_DOUBLE_EQ(0.75, properties.video_zoom);
 	EXPECT_DOUBLE_EQ(1.5, properties.ar_value);
 	EXPECT_EQ(12, properties.scroll_position);
@@ -121,6 +125,163 @@ TEST_P(ass_project_garbage_snapshot, save_round_trips_project_properties) {
 
 INSTANTIATE_TEST_SUITE_P(with_and_without_extradata, ass_project_garbage_snapshot, testing::Bool());
 
+TEST(ass_project_garbage, parses_literal_automation_settings_from_both_sections) {
+	AssFile file;
+	AssParser parser(&file, 1);
+	parser.AddLine("[Script Info]");
+	parser.AddLine("Automation Settings Legacy: old:kept");
+	parser.AddLine("Automation Settings Repeat: value:first");
+	parser.AddLine("Automation Settings Empty: ");
+	parser.AddLine("[Aegisub Project Garbage]");
+	parser.AddLine("Automation Settings Repeat: value:second");
+	parser.AddLine("Automation Settings  Leading: text:identity");
+	parser.AddLine("Automation Settings Unknown#3A#7C#23#2C: text:a#3Ab#7Cc#23d#2Ce|tail:#20");
+	parser.AddLine("Automation Settings 字幕: text:雪");
+	parser.AddLine("[Script Info]");
+	parser.AddLine("Automation Settings Repeat: value:last");
+
+	std::map<std::string, std::string> const expected{
+		{" Leading", "text:identity"},
+		{"Empty", ""},
+		{"Legacy", "old:kept"},
+		{"Repeat", "value:last"},
+		{"Unknown#3A#7C#23#2C", "text:a#3Ab#7Cc#23d#2Ce|tail:#20"},
+		{"字幕", "text:雪"}};
+	EXPECT_EQ(expected, file.Properties.automation_settings);
+	EXPECT_TRUE(file.Info.empty());
+}
+
+TEST(ass_project_garbage, reads_literal_automation_settings_with_existing_line_trimming) {
+	auto const path = agi::fs::UniquePath(
+		std::filesystem::temp_directory_path() / "aegisub-literal-settings-%%%%%%%%.ass");
+	auto cleanup = agi::make_scope_exit([&] {
+		std::error_code error;
+		std::filesystem::remove(path, error);
+	});
+	{
+		std::ofstream output(path, std::ios::binary);
+		ASSERT_TRUE(output.is_open());
+		output << "[Script Info]\nScriptType: v4.00+\n"
+			   << "Automation Settings Legacy: text:old\n"
+			   << "[Aegisub Project Garbage]\n"
+			   << "Automation Settings Legacy: text:replacement\n"
+			   << "Automation Settings  Leading: text:name\n"
+			   << "Automation Settings Empty: \n"
+			   << "Automation Settings Unknown: text:雪#3A#7C#23#2C#20#20\n"
+			   << "Automation Settings Raw:   text:trimmed  \t\n"
+			   << "[Events]\n"
+			   << "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,literal subtitle\n";
+		output.close();
+		ASSERT_TRUE(output);
+	}
+
+	AssFile reopened = ReadAssFileForCore(path, "UTF-8");
+	std::map<std::string, std::string> const expected{
+		{" Leading", "text:name"},
+		{"Empty", ""},
+		{"Legacy", "text:replacement"},
+		{"Raw", "text:trimmed"},
+		{"Unknown", "text:雪#3A#7C#23#2C#20#20"}};
+	EXPECT_EQ(expected, reopened.Properties.automation_settings);
+	ASSERT_EQ(1U, reopened.Events.size());
+	EXPECT_EQ("literal subtitle", reopened.Events.front().Text.get());
+}
+
+class ass_automation_settings_save : public testing::TestWithParam<bool> {};
+
+TEST_P(ass_automation_settings_save, writes_literal_settings_independently_of_ui_state) {
+	AssFile file;
+	file.LoadDefault();
+	file.Properties.automation_settings = {
+		{"Unknown#3A#7C#23#2C", "text:雪#3A#7C#23#2C#20"},
+		{"Empty", ""},
+		{" Leading", "text:name"}};
+	file.Properties.video_position = 123;
+	auto const path = agi::fs::UniquePath(
+		std::filesystem::temp_directory_path() / "aegisub-settings-writer-%%%%%%%%.ass");
+	auto cleanup = agi::make_scope_exit([&] {
+		std::error_code error;
+		std::filesystem::remove(path, error);
+	});
+	AssWriteOptions options;
+	options.write_project_garbage = true;
+	options.write_ui_state = GetParam();
+	WriteAssFileForCore(&file, path, agi::vfr::Framerate(), "UTF-8", options);
+
+	std::ifstream input(path, std::ios::binary);
+	ASSERT_TRUE(input.is_open());
+	std::vector<std::string> actual;
+	bool wrote_video_position = false;
+	for (std::string line; std::getline(input, line);) {
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		if (line.starts_with("Automation Settings ")) actual.push_back(line);
+		if (line == "Video Position: 123") wrote_video_position = true;
+	}
+	std::vector<std::string> const expected{
+		"Automation Settings  Leading: text:name",
+		"Automation Settings Empty: ",
+		"Automation Settings Unknown#3A#7C#23#2C: text:雪#3A#7C#23#2C#20"};
+	EXPECT_EQ(expected, actual);
+	EXPECT_EQ(GetParam(), wrote_video_position);
+}
+
+TEST_P(ass_automation_settings_save, reopens_settings_into_a_fresh_assfile) {
+	auto const path = agi::fs::UniquePath(
+		std::filesystem::temp_directory_path() / "aegisub-settings-reopen-%%%%%%%%.ass");
+	auto cleanup = agi::make_scope_exit([&] {
+		std::error_code error;
+		std::filesystem::remove(path, error);
+	});
+	{
+		AssFile original;
+		original.LoadDefault();
+		original.Events.front().Text = "saved project subtitle";
+		original.Properties.automation_settings = {
+			{"Unknown#3A#7C#23#2C", "text:雪#3A#7C#23#2C#20#20"},
+			{"Empty", ""},
+			{" Leading", "text:identity"}};
+		AssFile snapshot(original);
+		AssWriteOptions options;
+		options.write_project_garbage = true;
+		options.write_ui_state = GetParam();
+		WriteAssFileForCore(&snapshot, path, agi::vfr::Framerate(), "UTF-8", options);
+	}
+
+	AssFile reopened;
+	ReadAssFileForCore(&reopened, path, "UTF-8");
+	std::map<std::string, std::string> const expected{
+		{" Leading", "text:identity"},
+		{"Empty", ""},
+		{"Unknown#3A#7C#23#2C", "text:雪#3A#7C#23#2C#20#20"}};
+	EXPECT_EQ(expected, reopened.Properties.automation_settings);
+	ASSERT_EQ(1U, reopened.Events.size());
+	EXPECT_EQ("saved project subtitle", reopened.Events.front().Text.get());
+}
+
+TEST_P(ass_automation_settings_save, omits_settings_when_project_metadata_is_disabled) {
+	AssFile file;
+	file.LoadDefault();
+	file.Properties.automation_settings = {{"Filter", "text:not exported"}};
+	auto const path = agi::fs::UniquePath(
+		std::filesystem::temp_directory_path() / "aegisub-settings-excluded-%%%%%%%%.ass");
+	auto cleanup = agi::make_scope_exit([&] {
+		std::error_code error;
+		std::filesystem::remove(path, error);
+	});
+	AssWriteOptions options;
+	options.write_ui_state = GetParam();
+	WriteAssFileForCore(&file, path, agi::vfr::Framerate(), "UTF-8", options);
+
+	std::ifstream input(path, std::ios::binary);
+	ASSERT_TRUE(input.is_open());
+	std::string const text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+	EXPECT_EQ(std::string::npos, text.find("[Aegisub Project Garbage]"));
+	EXPECT_EQ(std::string::npos, text.find("Automation Settings "));
+	EXPECT_EQ(std::string::npos, text.find("text:not exported"));
+}
+
+INSTANTIATE_TEST_SUITE_P(with_and_without_ui_state, ass_automation_settings_save, testing::Bool());
+
 TEST(ass_project_garbage, export_snapshot_omits_project_garbage) {
 	AssFile original;
 	original.LoadDefault();
@@ -141,6 +302,7 @@ TEST(ass_project_garbage, export_snapshot_omits_project_garbage) {
 	std::string const text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 	EXPECT_EQ(std::string::npos, text.find("[Aegisub Project Garbage]"));
 	EXPECT_EQ(std::string::npos, text.find("media/video.mkv"));
+	EXPECT_EQ(std::string::npos, text.find("Automation Settings "));
 	EXPECT_NE(std::string::npos, text.find("exported subtitle"));
 }
 

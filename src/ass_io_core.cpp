@@ -112,6 +112,11 @@ struct Writer {
 		WriteIfNotEmpty("Automation Scripts: ", properties.automation_scripts);
 		WriteIfNotEmpty("Export Filters: ", properties.export_filters);
 		WriteIfNotEmpty("Export Encoding: ", properties.export_encoding);
+		for (auto const& [name, settings] : properties.automation_settings) {
+			std::string line = "Automation Settings ";
+			line.append(name).append(": ").append(settings);
+			file.WriteLineToFile(line);
+		}
 		WriteIfNotEmpty("Last Style Storage: ", properties.style_storage);
 		WriteIfNotEmpty("Audio File: ", properties.audio_file);
 		WriteIfNotEmpty("Video File: ", properties.video_file);

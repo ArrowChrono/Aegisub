@@ -92,6 +92,7 @@ if(GTEST_FOUND)
         tests/tests/ass_file_extradata.cpp
         tests/tests/ass_file_sort.cpp
         tests/tests/ass_project_garbage.cpp
+        tests/tests/lua_dialog_serialization.cpp
         tests/tests/ass_style_resolution.cpp
         tests/tests/ass_style_parse.cpp
         tests/tests/audio.cpp

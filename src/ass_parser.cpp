@@ -121,7 +121,7 @@ public:
 		}
 
 		if (agi::util::strings::starts_with(key, "Automation Settings ")) {
-			target->Properties.automation_settings[key.substr(strlen("Automation Settings"))] = value;
+			target->Properties.automation_settings[key.substr(strlen("Automation Settings "))] = value;
 			return true;
 		}
 
