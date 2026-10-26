@@ -17,6 +17,7 @@
 #include "libaegisub/file_mapping.h"
 
 #include "libaegisub/fs.h"
+#include "libaegisub/fs_native.h"
 #include "libaegisub/make_unique.h"
 #include "libaegisub/util.h"
 
@@ -76,22 +77,29 @@ char *map(int64_t s_offset, uint64_t length, boost::interprocess::mode_t mode,
 namespace agi {
 file_mapping::file_mapping(fs::path const& filename, bool temporary)
 #ifdef _WIN32
-: handle(CreateFileW(filename.wstring().c_str(),
-	temporary ? read_write : read_only,
-	temporary ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : FILE_SHARE_READ,
-	nullptr,
-	temporary ? OPEN_ALWAYS : OPEN_EXISTING,
-	temporary ? FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE : 0, 0))
-{
+	: handle(ipcdetail::invalid_file()) {
+	if (filename.empty())
+		throw fs::FileNotFound(filename);
+	std::error_code ec;
+	auto const native = fs::detail::NativePath(filename, ec);
+	if (ec)
+		throw fs::FileSystemUnknownError(ec.message());
+	handle = CreateFileW(native.c_str(),
+						 temporary ? read_write : read_only,
+						 temporary ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : FILE_SHARE_READ,
+						 nullptr,
+						 temporary ? OPEN_ALWAYS : OPEN_EXISTING,
+						 temporary ? FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE : 0, 0);
 	if (handle == ipcdetail::invalid_file()) {
-		switch (GetLastError()) {
-		case ERROR_FILE_NOT_FOUND:
-		case ERROR_PATH_NOT_FOUND:
-			throw fs::FileNotFound(filename);
-		case ERROR_ACCESS_DENIED:
-			throw fs::ReadDenied(filename);
-		default:
-			throw fs::FileSystemUnknownError(util::ErrorString(GetLastError()));
+		auto const error = GetLastError();
+		switch (error) {
+			case ERROR_FILE_NOT_FOUND:
+			case ERROR_PATH_NOT_FOUND:
+				throw fs::FileNotFound(filename);
+			case ERROR_ACCESS_DENIED:
+				throw fs::ReadDenied(filename);
+			default:
+				throw fs::FileSystemUnknownError(util::ErrorString(error));
 		}
 	}
 #else

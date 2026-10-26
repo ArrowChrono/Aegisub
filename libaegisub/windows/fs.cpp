@@ -201,17 +201,28 @@ void Touch(path const& file) {
 
 void Copy(fs::path const& from, fs::path const& to) {
 	acs::CheckFileRead(from);
-	CreateDirectory(to.parent_path());
-	acs::CheckDirWrite(to.parent_path());
-
-	if (!CopyFile(from.wstring().c_str(), to.wstring().c_str(), false)) {
-		switch (GetLastError()) {
-		case ERROR_FILE_NOT_FOUND:
-			throw FileNotFound(from);
-		case ERROR_ACCESS_DENIED:
-			throw fs::WriteDenied("Could not overwrite " + PathToString(to));
-		default:
-			throw fs::WriteDenied("Could not copy: " + util::ErrorString(GetLastError()));
+	std::error_code ec;
+	auto const parent = to.parent_path();
+	auto const native_parent = parent.empty() ? parent : detail::NativePath(parent, ec);
+	if (ec)
+		throw fs::WriteDenied("Could not copy: " + ec.message());
+	CreateDirectory(native_parent);
+	acs::CheckDirWrite(parent);
+	auto const native_from = detail::NativePath(from, ec);
+	if (ec)
+		throw fs::WriteDenied("Could not copy: " + ec.message());
+	auto const native_to = detail::NativePath(to, ec);
+	if (ec)
+		throw fs::WriteDenied("Could not copy: " + ec.message());
+	if (!CopyFileW(native_from.c_str(), native_to.c_str(), false)) {
+		auto const error = GetLastError();
+		switch (error) {
+			case ERROR_FILE_NOT_FOUND:
+				throw FileNotFound(from);
+			case ERROR_ACCESS_DENIED:
+				throw fs::WriteDenied("Could not overwrite " + PathToString(to));
+			default:
+				throw fs::WriteDenied("Could not copy: " + util::ErrorString(error));
 		}
 	}
 }

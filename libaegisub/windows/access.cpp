@@ -21,6 +21,7 @@
 #include <libaegisub/format.h>
 #include <libaegisub/format_path.h>
 #include <libaegisub/fs.h>
+#include <libaegisub/fs_native.h>
 #include <libaegisub/log.h>
 #include <libaegisub/util.h>
 
@@ -53,16 +54,23 @@ is a short (and incomplete) todo
    requires detecting the filesystem being used.
 */
 void Check(fs::path const& file, acs::Type type) {
-	DWORD file_attr = GetFileAttributes(file.c_str());
+	if (file.empty())
+		throw fs::FileNotFound(file);
+	std::error_code ec;
+	auto const native = fs::detail::NativePath(file, ec);
+	if (ec)
+		throw fs::FileSystemUnknownError(agi::format("Unexpected error when getting attributes for \"%s\": %s", file, ec.message()));
+	DWORD file_attr = GetFileAttributesW(native.c_str());
 	if ((file_attr & INVALID_FILE_ATTRIBUTES) == INVALID_FILE_ATTRIBUTES) {
-		switch (GetLastError()) {
+		auto const error = GetLastError();
+		switch (error) {
 			case ERROR_FILE_NOT_FOUND:
 			case ERROR_PATH_NOT_FOUND:
 				throw fs::FileNotFound(file);
 			case ERROR_ACCESS_DENIED:
 				throw fs::ReadDenied(file);
 			default:
-				throw fs::FileSystemUnknownError(agi::format("Unexpected error when getting attributes for \"%s\": %s", file, util::ErrorString(GetLastError())));
+				throw fs::FileSystemUnknownError(agi::format("Unexpected error when getting attributes for \"%s\": %s", file, util::ErrorString(error)));
 		}
 	}
 
@@ -81,14 +89,14 @@ void Check(fs::path const& file, acs::Type type) {
 
 	SECURITY_INFORMATION info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
 	DWORD len = 0;
-	GetFileSecurity(file.c_str(), info, nullptr, 0, &len);
+	GetFileSecurityW(native.c_str(), info, nullptr, 0, &len);
 	if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
 		LOG_W("acs/check") << "GetFileSecurity: fatal: " << util::ErrorString(GetLastError());
 
 	std::vector<uint8_t> sd_buff(len);
 	SECURITY_DESCRIPTOR *sd = (SECURITY_DESCRIPTOR *)&sd_buff[0];
 
-	if (!GetFileSecurity(file.c_str(), info, sd, len, &len))
+	if (!GetFileSecurityW(native.c_str(), info, sd, len, &len))
 		LOG_W("acs/check") << "GetFileSecurity failed: " << util::ErrorString(GetLastError());
 
 	ImpersonateSelf(SecurityImpersonation);

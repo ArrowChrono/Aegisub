@@ -16,10 +16,13 @@
 
 #include <main.h>
 
+#include <libaegisub/access.h>
+#include <libaegisub/file_mapping.h>
 #include <libaegisub/fs.h>
 #include <libaegisub/io.h>
 #include <libaegisub/scope_exit.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -207,8 +210,8 @@ struct LongWindowsTestDirectory {
 	}
 	~LongWindowsTestDirectory() { std::filesystem::remove_all(native_root); }
 
-	[[nodiscard]] std::filesystem::path Target(size_t length) const {
-		return absolute_directory / (std::string(length - absolute_directory.native().size() - 5, 'f') + ".ass");
+	[[nodiscard]] std::filesystem::path Target(size_t length, std::filesystem::path const& suffix = ".ass") const {
+		return absolute_directory / (std::wstring(length - absolute_directory.native().size() - suffix.native().size() - 1, L'f') + suffix.native());
 	}
 };
 }
@@ -316,6 +319,141 @@ TEST(lagi_io, long_windows_paths_preserve_file_and_directory_metadata) {
 			EXPECT_FALSE(agi::fs::FileExists(missing));
 			EXPECT_THROW(agi::fs::Size(missing), agi::fs::FileNotFound);
 		}
+	}
+}
+
+TEST(lagi_io, read_file_mapping_reads_long_windows_paths) {
+	LongWindowsTestDirectory directory;
+	auto const suffix = agi::fs::PathFromString("-\xE5\xAD\x97\xE5\xB9\x95\xF0\x9F\x98\x80.ass");
+	auto const contents = std::string("header\r\n") + std::string(4096, 'x') + std::string("\0tail\r\n", 7);
+	for (size_t length : {259U, 260U, 262U, 300U}) {
+		SCOPED_TRACE(length);
+		auto const absolute_target = directory.Target(length, suffix);
+		ASSERT_EQ(length, absolute_target.native().size());
+		auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
+		std::ofstream(native_target, std::ios::binary) << contents;
+		ASSERT_EQ(contents, read_all(native_target));
+
+		size_t form = 0;
+		for (auto const& target : {directory.directory / absolute_target.filename(), absolute_target, native_target}) {
+			SCOPED_TRACE(form++);
+			EXPECT_NO_THROW({
+				agi::read_file_mapping input(target);
+				EXPECT_EQ(contents.size(), input.size());
+				EXPECT_EQ(contents, std::string(input.read(), static_cast<size_t>(input.size())));
+			});
+			EXPECT_EQ(contents, read_all(native_target));
+		}
+	}
+}
+
+TEST(lagi_io, temp_file_mapping_writes_and_removes_long_windows_paths) {
+	LongWindowsTestDirectory directory;
+	auto const suffix = agi::fs::PathFromString("-\xE5\xAD\x97\xE5\xB9\x95\xF0\x9F\x98\x80.tmp");
+	auto const absolute_target = directory.Target(300, suffix);
+	ASSERT_EQ(300U, absolute_target.native().size());
+	auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
+	auto const contents = std::string("mapped\0bytes\r\n", 14) + std::string(4096, 't');
+	size_t form = 0;
+	for (auto const& target : {directory.directory / absolute_target.filename(), absolute_target, native_target}) {
+		SCOPED_TRACE(form++);
+		EXPECT_NO_THROW({
+			agi::temp_file_mapping mapping(target, contents.size());
+			std::ranges::copy(contents, mapping.write(0, contents.size()));
+			EXPECT_EQ(contents, std::string(mapping.read(0, contents.size()), contents.size()));
+			EXPECT_EQ(contents.size(), std::filesystem::file_size(native_target));
+		});
+		EXPECT_FALSE(std::filesystem::exists(native_target));
+	}
+}
+
+TEST(lagi_io, copy_long_windows_paths_preserves_bytes_and_overwrites) {
+	LongWindowsTestDirectory directory;
+	auto const suffix = agi::fs::PathFromString("-\xE5\xAD\x97\xE5\xB9\x95\xF0\x9F\x98\x80.ass");
+	auto const absolute_root = std::filesystem::absolute(directory.root).make_preferred();
+	struct CopyPaths {
+		char const *name;
+		std::filesystem::path source;
+		std::filesystem::path destination;
+	};
+	CopyPaths const cases[] = {
+		{.name = "short_to_boundary_259", .source = absolute_root / "source.ass", .destination = directory.Target(259, suffix)},
+		{.name = "short_to_boundary_260", .source = absolute_root / "source.ass", .destination = directory.Target(260, suffix)},
+		{.name = "long_to_short", .source = directory.Target(260, suffix), .destination = absolute_root / "destination.ass"},
+		{.name = "long_to_long", .source = directory.Target(262, suffix), .destination = directory.Target(271, suffix)},
+		{.name = "long_parent", .source = directory.Target(262, suffix), .destination = directory.Target(300, ".dir") / suffix}};
+	std::string const contents("subtitle\0copied\r\n", 17);
+	std::string const original = "original destination content must be replaced and truncated";
+	for (auto const& paths : cases) {
+		SCOPED_TRACE(paths.name);
+		auto const native_source = std::filesystem::path(L"\\\\?\\" + paths.source.native());
+		auto const native_destination = std::filesystem::path(L"\\\\?\\" + paths.destination.native());
+		std::filesystem::create_directories(native_destination.parent_path());
+		std::ofstream(native_source, std::ios::binary) << contents;
+		ASSERT_EQ(contents, read_all(native_source));
+
+		for (size_t form : {0U, 1U, 2U}) {
+			SCOPED_TRACE(form);
+			auto const source = form == 0   ? paths.source.lexically_relative(std::filesystem::current_path())
+								: form == 1 ? paths.source
+											: native_source;
+			auto const destination = form == 0   ? paths.destination.lexically_relative(std::filesystem::current_path())
+									 : form == 1 ? paths.destination
+												 : native_destination;
+			EXPECT_NO_THROW(agi::acs::CheckFileRead(source));
+			EXPECT_NO_THROW(agi::acs::CheckDirWrite(destination.parent_path()));
+			std::filesystem::remove(native_destination);
+			EXPECT_NO_THROW(agi::fs::Copy(source, destination));
+			EXPECT_EQ(contents, read_all(native_destination));
+			EXPECT_EQ(contents, read_all(native_source));
+
+			std::ofstream(native_destination, std::ios::binary) << original;
+			ASSERT_EQ(original, read_all(native_destination));
+			EXPECT_NO_THROW(agi::fs::Copy(source, destination));
+			EXPECT_EQ(contents, read_all(native_destination));
+			EXPECT_EQ(contents, read_all(native_source));
+		}
+	}
+}
+
+TEST(lagi_io, long_windows_copy_failures_preserve_destination_and_error_types) {
+	LongWindowsTestDirectory directory;
+	auto const suffix = agi::fs::PathFromString("-\xE5\xAD\x97\xE5\xB9\x95\xF0\x9F\x98\x80.ass");
+	auto const absolute_source = directory.Target(300, suffix);
+	auto const native_source = std::filesystem::path(L"\\\\?\\" + absolute_source.native());
+	auto const native_folder = std::filesystem::path(native_source).replace_extension(".dir");
+	std::filesystem::create_directory(native_folder);
+	std::ofstream(native_source, std::ios::binary) << "source contents";
+	ASSERT_EQ("source contents", read_all(native_source));
+	auto const destination = directory.root / "preserved.ass";
+	std::string const original = "existing destination must survive a failed copy";
+	std::ofstream(destination, std::ios::binary) << original;
+	ASSERT_EQ(original, read_all(destination));
+	auto const short_missing = directory.root / "missing.ass";
+	EXPECT_THROW({ agi::read_file_mapping input(short_missing); }, agi::fs::FileNotFound);
+	EXPECT_THROW(agi::acs::CheckFileRead(short_missing), agi::fs::FileNotFound);
+	EXPECT_THROW(agi::fs::Copy(short_missing, destination), agi::fs::FileNotFound);
+	EXPECT_EQ(original, read_all(destination));
+	EXPECT_THROW({ agi::read_file_mapping input(std::filesystem::path{}); }, agi::fs::FileNotFound);
+	EXPECT_THROW(agi::acs::CheckFileRead({}), agi::fs::FileNotFound);
+	EXPECT_THROW(agi::fs::Copy({}, destination), agi::fs::FileNotFound);
+	EXPECT_EQ(original, read_all(destination));
+
+	size_t form = 0;
+	for (auto const& source : {directory.directory / absolute_source.filename(), absolute_source, native_source}) {
+		SCOPED_TRACE(form++);
+		auto const missing = std::filesystem::path(source).replace_extension(".missing");
+		EXPECT_THROW({ agi::read_file_mapping input(missing); }, agi::fs::FileNotFound);
+		EXPECT_THROW(agi::acs::CheckFileRead(missing), agi::fs::FileNotFound);
+		EXPECT_THROW(agi::fs::Copy(missing, destination), agi::fs::FileNotFound);
+		EXPECT_EQ(original, read_all(destination));
+
+		auto const folder = std::filesystem::path(source).replace_extension(".dir");
+		EXPECT_THROW(agi::acs::CheckFileRead(folder), agi::fs::NotAFile);
+		EXPECT_THROW(agi::fs::Copy(folder, destination), agi::fs::NotAFile);
+		EXPECT_EQ(original, read_all(destination));
+		EXPECT_THROW(agi::acs::CheckDirWrite(source), agi::fs::NotADirectory);
+		EXPECT_EQ("source contents", read_all(native_source));
 	}
 }
 #endif
