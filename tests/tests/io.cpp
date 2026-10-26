@@ -21,14 +21,22 @@
 #include <libaegisub/fs.h>
 #include <libaegisub/io.h>
 #include <libaegisub/scope_exit.h>
+#include <libaegisub/util.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <Windows.h>
+#undef CreateDirectory
+#undef GetMessage
+#endif
 
 namespace {
 std::string read_all(std::filesystem::path const& path) {
@@ -320,6 +328,52 @@ TEST(lagi_io, long_windows_paths_preserve_file_and_directory_metadata) {
 			EXPECT_THROW(agi::fs::Size(missing), agi::fs::FileNotFound);
 		}
 	}
+}
+
+TEST(lagi_io, touch_long_windows_paths_updates_time_without_changing_contents) {
+	LongWindowsTestDirectory directory;
+	auto const suffix = agi::fs::PathFromString("-\xE5\xAD\x97\xE5\xB9\x95\xF0\x9F\x98\x80.ffindex");
+	std::string const contents("index\0payload\r\n", 15);
+	for (size_t length : {260U, 259U, 300U}) {
+		SCOPED_TRACE(length);
+		auto const absolute_target = directory.Target(length, suffix);
+		ASSERT_EQ(length, absolute_target.native().size());
+		auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
+		std::ofstream(native_target, std::ios::binary) << contents;
+		ASSERT_EQ(contents, read_all(native_target));
+		for (auto const& target : {absolute_target, directory.directory / absolute_target.filename(), native_target}) {
+			auto const old_time = std::filesystem::last_write_time(native_target) - std::chrono::hours(24);
+			std::filesystem::last_write_time(native_target, old_time);
+			ASSERT_NO_THROW(agi::fs::Touch(target));
+			EXPECT_GT(std::filesystem::last_write_time(native_target), old_time);
+			EXPECT_EQ(contents, read_all(native_target));
+		}
+	}
+}
+
+TEST(lagi_io, touch_creates_long_windows_paths_and_missing_parents) {
+	LongWindowsTestDirectory directory;
+	auto const suffix = agi::fs::PathFromString("-\xE5\xAD\x97\xE5\xB9\x95\xF0\x9F\x98\x80.ffindex");
+	for (auto const& absolute_target : {directory.Target(260, suffix), directory.Target(300, ".dir") / suffix}) {
+		auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
+		ASSERT_FALSE(std::filesystem::exists(native_target));
+		ASSERT_NO_THROW(agi::fs::Touch(absolute_target));
+		EXPECT_TRUE(std::filesystem::is_regular_file(native_target));
+		EXPECT_EQ(0U, std::filesystem::file_size(native_target));
+		EXPECT_TRUE(std::filesystem::is_directory(native_target.parent_path()));
+	}
+}
+
+TEST(lagi_io, touch_reports_the_original_file_open_failure) {
+	LongWindowsTestDirectory directory;
+	try {
+		agi::fs::Touch(directory.root);
+		FAIL() << "Touch unexpectedly opened a directory as a writable file";
+	}
+	catch (agi::EnvironmentError const& error) {
+		EXPECT_EQ("CreateFile failed with error: " + agi::util::ErrorString(ERROR_ACCESS_DENIED), error.GetMessage());
+	}
+	EXPECT_TRUE(std::filesystem::is_directory(directory.root));
 }
 
 TEST(lagi_io, read_file_mapping_reads_long_windows_paths) {

@@ -184,17 +184,24 @@ std::string ShortName(path const& p) {
 }
 
 void Touch(path const& file) {
-	CreateDirectory(file.parent_path());
+	std::error_code ec;
+	auto const native_file = detail::NativePath(file, ec);
+	if (ec)
+		throw EnvironmentError("Could not touch: " + ec.message());
+	CreateDirectory(native_file.parent_path());
 
 	SYSTEMTIME st;
 	FILETIME ft;
 	GetSystemTime(&st);
-	if(!SystemTimeToFileTime(&st, &ft))
+	if (!SystemTimeToFileTime(&st, &ft))
 		throw EnvironmentError("SystemTimeToFileTime failed with error: " + util::ErrorString(GetLastError()));
 
-	scoped_holder<HANDLE, BOOL (__stdcall *)(HANDLE)>
-		h(CreateFile(file.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr), CloseHandle);
-	// error handling etc.
+	auto const handle = CreateFileW(native_file.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (handle == INVALID_HANDLE_VALUE) {
+		auto const error = GetLastError();
+		throw EnvironmentError("CreateFile failed with error: " + util::ErrorString(error));
+	}
+	scoped_holder<HANDLE, BOOL(__stdcall *)(HANDLE)> h(handle, CloseHandle);
 	if (!SetFileTime(h, nullptr, nullptr, &ft))
 		throw EnvironmentError("SetFileTime failed with error: " + util::ErrorString(GetLastError()));
 }
