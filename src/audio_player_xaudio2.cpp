@@ -31,6 +31,7 @@
 #include "include/aegisub/audio_player.h"
 
 #include "audio_player_xaudio2_buffer_slots.h"
+#include "audio_player_xaudio2_engine.h"
 #include "audio_player_xaudio2_playback.h"
 #include "options.h"
 #include "perf_trace.h"
@@ -39,16 +40,11 @@
 #include <libaegisub/scoped_ptr.h>
 #include <libaegisub/log.h>
 #include <libaegisub/make_unique.h>
+#include <libaegisub/scope_exit.h>
 
 #include <atomic>
 #include <chrono>
 #include <mutex>
-
-#ifndef XAUDIO2_REDIST
-#include <xaudio2.h>
-#else
-#include <xaudio2redist.h>
-#endif
 
 namespace {
 class XAudio2Thread;
@@ -58,6 +54,8 @@ class XAudio2Thread;
 ///
 /// The core design idea is to have a playback thread that performs all playback operations, and use the player object as a proxy to send commands to the playback thread.
 class XAudio2Player final : public AudioPlayer {
+	std::atomic<HRESULT> critical_error{S_OK};
+
 	/// The playback thread
 	std::unique_ptr<XAudio2Thread> thread;
 
@@ -89,6 +87,9 @@ public:
 	/// @brief Tell whether playback is active
 	/// @return True if audio is playing back
 	bool IsPlaying();
+	bool NeedsDeviceRecovery() const override {
+		return FAILED(critical_error.load(std::memory_order_acquire));
+	}
 
 	/// @brief Get playback end position
 	/// @return Audio frame index
@@ -237,13 +238,14 @@ class XAudio2Thread :public IXAudio2VoiceCallback {
 
 	/// HRESULT supplied by the most recent OnVoiceError callback
 	std::atomic<HRESULT> voice_error{S_OK};
+	std::atomic<HRESULT>& critical_error;
 
 public:
 	/// @brief Constructor, creates and starts playback thread
 	/// @param provider       Audio provider to take sample data from
 	/// @param WantedLatency Desired length in milliseconds to write ahead of the playback cursor
 	/// @param BufferLength  Multiplier for WantedLatency to get total buffer length
-	XAudio2Thread(agi::AudioProvider* provider, int WantedLatency, int BufferLength);
+	XAudio2Thread(agi::AudioProvider *provider, int WantedLatency, int BufferLength, std::atomic<HRESULT>& critical_error);
 	/// @brief Destructor, waits for thread to have died
 	~XAudio2Thread();
 
@@ -337,9 +339,13 @@ void XAudio2Thread::Run() {
 	}
 	std::unique_ptr<IXAudio2, ReleaseCOMObject> xaudio2(xaudio2_raw);
 	auto *pXAudio2 = xaudio2.get();
+	XAudio2EngineCallback engine_callback(critical_error, event_voice_error);
+	if (FAILED(pXAudio2->RegisterForCallbacks(&engine_callback)))
+		REPORT_ERROR("Failed registering XAudio2 engine callbacks")
+	auto unregister = agi::make_scope_exit([&] { pXAudio2->UnregisterForCallbacks(&engine_callback); });
 
 	IXAudio2MasteringVoice* master_voice_raw = nullptr;
-	if (FAILED(hr = pXAudio2->CreateMasteringVoice(&master_voice_raw))) {
+	if (engine_callback.CheckFailure(hr = pXAudio2->CreateMasteringVoice(&master_voice_raw))) {
 		REPORT_ERROR("Failed initializing XAudio2 MasteringVoice")
 	}
 	std::unique_ptr<IXAudio2MasteringVoice, DestroyXAudio2Voice> master_voice(master_voice_raw);
@@ -360,7 +366,7 @@ void XAudio2Thread::Run() {
 	// flushed buffers is released, including on error/early-return paths.
 	std::vector<std::vector<BYTE>> buff(buffer_slots.SlotCount());
 	IXAudio2SourceVoice* source_voice_raw = nullptr;
-	if (FAILED(hr = pXAudio2->CreateSourceVoice(&source_voice_raw, &wfx, 0, 2, this))) {
+	if (engine_callback.CheckFailure(hr = pXAudio2->CreateSourceVoice(&source_voice_raw, &wfx, 0, 2, this))) {
 		if (hr == XAUDIO2_E_INVALID_CALL) {
 			// Retry with 16bit mono
 			original = false;
@@ -370,7 +376,7 @@ void XAudio2Thread::Run() {
 			wfx.nBlockAlign = wfx.nChannels * wfx.wBitsPerSample / 8;
 			wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
 			source_voice_raw = nullptr;
-			if (FAILED(hr = pXAudio2->CreateSourceVoice(&source_voice_raw, &wfx, 0, 2, this))) {
+			if (engine_callback.CheckFailure(hr = pXAudio2->CreateSourceVoice(&source_voice_raw, &wfx, 0, 2, this))) {
 				REPORT_ERROR("Failed initializing XAudio2 SourceVoice")
 			}
 		}
@@ -500,9 +506,9 @@ void XAudio2Thread::Run() {
 			// commits pending operations and makes the stop/flush counter reset
 			// synchronous before a new stream is submitted.
 			pXAudio2->StopEngine();
-			if (FAILED(hr = pSourceVoice->Stop()))
+			if (engine_callback.CheckFailure(hr = pSourceVoice->Stop()))
 				REPORT_ERROR("Failed stopping XAudio2 SourceVoice before playback")
-			if (FAILED(hr = pSourceVoice->FlushSourceBuffers()))
+			if (engine_callback.CheckFailure(hr = pSourceVoice->FlushSourceBuffers()))
 				REPORT_ERROR("Failed flushing XAudio2 SourceVoice before playback")
 			ResetEvent(event_stream_end);
 			buffer_slots.BeginPlayback();
@@ -536,9 +542,9 @@ void XAudio2Thread::Run() {
 			playback_should_be_running = false;
 			playback_start_pending = false;
 			playback_has_buffer = false;
-			if (FAILED(hr = pSourceVoice->Stop()))
+			if (engine_callback.CheckFailure(hr = pSourceVoice->Stop()))
 				REPORT_ERROR("Failed stopping XAudio2 SourceVoice")
-			if (FAILED(hr = pSourceVoice->FlushSourceBuffers()))
+			if (engine_callback.CheckFailure(hr = pSourceVoice->FlushSourceBuffers()))
 				REPORT_ERROR("Failed flushing XAudio2 SourceVoice")
 			emit_audio_output("stop");
 			completed_playback_generation.store(playback_generation, std::memory_order_release);
@@ -561,7 +567,7 @@ void XAudio2Thread::Run() {
 				}
 				if (action == aegisub::xaudio2::EndUpdate::Rebuild) {
 					pXAudio2->StopEngine();
-					if (FAILED(hr = pSourceVoice->Stop()))
+					if (engine_callback.CheckFailure(hr = pSourceVoice->Stop()))
 						REPORT_ERROR("Failed stopping XAudio2 SourceVoice for end update")
 					pSourceVoice->GetState(&state);
 					auto const resume_frame = consumed_frame(state);
@@ -574,7 +580,7 @@ void XAudio2Thread::Run() {
 						std::scoped_lock lock(playback_clock_mutex);
 						playback_clock.Publish(resume_frame, new_end, std::chrono::steady_clock::now(), false);
 					}
-					if (FAILED(hr = pSourceVoice->FlushSourceBuffers()))
+					if (engine_callback.CheckFailure(hr = pSourceVoice->FlushSourceBuffers()))
 						REPORT_ERROR("Failed flushing XAudio2 SourceVoice for end update")
 					ResetEvent(event_stream_end);
 					buffer_slots.BeginPlayback();
@@ -589,7 +595,7 @@ void XAudio2Thread::Run() {
 			goto do_fill_buffer;
 
 		case WAIT_OBJECT_0 + EventSetVolume:
-			if (FAILED(hr = pSourceVoice->SetVolume(volume.load(std::memory_order_acquire))))
+			if (engine_callback.CheckFailure(hr = pSourceVoice->SetVolume(volume.load(std::memory_order_acquire))))
 				REPORT_ERROR("Failed setting XAudio2 SourceVoice volume")
 			break;
 
@@ -638,7 +644,7 @@ void XAudio2Thread::Run() {
 				xbf.AudioBytes = fill_len * wfx.nBlockAlign;
 				xbf.pAudioData = buff[i].data();
 				xbf.pContext = reinterpret_cast<void*>(static_cast<intptr_t>(i));
-				if (FAILED(hr = pSourceVoice->SubmitSourceBuffer(&xbf))) {
+				if (engine_callback.CheckFailure(hr = pSourceVoice->SubmitSourceBuffer(&xbf))) {
 					buffer_slots.Release(i);
 					REPORT_ERROR("Failed submitting XAudio2 source buffer")
 				}
@@ -655,9 +661,9 @@ void XAudio2Thread::Run() {
 				XAUDIO2_VOICE_STATE initial_state{};
 				pSourceVoice->GetState(&initial_state);
 				playback_sample_base = initial_state.SamplesPlayed;
-				if (FAILED(hr = pSourceVoice->Start()))
+				if (engine_callback.CheckFailure(hr = pSourceVoice->Start()))
 					REPORT_ERROR("Failed starting XAudio2 SourceVoice")
-				if (FAILED(hr = pXAudio2->StartEngine()))
+				if (engine_callback.CheckFailure(hr = pXAudio2->StartEngine()))
 					REPORT_ERROR("Failed restarting XAudio2 engine")
 				if (cancelled_playback_generation.load(std::memory_order_acquire) >= playback_generation)
 					goto stop_playback;
@@ -692,6 +698,10 @@ void XAudio2Thread::Run() {
 		}
 
 		case WAIT_OBJECT_0 + EventVoiceError:
+			if (auto const error = critical_error.load(std::memory_order_acquire); FAILED(error)) {
+				LOG_E("audio/player/xaudio2") << "XAudio2 critical output error HRESULT " << static_cast<long>(error);
+				REPORT_ERROR("XAudio2 engine reported a critical output error")
+			}
 			LOG_E("audio/player/xaudio2") << "XAudio2 SourceVoice error HRESULT "
 				<< static_cast<long>(voice_error.load(std::memory_order_acquire));
 			REPORT_ERROR("XAudio2 SourceVoice reported an error")
@@ -741,7 +751,7 @@ void XAudio2Thread::CheckError()
 	}
 }
 
-XAudio2Thread::XAudio2Thread(agi::AudioProvider* provider, int WantedLatency, int BufferLength)
+XAudio2Thread::XAudio2Thread(agi::AudioProvider *provider, int WantedLatency, int BufferLength, std::atomic<HRESULT>& critical_error)
 	: event_start_playback(CreateEvent(0, FALSE, FALSE, 0))
 	, event_stop_playback(CreateEvent(0, FALSE, FALSE, 0))
 	, event_update_end_time(CreateEvent(0, FALSE, FALSE, 0))
@@ -757,15 +767,21 @@ XAudio2Thread::XAudio2Thread(agi::AudioProvider* provider, int WantedLatency, in
 	, wanted_latency(WantedLatency)
 	, provider(provider)
 	, buffer_slots(std::min(BufferLength, XAUDIO2_MAX_QUEUED_BUFFERS))
+	, critical_error(critical_error)
 {
 	if (!(thread_handle = (HANDLE)_beginthreadex(0, 0, ThreadProc, this, 0, 0))) {
 		throw AudioPlayerOpenError("Failed creating playback thread in XAudio2Player. This is bad.");
 	}
+	auto join_on_failure = agi::make_scope_exit([&] {
+		SetEvent(event_kill_self);
+		WaitForSingleObject(thread_handle, INFINITE);
+	});
 
 	HANDLE running_or_error[] = { thread_running, error_happened };
 	switch (WaitForMultipleObjects(2, running_or_error, FALSE, INFINITE)) {
 	case WAIT_OBJECT_0:
 		// running, all good
+		join_on_failure.release();
 		return;
 
 	case WAIT_OBJECT_0 + 1:
@@ -894,7 +910,7 @@ XAudio2Player::XAudio2Player(agi::AudioProvider* provider) :AudioPlayer(provider
 		BufferLength = 5;
 
 	try {
-		thread = agi::make_unique<XAudio2Thread>(provider, WantedLatency, BufferLength);
+		thread = agi::make_unique<XAudio2Thread>(provider, WantedLatency, BufferLength, critical_error);
 	}
 	catch (const char* msg) {
 		LOG_E("audio/player/xaudio2") << msg;

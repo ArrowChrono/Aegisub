@@ -54,6 +54,7 @@ public:
 	virtual void Play(int64_t start,int64_t count)=0;	// Play sample range
 	virtual void Stop()=0;			// Stop playing
 	virtual bool IsPlaying()=0;
+	virtual bool NeedsDeviceRecovery() const { return false; }
 
 	virtual void SetVolume(double volume)=0;
 

@@ -1,5 +1,8 @@
 #include "include/aegisub/audio_player.h"
+#include "audio_player_xaudio2_engine.h"
 #include "options.h"
+
+#undef GetMessage
 
 #include <libaegisub/audio/provider.h>
 #include <libaegisub/dispatch.h>
@@ -28,6 +31,43 @@ constexpr int rate = 48000;
 void Require(bool condition, char const *message) {
 	if (!condition)
 		throw std::runtime_error(message);
+}
+
+void CheckCriticalEngineFailure() {
+	HANDLE const event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+	Require(event != nullptr, "could not create engine failure event");
+	auto close = agi::make_scope_exit([&] { CloseHandle(event); });
+	std::atomic<HRESULT> failure{S_OK};
+	{
+		XAudio2EngineCallback callback(failure, event);
+		callback.OnProcessingPassStart();
+		callback.OnProcessingPassEnd();
+		Require(failure.load() == S_OK, "healthy engine requested recovery");
+		Require(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "healthy engine signalled failure");
+		std::jthread notify([&] { callback.OnCriticalError(XAUDIO2_E_DEVICE_INVALIDATED); });
+		Require(WaitForSingleObject(event, 1000) == WAIT_OBJECT_0, "critical error did not wake the playback worker");
+		Require(failure.load() == XAUDIO2_E_DEVICE_INVALIDATED, "critical error lost its HRESULT");
+	}
+	Require(failure.load() == XAUDIO2_E_DEVICE_INVALIDATED, "destroying the callback lost the recovery request");
+	std::cout << "PASS XAudio2 critical engine failure notification and retained recovery state\n";
+}
+
+void CheckSynchronousDeviceFailure() {
+	HANDLE const event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+	Require(event != nullptr, "could not create synchronous failure event");
+	auto close = agi::make_scope_exit([&] { CloseHandle(event); });
+	std::atomic<HRESULT> failure{S_OK};
+	XAudio2EngineCallback callback(failure, event);
+	Require(!callback.CheckFailure(S_OK), "successful engine call was treated as failure");
+	Require(callback.CheckFailure(XAUDIO2_E_INVALID_CALL), "ordinary API failure was hidden");
+	Require(failure.load() == S_OK, "ordinary API failure was mistaken for device invalidation");
+	Require(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "ordinary API failure requested device recovery");
+	Require(callback.CheckFailure(XAUDIO2_E_DEVICE_INVALIDATED), "synchronous device invalidation was ignored");
+	Require(failure.load() == XAUDIO2_E_DEVICE_INVALIDATED, "synchronous device failure lost its HRESULT");
+	Require(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "synchronous device failure did not signal the worker");
+	Require(!callback.CheckFailure(S_OK) && failure.load() == XAUDIO2_E_DEVICE_INVALIDATED,
+			"later successful call cleared a pending device recovery");
+	std::cout << "PASS XAudio2 synchronous device invalidation and ordinary API error classification\n";
 }
 
 template <typename Predicate>
@@ -95,8 +135,10 @@ void CheckEndpointChanges() {
 	SilentProvider provider;
 	auto player = CreateXAudio2Player(&provider, {});
 	auto release = agi::make_scope_exit([&] { provider.ReleaseRead(); });
+	Require(!player->NeedsDeviceRecovery(), "idle healthy output requested recovery");
 	player->Play(0, rate * 2);
 	Require(player->IsPlaying(), "XAudio2 did not start playback");
+	Require(!player->NeedsDeviceRecovery(), "playing healthy output requested recovery");
 	WaitFor([&] { return player->GetCurrentPosition() >= rate / 20; }, 500ms, "initial playback did not consume audio");
 	auto reads = provider.ReadCount();
 	auto const shortened_end = rate / 4;
@@ -117,6 +159,7 @@ void CheckEndpointChanges() {
 	Require(provider.LastEnd() == shortened_end, "rebuilt queue was not clipped to the new endpoint");
 	WaitFor([&] { return !player->IsPlaying(); }, 1s, "shortened playback did not finish");
 	Require(player->GetCurrentPosition() == shortened_end, "completed playback lost its endpoint position");
+	Require(!player->NeedsDeviceRecovery(), "natural completion requested device recovery");
 
 	player->Play(rate, rate / 5);
 	WaitFor([&] { return player->GetCurrentPosition() >= rate + rate / 20; }, 500ms, "nonzero-origin playback did not consume audio");
@@ -148,6 +191,7 @@ void CheckEndpointChanges() {
 	}
 	player->Stop();
 	WaitFor([&] { return !player->IsPlaying(); }, 500ms, "rapid-restarted playback did not stop");
+	Require(!player->NeedsDeviceRecovery(), "explicit stop requested device recovery");
 	std::cout << "PASS XAudio2 queued endpoint shrink and EOS extension\n";
 }
 
@@ -221,6 +265,8 @@ int main() {
 	config::opt = &options;
 	auto reset_options = agi::make_scope_exit([] { config::opt = nullptr; });
 	try {
+		CheckCriticalEngineFailure();
+		CheckSynchronousDeviceFailure();
 		CheckEndpointChanges();
 		CheckBlockedWorkerClock();
 		CheckSeekAfterPendingStop();

@@ -167,8 +167,6 @@ public:
 	/// Whether the playback timer observed the end, rather than an explicit stop.
 	bool IsPlaybackComplete() const { return playback_mode == PM_Completed; }
 
-	/// Recreate the active audio player after a Windows session/output-device
-	/// transition when the selected backend is XAudio2.
 	void RecoverAudioPlayerAfterDeviceChange();
 
 	/// @brief Get the current playback position

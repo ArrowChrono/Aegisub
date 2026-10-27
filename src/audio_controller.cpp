@@ -43,15 +43,6 @@
 #include <libaegisub/log.h>
 
 #include <algorithm>
-namespace {
-bool ShouldAutoRecoverXAudio2Output() {
-#ifdef WITH_XAUDIO2
-	return OPT_GET("Audio/Player")->GetString() == "XAudio2";
-#else
-	return false;
-#endif
-}
-}
 
 AudioController::AudioController(agi::Context *context)
 : context(context)
@@ -71,8 +62,7 @@ AudioController::~AudioController()
 	Stop();
 }
 
-void AudioController::OnPlaybackTimer()
-{
+void AudioController::OnPlaybackTimer() {
 	if (!player) return;
 	perf_trace::AudioUiDurationScope trace("audio_controller.playback_timer");
 
@@ -88,7 +78,7 @@ void AudioController::OnPlaybackTimer()
 	{
 		// The +200 is to allow the player to end the sound output cleanly,
 		// otherwise a popping artifact can sometimes be heard.
-		StopPlayback(PM_Completed);
+		StopPlayback(player->NeedsDeviceRecovery() ? PM_NotPlaying : PM_Completed);
 	}
 	else
 	{
@@ -165,6 +155,8 @@ void AudioController::OnTimingControllerUpdatedPrimaryRange()
 
 void AudioController::PlayRange(const TimeRange &range)
 {
+	if (player && player->NeedsDeviceRecovery())
+		RecoverAudioPlayerAfterDeviceChange();
 	if (!player || !provider) return;
 	perf_trace::AudioUiDurationScope trace("audio_controller.play_range");
 
@@ -207,6 +199,8 @@ void AudioController::PlayToEndOfPrimary(int start_ms)
 
 void AudioController::PlayToEnd(int start_ms)
 {
+	if (player && player->NeedsDeviceRecovery())
+		RecoverAudioPlayerAfterDeviceChange();
 	if (!player || !provider) return;
 	perf_trace::AudioUiDurationScope trace("audio_controller.play_to_end");
 
@@ -248,18 +242,17 @@ bool AudioController::IsPlaying()
 	return player && playback_mode != PM_NotPlaying && playback_mode != PM_Completed;
 }
 
-void AudioController::RecoverAudioPlayerAfterDeviceChange()
-{
+void AudioController::RecoverAudioPlayerAfterDeviceChange() {
 	if (!provider) {
 		LOG_D("audio/player/xaudio2/recovery") << "Ignoring queued XAudio2 recovery because no audio provider is loaded.";
 		return;
 	}
-	if (!ShouldAutoRecoverXAudio2Output()) {
-		LOG_D("audio/player/xaudio2/recovery") << "Ignoring queued audio recovery because XAudio2 is not the selected backend.";
+	if (!player || !player->NeedsDeviceRecovery()) {
+		LOG_D("audio/player/xaudio2/recovery") << "Ignoring queued XAudio2 recovery because the output has no critical error.";
 		return;
 	}
 
-	LOG_I("audio/player/xaudio2/recovery") << "Rebuilding XAudio2 audio player after session or device change.";
+	LOG_I("audio/player/xaudio2/recovery") << "Rebuilding XAudio2 audio player after a critical output error.";
 	OnAudioPlayerChanged();
 }
 
