@@ -15,6 +15,28 @@
 /// Pure math for ratio-preserving Scale tool actions.
 namespace visual_tool_scale_policy {
 
+inline std::optional<Vector2D> ScaleDrag(Vector2D initial, Vector2D delta, bool single_axis, bool preserve_ratio, bool snap) {
+	delta = delta * Vector2D(1, -1);
+	if (single_axis)
+		delta = delta.SingleAxis();
+	if (preserve_ratio) {
+		if (std::abs(delta.X()) > std::abs(delta.Y())) {
+			if (initial.X() == 0)
+				return std::nullopt;
+			delta = Vector2D(delta.X(), delta.X() * (initial.Y() / initial.X()));
+		}
+		else {
+			if (initial.Y() == 0)
+				return std::nullopt;
+			delta = Vector2D(delta.Y() * (initial.X() / initial.Y()), delta.Y());
+		}
+	}
+	auto scale = Vector2D(0, 0).Max(delta * 1.25f + initial);
+	if (!std::isfinite(scale.X()) || !std::isfinite(scale.Y()))
+		return std::nullopt;
+	return snap ? scale.Round(25.f) : scale;
+}
+
 enum class Axis {
 	X,
 	Y,

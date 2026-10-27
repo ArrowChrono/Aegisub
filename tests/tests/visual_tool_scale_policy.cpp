@@ -82,3 +82,33 @@ TEST(visual_tool_scale_policy, selection_normalization_is_all_or_nothing) {
 		{Vector2D(150, 120), Vector2D(0, 100)}, Axis::X));
 	EXPECT_FALSE(NormalizeSelectionTo100({}, Axis::Y));
 }
+
+TEST(visual_tool_scale_policy, drag_rejects_undefined_ratio_without_inventing_scale) {
+	using visual_tool_scale_policy::ScaleDrag;
+	EXPECT_FALSE(ScaleDrag({0, 80}, {20, 0}, false, true, false));
+	EXPECT_FALSE(ScaleDrag({100, 0}, {0, -20}, false, true, false));
+	EXPECT_FALSE(ScaleDrag({0, 0}, {0, 0}, false, true, false));
+	auto flat = ScaleDrag({100, 0}, {20, 0}, false, true, false);
+	ASSERT_TRUE(flat);
+	EXPECT_EQ(Vector2D(125, 0), *flat);
+	auto unconstrained = ScaleDrag({0, 80}, {20, -20}, false, false, false);
+	ASSERT_TRUE(unconstrained);
+	EXPECT_EQ(Vector2D(25, 105), *unconstrained);
+}
+
+TEST(visual_tool_scale_policy, drag_retains_existing_snap_axis_ratio_and_clamp_semantics) {
+	using visual_tool_scale_policy::ScaleDrag;
+	auto snapped = ScaleDrag({150, 80}, {40, -20}, false, false, true);
+	ASSERT_TRUE(snapped);
+	EXPECT_EQ(Vector2D(200, 100), *snapped);
+	auto constrained = ScaleDrag({150, 80}, {40, -20}, true, false, false);
+	ASSERT_TRUE(constrained);
+	EXPECT_EQ(Vector2D(200, 80), *constrained);
+	auto ratio = ScaleDrag({150, 80}, {40, -20}, false, true, false);
+	ASSERT_TRUE(ratio);
+	EXPECT_NEAR(200, ratio->X(), 0.0001f);
+	EXPECT_NEAR(106.66667f, ratio->Y(), 0.0001f);
+	auto clamped = ScaleDrag({150, 80}, {-200, 200}, false, false, false);
+	ASSERT_TRUE(clamped);
+	EXPECT_EQ(Vector2D(0, 0), *clamped);
+}

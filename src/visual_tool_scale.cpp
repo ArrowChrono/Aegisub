@@ -358,19 +358,10 @@ bool VisualToolScale::InitializeHold() {
 }
 
 void VisualToolScale::UpdateHold() {
-	Vector2D delta = (mouse_pos - drag_start) * Vector2D(1, -1);
-	if (shift_down)
-		delta = delta.SingleAxis();
-	if (alt_down) {
-		if (std::abs(delta.X()) > std::abs(delta.Y()))
-			delta = Vector2D(delta.X(), delta.X() * (initial_scale.Y() / initial_scale.X()));
-		else
-			delta = Vector2D(delta.Y() * (initial_scale.X() / initial_scale.Y()), delta.Y());
-	}
-
-	scale = Vector2D(0, 0).Max(delta * 1.25f + initial_scale);
-	if (ctrl_down)
-		scale = scale.Round(25.f);
+	auto value = visual_tool_scale_policy::ScaleDrag(initial_scale, mouse_pos - drag_start, shift_down, alt_down, ctrl_down);
+	if (!value)
+		return;
+	scale = *value;
 
 	QueueSelectedGeometryOverride("\\fscx", std::to_string(static_cast<int>(scale.X())));
 	QueueSelectedGeometryOverride("\\fscy", std::to_string(static_cast<int>(scale.Y())));
