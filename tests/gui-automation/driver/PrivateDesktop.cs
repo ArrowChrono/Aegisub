@@ -18,6 +18,8 @@ public sealed class PrivateDesktop : IDisposable
     private readonly DesktopHandle desktop;
     private readonly Dictionary<int, long> owned = new();
     private readonly Dictionary<int, SafeWaitHandle> processHandles = new();
+    private readonly Dictionary<int, string> processPaths = new();
+    private readonly SafeFileHandle? processJob;
     private readonly string artifacts;
     public string Name { get; }
     private readonly string inputName;
@@ -28,31 +30,43 @@ public sealed class PrivateDesktop : IDisposable
         protected override bool ReleaseHandle() => CloseDesktop(handle);
     }
 
-    private PrivateDesktop(DesktopHandle desktop, string name, string inputName, string artifacts)
+    private PrivateDesktop(DesktopHandle desktop, string name, string inputName, string artifacts, bool guardDescendants = false)
     {
         this.desktop = desktop;
         Name = name;
         this.inputName = inputName;
         this.artifacts = artifacts;
+        if (guardDescendants)
+        {
+            processJob = CreateJobObject(0, null);
+            if (processJob.IsInvalid) throw Error("CreateJobObject");
+            var limits = new JobLimits { Basic = new BasicJobLimits { LimitFlags = 0x2000 } };
+            if (SetInformationJobObject(processJob, 9, ref limits, (uint)Marshal.SizeOf<JobLimits>()) == 0)
+            {
+                var failure = Error("SetInformationJobObject kill-on-close");
+                processJob.Dispose();
+                throw failure;
+            }
+        }
     }
 
-    public static int Run(string[] arguments, string artifacts, Func<PrivateDesktop, int> operation)
+    public static int Run(string[] arguments, string artifacts, Func<PrivateDesktop, int> operation, string? artifactsRoot = null, int timeoutMilliseconds = 210_000, bool guardDescendants = false)
     {
         var name = Environment.GetEnvironmentVariable(DesktopVariable);
         if (name is null)
         {
-            var allowed = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "build-dir", "artifacts"));
+            var allowed = Path.GetFullPath(artifactsRoot ?? Path.Combine(Environment.CurrentDirectory, "build-dir", "artifacts"));
             var relative = Path.GetRelativePath(allowed, artifacts);
             if (relative == "." || Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
                 || (Directory.Exists(artifacts) && Directory.EnumerateFileSystemEntries(artifacts).Any()))
-                throw new InvalidOperationException("Private geometry artifacts must be a new subdirectory of build-dir/artifacts");
+                throw new InvalidOperationException("Private desktop artifacts must be a new subdirectory of the explicit artifact root or legacy build-dir/artifacts");
             var unique = "AegisubGeometry_" + Guid.NewGuid().ToString("N");
             using var input = OpenInputDesktop(0, false, 1);
             if (input.IsInvalid) throw Error("OpenInputDesktop");
             var inputName = ObjectName(input.DangerousGetHandle());
             using var desktop = CreateDesktop(unique, 0, 0, 0, Access, 0);
             if (desktop.IsInvalid) throw Error("CreateDesktop");
-            using var isolation = new PrivateDesktop(desktop, unique, inputName, artifacts);
+            using var isolation = new PrivateDesktop(desktop, unique, inputName, artifacts, guardDescendants);
             var launcher = Process.GetCurrentProcess();
             var start = new ProcessStartInfo(Environment.ProcessPath ?? throw new InvalidOperationException("Driver executable path unavailable"));
             foreach (var argument in arguments) start.ArgumentList.Add(argument);
@@ -61,10 +75,10 @@ public sealed class PrivateDesktop : IDisposable
             start.Environment[ParentStartVariable] = launcher.StartTime.ToUniversalTime().Ticks.ToString();
             start.Environment[InputVariable] = inputName;
             using var driver = isolation.Start(start, "private-driver");
-            if (!driver.WaitForExit(210_000))
+            if (!driver.WaitForExit(timeoutMilliseconds))
             {
                 isolation.Stop(driver);
-                throw new TimeoutException("Private geometry driver exceeded 210 seconds");
+                throw new TimeoutException("Private driver exceeded its configured supervisor deadline");
             }
             driver.Refresh();
             isolation.VerifyInput();
@@ -74,6 +88,7 @@ public sealed class PrivateDesktop : IDisposable
                 launcher_pid = launcher.Id,
                 launcher_start_utc = launcher.StartTime.ToUniversalTime(),
                 driver_pid = driver.Id,
+                driver_executable = isolation.processPaths[driver.Id],
                 driver_start_utc = new DateTime(isolation.owned[driver.Id], DateTimeKind.Utc),
                 window_station = "WinSta0",
                 desktop = unique,
@@ -94,9 +109,9 @@ public sealed class PrivateDesktop : IDisposable
         using var parent = Process.GetProcessById(launcherPid);
         if (ParentPid() != launcherPid || parent.StartTime.ToUniversalTime().Ticks != launcherStart || parent.MainModule?.FileName != Environment.ProcessPath)
             throw new InvalidOperationException("Private driver is not owned by its recorded launcher");
-        var handle = OpenDesktop(name, 0, false, Access);
+        using var handle = OpenDesktop(name, 0, false, Access);
         if (handle.IsInvalid) throw Error("OpenDesktop");
-        using var child = new PrivateDesktop(handle, name, Environment.GetEnvironmentVariable(InputVariable) ?? throw new InvalidOperationException("Input desktop identity unavailable"), artifacts);
+        using var child = new PrivateDesktop(handle, name, Environment.GetEnvironmentVariable(InputVariable) ?? throw new InvalidOperationException("Input desktop identity unavailable"), artifacts, guardDescendants);
         child.VerifyCurrent();
         return operation(child);
     }
@@ -111,8 +126,9 @@ public sealed class PrivateDesktop : IDisposable
         File.Move(path + ".tmp", path);
     }
 
-    public Process Start(ProcessStartInfo start, string phase)
+    public Process Start(ProcessStartInfo start, string phase, long? operationDeadline = null)
     {
+        if (operationDeadline is long end && Stopwatch.GetTimestamp() >= end) throw new TimeoutException("Process startup exceeded its scenario deadline");
         VerifyInput();
         if (ObjectName(GetProcessWindowStation()) != "WinSta0") throw new InvalidOperationException("Geometry isolation requires WinSta0");
         var command = new StringBuilder(Quote(Path.GetFullPath(start.FileName)));
@@ -125,15 +141,35 @@ public sealed class PrivateDesktop : IDisposable
         try
         {
             var startup = new StartupInfo { Size = (uint)Marshal.SizeOf<StartupInfo>(), Desktop = "WinSta0\\" + Name, Flags = 1, ShowWindow = 4 };
-            if (!CreateProcess(Path.GetFullPath(start.FileName), command, 0, 0, false, 0x08000400, memory, Environment.CurrentDirectory, ref startup, out var info)) throw Error("CreateProcess");
+            if (!CreateProcess(Path.GetFullPath(start.FileName), command, 0, 0, false, 0x08000400u | (processJob is null ? 0u : 4u), memory, Environment.CurrentDirectory, ref startup, out var info)) throw Error("CreateProcess");
             unclaimed = new SafeWaitHandle(info.Process, true);
             using var threadHandle = new SafeWaitHandle(info.Thread, true);
             createdId = checked((int)info.ProcessId);
             process = Process.GetProcessById(createdId);
             var started = process.StartTime.ToUniversalTime().Ticks;
+            var image = ImagePath(unclaimed);
+            if (!image.Equals(Path.GetFullPath(start.FileName), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Created process image differs from the requested executable");
+            processPaths.Add(createdId, image);
             if (phase != "private-driver")
             {
-                var deadline = Stopwatch.GetTimestamp() + 10 * Stopwatch.Frequency;
+                Directory.CreateDirectory(artifacts);
+                File.AppendAllText(Path.Combine(artifacts, "process-identity.ndjson"), JsonSerializer.Serialize(new
+                {
+                    phase, kind = "process_created", pid = createdId, start_utc = new DateTime(started, DateTimeKind.Utc), observed_utc = DateTime.UtcNow,
+                    actual_executable = image, expected_executable = Path.GetFullPath(start.FileName),
+                    image_query = "QueryFullProcessImageNameW", owned_kernel_handle = true,
+                    initially_suspended = processJob is not null, kill_on_owner_exit_configured = processJob is not null
+                }) + Environment.NewLine);
+            }
+            if (processJob is not null)
+            {
+                if (AssignProcessToJobObject(processJob, unclaimed) == 0) throw Error("AssignProcessToJobObject");
+                if (ResumeThread(threadHandle) == uint.MaxValue) throw Error("ResumeThread");
+            }
+            if (phase != "private-driver")
+            {
+                var deadline = Math.Min(operationDeadline ?? long.MaxValue, Stopwatch.GetTimestamp() + 10 * Stopwatch.Frequency);
                 var connected = false;
                 while (KernelExitCode(unclaimed) == 259 && Stopwatch.GetTimestamp() < deadline)
                 {
@@ -157,6 +193,7 @@ public sealed class PrivateDesktop : IDisposable
             if (unclaimed is not null) Cleanup(unclaimed);
             owned.Remove(createdId);
             processHandles.Remove(createdId);
+            processPaths.Remove(createdId);
             process?.Dispose();
             throw;
         }
@@ -183,7 +220,8 @@ public sealed class PrivateDesktop : IDisposable
         VerifyCurrent();
         var thread = GetWindowThreadProcessId(window, out var owner);
         if (window == 0 || owner != process.Id || thread == 0 || !owned.TryGetValue(process.Id, out var start)
-            || process.HasExited || process.StartTime.ToUniversalTime().Ticks != start || ObjectName(GetThreadDesktop(thread)) != Name)
+            || process.HasExited || process.StartTime.ToUniversalTime().Ticks != start || ObjectName(GetThreadDesktop(thread)) != Name
+            || !processPaths.TryGetValue(process.Id, out var image) || !ImagePath(process.SafeHandle).Equals(image, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Target HWND is not owned by the live private-desktop host");
     }
 
@@ -195,13 +233,13 @@ public sealed class PrivateDesktop : IDisposable
         return windows.Where(window => GetWindowThreadProcessId(window, out var owner) != 0 && owner == process.Id).ToArray();
     }
 
-    public nint MainWindow(Process process, int timeoutSeconds)
+    public nint MainWindow(Process process, int timeoutSeconds, long? operationDeadline = null)
     {
-        var deadline = Stopwatch.GetTimestamp() + timeoutSeconds * Stopwatch.Frequency;
+        var deadline = Math.Min(operationDeadline ?? long.MaxValue, Stopwatch.GetTimestamp() + timeoutSeconds * Stopwatch.Frequency);
         while (Stopwatch.GetTimestamp() < deadline)
         {
             if (process.HasExited) throw new InvalidOperationException("Private host exited before main-window discovery");
-            var window = Windows(process).SingleOrDefault(window => ClassName(window).StartsWith("wxWindow", StringComparison.Ordinal) && ReadText(window, process).Contains("Aegisub", StringComparison.Ordinal));
+            var window = Windows(process).SingleOrDefault(window => ClassName(window).StartsWith("wxWindow", StringComparison.Ordinal) && ReadText(window, process, RemainingMessageTimeout(deadline)).Contains("Aegisub", StringComparison.Ordinal));
             if (window != 0) { Record("main-window", process, GetWindowThreadProcessId(window, out _)); return window; }
             Thread.Sleep(50);
         }
@@ -210,7 +248,8 @@ public sealed class PrivateDesktop : IDisposable
 
     public void Stop(Process process)
     {
-        if (owned.TryGetValue(process.Id, out var start) && !process.HasExited && process.StartTime.ToUniversalTime().Ticks == start)
+        if (owned.TryGetValue(process.Id, out var start) && !process.HasExited && process.StartTime.ToUniversalTime().Ticks == start
+            && processPaths.TryGetValue(process.Id, out var image) && ImagePath(process.SafeHandle).Equals(image, StringComparison.OrdinalIgnoreCase))
         { process.Kill(entireProcessTree: true); process.WaitForExit(5000); }
     }
 
@@ -252,17 +291,24 @@ public sealed class PrivateDesktop : IDisposable
         return text.ToString();
     }
 
-    public static string Text(nint window)
+    public static string Text(nint window, int timeoutMilliseconds = 1000)
     {
         var text = new StringBuilder(32_768);
-        if (SendMessageTimeout(window, 0x000D, text.Capacity, text, 0x22, 1000, out _) == 0) throw Error("WM_GETTEXT");
+        if (SendMessageTimeout(window, 0x000D, text.Capacity, text, 0x22, checked((uint)timeoutMilliseconds), out _) == 0) throw Error("WM_GETTEXT");
         return text.ToString();
     }
 
-    public string ReadText(nint window, Process process)
+    public string ReadText(nint window, Process process, int timeoutMilliseconds = 1000)
     {
         VerifyWindow(window, process);
-        return Text(window);
+        return Text(window, timeoutMilliseconds);
+    }
+
+    private static int RemainingMessageTimeout(long deadline)
+    {
+        var remaining = deadline - Stopwatch.GetTimestamp();
+        if (remaining <= 0) throw new TimeoutException("Native observation exceeded its scenario deadline");
+        return (int)Math.Clamp(remaining * 1000 / Stopwatch.Frequency, 1, 1000);
     }
 
     private string Record(string phase, Process process, uint thread)
@@ -271,7 +317,8 @@ public sealed class PrivateDesktop : IDisposable
         var identity = JsonSerializer.Serialize(new
         {
             phase, pid = process.Id, start_utc = process.StartTime.ToUniversalTime(),
-            thread_id = thread, desktop = ObjectName(GetThreadDesktop(thread)), window_station = ObjectName(GetProcessWindowStation()), input_desktop = inputName
+            thread_id = thread, desktop = ObjectName(GetThreadDesktop(thread)), window_station = ObjectName(GetProcessWindowStation()), input_desktop = inputName,
+            actual_executable = ImagePath(process.SafeHandle), image_query = "QueryFullProcessImageNameW"
         });
         File.AppendAllText(Path.Combine(artifacts, "desktop-evidence.ndjson"), identity + Environment.NewLine);
         return identity;
@@ -309,8 +356,47 @@ public sealed class PrivateDesktop : IDisposable
     public void Dispose()
     {
         foreach (var handle in processHandles.Values) { Cleanup(handle); handle.Dispose(); }
+        processJob?.Dispose();
         desktop.Dispose();
     }
+
+    private static string ImagePath(SafeHandle process)
+    {
+        var path = new char[32768];
+        uint size = (uint)path.Length;
+        if (QueryFullProcessImageName(process, 0, path, ref size) == 0) throw Error("QueryFullProcessImageNameW");
+        return Path.GetFullPath(new string(path, 0, checked((int)size)));
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct BasicJobLimits
+    {
+        public long ProcessTime, JobTime;
+        public uint LimitFlags;
+        public nuint MinimumWorkingSet, MaximumWorkingSet;
+        public uint ActiveProcessLimit;
+        public nuint Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct IoCounters
+    {
+        public ulong ReadOperations, WriteOperations, OtherOperations, ReadBytes, WriteBytes, OtherBytes;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct JobLimits
+    {
+        public BasicJobLimits Basic;
+        public IoCounters Io;
+        public nuint ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory;
+    }
+    [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int QueryFullProcessImageName(SafeHandle process, uint flags, [Out] char[] path, ref uint size);
+    [DllImport("kernel32.dll", EntryPoint = "CreateJobObjectW", ExactSpelling = true, CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateJobObject(nint attributes, string? name);
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern int SetInformationJobObject(SafeFileHandle job, int informationClass, ref JobLimits limits, uint size);
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern int AssignProcessToJobObject(SafeFileHandle job, SafeWaitHandle process);
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern uint ResumeThread(SafeWaitHandle thread);
 
     [StructLayout(LayoutKind.Sequential)] private struct BasicProcessInfo { public nint Reserved, Peb, Reserved2, Reserved3, Pid, Parent; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct StartupInfo
