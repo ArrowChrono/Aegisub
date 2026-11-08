@@ -15,6 +15,13 @@
 /// Pure math for ratio-preserving Scale tool actions.
 namespace visual_tool_scale_policy {
 
+inline std::optional<Vector2D> Nudge(Vector2D initial, Vector2D direction, float step) {
+	auto const value = initial + direction * Vector2D(1, -1) * step;
+	if (!std::isfinite(value.X()) || !std::isfinite(value.Y()))
+		return {};
+	return Vector2D(0, 0).Max(value);
+}
+
 inline std::optional<Vector2D> ScaleDrag(Vector2D initial, Vector2D delta, bool single_axis, bool preserve_ratio, bool snap) {
 	delta = delta * Vector2D(1, -1);
 	if (single_axis)

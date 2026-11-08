@@ -207,15 +207,16 @@ bool VisualToolRotateXY::Nudge(Vector2D direction, VisualNudgeMagnitude magnitud
 		"Tool/Visual/Nudge/Rotate Step Large",
 		magnitude));
 
-	// Same polarity as UpdateHold: right → +\fry, up → +\frx
+	auto const next_y = direction.X() != 0.f ? aegisub::visual_transform::NudgeRotation(angle_y, direction.X() * step) : std::optional<float>(angle_y);
+	auto const next_x = direction.Y() != 0.f ? aegisub::visual_transform::NudgeRotation(angle_x, -direction.Y() * step) : std::optional<float>(angle_x);
+	if (!next_y || !next_x)
+		return false;
 	if (direction.X() != 0.f) {
-		angle_y = fmodf(angle_y + direction.X() * step + 360.f, 360.f);
+		angle_y = *next_y;
 		QueueSelectedGeometryOverride("\\fry", agi::format("%.4g", angle_y));
 	}
 	if (direction.Y() != 0.f) {
-		// direction.Y is -1 for Up; UpdateHold uses angle_x = orig_x - delta.Y with
-		// screen-Y-down, so Up decreases screen Y → increases frx when mirrored as -direction.Y.
-		angle_x = fmodf(angle_x - direction.Y() * step + 360.f, 360.f);
+		angle_x = *next_x;
 		QueueSelectedGeometryOverride("\\frx", agi::format("%.4g", angle_x));
 	}
 

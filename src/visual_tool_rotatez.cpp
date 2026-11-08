@@ -267,8 +267,10 @@ bool VisualToolRotateZ::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude
 			"Tool/Visual/Nudge/Rotate Step",
 			"Tool/Visual/Nudge/Rotate Step Large",
 			magnitude));
-		// Right = clockwise = +\frz in ASS
-		angle = fmodf(angle + direction.X() * step + 360.f, 360.f);
+		auto next = aegisub::visual_transform::NudgeRotation(angle, direction.X() * step);
+		if (!next)
+			return false;
+		angle = *next;
 		QueueSelectedGeometryOverride("\\frz", agi::format("%.4g", angle));
 		changed = true;
 	}

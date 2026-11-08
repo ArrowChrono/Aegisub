@@ -24,6 +24,7 @@
 #include "visual_tool_transform_policy.h"
 #include "visual_tool_scale_policy.h"
 #include "visual_tool_transform_overlay.h"
+#include "numeric_utils.h"
 
 #include <libaegisub/format.h>
 
@@ -335,6 +336,54 @@ struct Controller::Impl {
 		for (auto const& [id, edit] : drafts)
 			cumulative.push_back(edit);
 		std::ranges::sort(cumulative, row_less);
+	}
+
+	Result ApplyCommand(std::vector<Line> changes) {
+		BeginOperation();
+		for (auto& candidate : changes) {
+			auto const& current = GetLine(candidate.id);
+			auto const& source = planned_sources.try_emplace(candidate.id, current).first->second;
+			candidate.text = source.text;
+			auto write = [&](char const *tag, std::string const& value) {
+				candidate.text = SetOverride(candidate.text, tag, value);
+			};
+			if (mode == Mode::RotateZ) {
+				if (candidate.rotation_z != source.rotation_z) {
+					auto value = agi::format("%.4g", candidate.rotation_z);
+					write("\\frz", value);
+					candidate.rotation_z = std::stof(value);
+				}
+				if (candidate.origin.value_or(candidate.position) != source.origin.value_or(source.position))
+					write("\\org", candidate.origin->PStr());
+				else
+					candidate.origin = source.origin;
+			}
+			else if (mode == Mode::RotateXY) {
+				if (candidate.rotation_x != source.rotation_x) {
+					auto value = agi::format("%.4g", candidate.rotation_x);
+					write("\\frx", value);
+					candidate.rotation_x = std::stof(value);
+				}
+				if (candidate.rotation_y != source.rotation_y) {
+					auto value = agi::format("%.4g", candidate.rotation_y);
+					write("\\fry", value);
+					candidate.rotation_y = std::stof(value);
+				}
+			}
+			else if (candidate.scale != source.scale) {
+				auto const x = float_to_string(candidate.scale.X());
+				auto const y = float_to_string(candidate.scale.Y());
+				write("\\fscx", x);
+				write("\\fscy", y);
+				candidate.scale = {std::stof(x), std::stof(y)};
+			}
+			if (candidate.text != current.text)
+				dirty.insert(candidate.id);
+		}
+		for (auto& candidate : changes)
+			GetLine(candidate.id) = std::move(candidate);
+		EndOperation();
+		return {.geometry_changed = !incremental.empty(), .toolbar_changed = !incremental.empty()};
 	}
 
 	void SelectFeature(Key key, bool clear, Result& result) {
@@ -956,6 +1005,79 @@ Result Controller::ToggleMovePosition() {
 	s.hovered.reset();
 	s.EndOperation();
 	return {.geometry_changed = true, .toolbar_changed = true};
+}
+
+bool Controller::CanNudge() const {
+	return impl->IsTransform() && impl->ActiveVisible() && !impl->selected.empty() && !IsInteracting() && !impl->prepared;
+}
+
+Result Controller::Nudge(Vector2D direction, float step, float origin_step) {
+	auto& s = *impl;
+	if (!CanNudge() || !std::isfinite(direction.X()) || !std::isfinite(direction.Y()) ||
+		!std::isfinite(step) || !std::isfinite(origin_step) || step <= 0 || origin_step <= 0 ||
+		direction == Vector2D(0, 0))
+		return {};
+	auto const& active = s.GetLine(*s.active);
+	std::vector<Line> changes;
+	changes.reserve(s.selected.size());
+	for (int id : s.selected) {
+		auto candidate = s.GetLine(id);
+		if (s.mode == Mode::RotateZ) {
+			if (direction.X() != 0) {
+				auto angle = visual_transform::NudgeRotation(active.rotation_z, direction.X() * step);
+				if (!angle)
+					return {};
+				candidate.rotation_z = *angle;
+			}
+			if (direction.Y() != 0) {
+				auto origin = candidate.origin.value_or(candidate.position) + Vector2D(0.f, direction.Y() * origin_step);
+				if (!std::isfinite(origin.X()) || !std::isfinite(origin.Y()))
+					return {};
+				candidate.origin = origin;
+			}
+		}
+		else if (s.mode == Mode::RotateXY) {
+			if (direction.X() != 0) {
+				auto angle = visual_transform::NudgeRotation(active.rotation_y, direction.X() * step);
+				if (!angle)
+					return {};
+				candidate.rotation_y = *angle;
+			}
+			if (direction.Y() != 0) {
+				auto angle = visual_transform::NudgeRotation(active.rotation_x, -direction.Y() * step);
+				if (!angle)
+					return {};
+				candidate.rotation_x = *angle;
+			}
+		}
+		else {
+			auto scale = visual_tool_scale_policy::Nudge(active.scale, direction, step);
+			if (!scale)
+				return {};
+			candidate.scale = *scale;
+		}
+		changes.push_back(std::move(candidate));
+	}
+	return s.ApplyCommand(std::move(changes));
+}
+
+bool Controller::CanNormalizeScale(visual_tool_scale_policy::Axis axis) const {
+	return impl->mode == Mode::Scale && CanNudge() &&
+		   std::ranges::all_of(impl->selected, [&](int id) { return visual_tool_scale_policy::NormalizeTo100(impl->GetLine(id).scale, axis).has_value(); });
+}
+
+Result Controller::NormalizeScale(visual_tool_scale_policy::Axis axis) {
+	if (!CanNormalizeScale(axis))
+		return {};
+	auto& s = *impl;
+	std::vector<Line> changes;
+	changes.reserve(s.selected.size());
+	for (int id : s.selected) {
+		auto candidate = s.GetLine(id);
+		candidate.scale = *visual_tool_scale_policy::NormalizeTo100(candidate.scale, axis);
+		changes.push_back(std::move(candidate));
+	}
+	return s.ApplyCommand(std::move(changes));
 }
 
 Result Controller::FinishInteraction() {

@@ -9,6 +9,13 @@
 namespace aegisub::visual_transform {
 constexpr float DegreesPerRadian = 180.f / std::numbers::pi_v<float>;
 
+inline std::optional<float> NudgeRotation(float initial, float delta) {
+	float const angle = initial + delta + 360.f;
+	if (!std::isfinite(angle))
+		return {};
+	return std::fmod(angle, 360.f);
+}
+
 inline float RotationAnchor(float angle, Vector2D origin, Vector2D pointer) {
 	return angle + (origin - pointer).Angle() * DegreesPerRadian;
 }

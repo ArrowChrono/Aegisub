@@ -3,6 +3,7 @@
 #include "vector2d.h"
 #include "visual_text_edit.h"
 #include "visual_tool_render_snapshot.h"
+#include "visual_tool_scale_policy.h"
 
 #include <cstdint>
 #include <functional>
@@ -136,6 +137,10 @@ class Controller final {
 	Result Pointer(PointerInput const& input, VisualToolRenderSnapshot const *displayed_snapshot = nullptr, bool defer_begin = false, OverridePlanner const& planner = {});
 	Result BeginPreparedPress(bool preserve_move_times = false, OverridePlanner const& planner = {});
 	Result ToggleMovePosition();
+	[[nodiscard]] bool CanNudge() const;
+	Result Nudge(Vector2D direction, float step, float origin_step);
+	[[nodiscard]] bool CanNormalizeScale(visual_tool_scale_policy::Axis axis) const;
+	Result NormalizeScale(visual_tool_scale_policy::Axis axis);
 	Result FinishInteraction();
 	void AcceptChanges();
 

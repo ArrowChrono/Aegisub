@@ -5,6 +5,7 @@
 #include "../../src/visual_tool_drag_snapshot.h"
 #include "../../src/visual_tool_transform_policy.h"
 #include "../../src/visual_tool_transform_overlay.h"
+#include "../../src/visual_tool_scale_policy.h"
 #include "../../src/visual_ass_edit.h"
 #include "../../src/ass_dialogue.h"
 #include "../../src/ass_style.h"
@@ -1246,4 +1247,313 @@ TEST(visual_edit_controller, rotate_xy_snapshots_reuse_prepared_geometry_without
 	ASSERT_EQ(1u, reset.prepared_batches.size());
 	EXPECT_EQ(c.prepared_batches.front(), reset.prepared_batches.front());
 	EXPECT_NE(c.perspective_batches.front().transform.origin, reset.perspective_batches.front().transform.origin);
+}
+
+TEST(visual_edit_controller, nudge_rotate_z_uses_active_angle_for_hidden_selection_and_accepts_repeated_commands) {
+	auto active = MakeLine(1, 0, R"({\fr359.5\move(20,30,40,50,100,200)\b1}Active)", {20, 30});
+	active.rotation_z = 359.5f;
+	active.move = Move{.start = {20, 30}, .end = {40, 50}, .start_ms = 100, .end_ms = 200};
+	auto hidden = MakeLine(2, 7, R"({\frz45\fax0.2}Hidden{\i1}tail)", {300, 200});
+	hidden.rotation_z = 45;
+	hidden.first_frame = 101;
+	Controller controller(Mode::RotateZ);
+	controller.Reset({active, hidden}, {1, 2}, 1, {}, Canvas());
+
+	ASSERT_TRUE(controller.CanNudge());
+	EXPECT_TRUE(controller.Nudge({1, 0}, .75f, 10).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\b1\frz0.25}Active)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\fax0.2\frz0.25}Hidden{\i1}tail)", controller.DraftChanges()[1].text);
+	EXPECT_EQ(7, controller.DraftChanges()[1].row);
+	EXPECT_EQ(hidden.text, controller.DraftChanges()[1].original_text);
+	auto const accepted = controller.DraftChanges()[0].text;
+	controller.AcceptChanges();
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+
+	EXPECT_TRUE(controller.Nudge({-1, 0}, .5f, 10).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(accepted, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\b1\frz359.8}Active)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\fax0.2\frz359.8}Hidden{\i1}tail)", controller.DraftChanges()[1].text);
+	EXPECT_FALSE(controller.IsInteracting());
+	EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+}
+
+TEST(visual_edit_controller, nudge_rotate_z_origin_uses_each_selected_source_without_editing_unselected_active) {
+	auto active = MakeLine(1, 0, R"({\pos(400,300)\frz22}Active)", {400, 300});
+	auto origin = MakeLine(2, 3, R"({\org(100,150)\move(20,30,40,50,100,200)\frz40}Origin)", {20, 30});
+	origin.origin = Vector2D(100, 150);
+	auto fallback = MakeLine(3, 8, R"({\pos(250,200)\fscx125}Fallback)", {250, 200});
+	fallback.first_frame = 101;
+	Controller controller(Mode::RotateZ);
+	controller.Reset({active, origin, fallback}, {2, 3}, 1, {},
+					 {.video_position = {10, 20}, .video_size = {1280, 480}, .script_size = {640, 480}});
+
+	EXPECT_TRUE(controller.Nudge({0, -1}, 15, 2.5f).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(2, controller.DraftChanges()[0].id);
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\frz40\org(100,147.5)}Origin)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(3, controller.DraftChanges()[1].id);
+	EXPECT_EQ(R"({\pos(250,200)\fscx125\org(250,197.5)}Fallback)", controller.DraftChanges()[1].text);
+	EXPECT_EQ((std::set<int>{2, 3}), controller.SelectedLines());
+	EXPECT_EQ(std::optional<int>(1), controller.ActiveLine());
+}
+
+TEST(visual_edit_controller, nudge_rotate_xy_uses_active_axis_and_keeps_other_selected_axis) {
+	auto active = MakeLine(1, 0, R"({\frx359.5\fry359.25\frz30}Active)", {100, 100});
+	active.rotation_x = 359.5f;
+	active.rotation_y = 359.25f;
+	auto selected = MakeLine(2, 2, R"({\frx70\fry80\fax0.2\fay-0.1\frz45}Selected)", {200, 200});
+	selected.rotation_x = 70;
+	selected.rotation_y = 80;
+	selected.first_frame = 101;
+	Controller controller(Mode::RotateXY);
+	controller.Reset({active, selected}, {2}, 1, {}, Canvas());
+
+	EXPECT_TRUE(controller.Nudge({1, 0}, 1, 10).geometry_changed);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(2, controller.DraftChanges()[0].id);
+	EXPECT_EQ(R"({\frx70\fax0.2\fay-0.1\frz45\fry0.25}Selected)", controller.DraftChanges()[0].text);
+	controller.AcceptChanges();
+	EXPECT_TRUE(controller.Nudge({0, -1}, 1, 10).geometry_changed);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\fax0.2\fay-0.1\frz45\fry0.25\frx0.5}Selected)", controller.DraftChanges()[0].text);
+	EXPECT_EQ((std::set<int>{2}), controller.SelectedLines());
+}
+
+TEST(visual_edit_controller, nudge_scale_uses_active_pair_decimal_steps_and_zero_clamp) {
+	auto active = MakeLine(1, 0, R"({\fscx0.5\fscy80.25}Active)", {100, 100});
+	active.scale = {.5f, 80.25f};
+	auto hidden = MakeLine(2, 5, R"({\fscx200\fscy50\move(20,30,40,50,100,200)\b1}Hidden)", {20, 30});
+	hidden.scale = {200, 50};
+	hidden.first_frame = 101;
+	Controller controller(Mode::Scale);
+	controller.Reset({active, hidden}, {1, 2}, 1, {}, Canvas());
+
+	EXPECT_TRUE(controller.Nudge({-1, 0}, .75f, 10).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\fscx0\fscy80.25}Active)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\b1\fscx0\fscy80.25}Hidden)", controller.DraftChanges()[1].text);
+	controller.AcceptChanges();
+	EXPECT_TRUE(controller.Nudge({0, -1}, .25f, 10).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\fscx0\fscy80.5}Active)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\b1\fscx0\fscy80.5}Hidden)", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, normalize_scale_uses_each_hidden_source_ratio_without_editing_unselected_active) {
+	using Axis = visual_tool_scale_policy::Axis;
+	auto active = MakeLine(1, 0, R"({\fscx123\fscy456}Active)", {100, 100});
+	active.scale = {123, 456};
+	auto first = MakeLine(2, 4, R"({\fscx200\fscy50\move(20,30,40,50,100,200)\b1}First)", {20, 30});
+	first.scale = {200, 50};
+	auto hidden = MakeLine(3, 9, R"({\fscx80\fscy120\fax0.2}Hidden{\i1}tail)", {300, 200});
+	hidden.scale = {80, 120};
+	hidden.first_frame = 101;
+	Controller controller(Mode::Scale);
+	controller.Reset({active, first, hidden}, {2, 3}, 1, {}, Canvas());
+
+	ASSERT_TRUE(controller.CanNormalizeScale(Axis::X));
+	EXPECT_TRUE(controller.NormalizeScale(Axis::X).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(2, controller.DraftChanges()[0].id);
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\b1\fscx100\fscy25}First)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(3, controller.DraftChanges()[1].id);
+	EXPECT_EQ(R"({\fax0.2\fscx100\fscy150}Hidden{\i1}tail)", controller.DraftChanges()[1].text);
+	EXPECT_EQ((std::set<int>{2, 3}), controller.SelectedLines());
+	controller.AcceptChanges();
+
+	ASSERT_TRUE(controller.CanNormalizeScale(Axis::Y));
+	EXPECT_TRUE(controller.NormalizeScale(Axis::Y).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\b1\fscx400\fscy100}First)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\fax0.2\fscx66.667\fscy100}Hidden{\i1}tail)", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, normalize_scale_rejects_invalid_selected_axis_atomically_and_allows_dependent_zero) {
+	using Axis = visual_tool_scale_policy::Axis;
+	auto valid = MakeLine(1, 0, R"({\fscx200\fscy50\b1}Valid)", {100, 100});
+	valid.scale = {200, 50};
+	auto zero = MakeLine(2, 5, R"({\fscx0\fscy50\frz20}Zero)", {300, 200});
+	zero.scale = {0, 50};
+	zero.first_frame = 101;
+	Controller controller(Mode::Scale);
+	controller.Reset({valid, zero}, {1, 2}, 1, {}, Canvas());
+
+	EXPECT_FALSE(controller.CanNormalizeScale(Axis::X));
+	EXPECT_FALSE(controller.NormalizeScale(Axis::X).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	ASSERT_TRUE(controller.CanNormalizeScale(Axis::Y));
+	EXPECT_TRUE(controller.NormalizeScale(Axis::Y).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(valid.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(zero.text, controller.DraftChanges()[1].original_text);
+	EXPECT_EQ(R"({\b1\fscx400\fscy100}Valid)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\frz20\fscx0\fscy100}Zero)", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, discrete_commands_preserve_exact_noop_without_inserting_inherited_tags) {
+	using Axis = visual_tool_scale_policy::Axis;
+	auto inherited = MakeLine(1, 0, R"({\pos(100,100)\b1}Text{\i1}tail)", {100, 100});
+	Controller controller(Mode::Scale);
+	controller.Reset({inherited}, {1}, 1, {}, Canvas());
+	ASSERT_TRUE(controller.CanNormalizeScale(Axis::X));
+	EXPECT_FALSE(controller.NormalizeScale(Axis::X).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+
+	auto zero = MakeLine(1, 0, R"({\fscx0.000\fscy080.250\b1}Exact{\i1}tail)", {100, 100});
+	zero.scale = {0.f, 80.25f};
+	controller.Reset({zero}, {1}, 1, {}, Canvas());
+	EXPECT_FALSE(controller.Nudge({-1, 0}, 1, 10).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	EXPECT_TRUE(controller.Nudge({0, -1}, .25f, 10).geometry_changed);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(zero.text, controller.DraftChanges()[0].original_text);
+}
+
+TEST(visual_edit_controller, discrete_commands_require_supported_mode_visible_active_and_nonempty_selection) {
+	using Axis = visual_tool_scale_policy::Axis;
+	auto line = MakeLine(1, 0, R"({\fscx200\fscy50}Text)", {100, 100});
+	line.scale = {200, 50};
+	for (auto mode : {Mode::Drag, Mode::RectClip, Mode::RotateZ, Mode::RotateXY, Mode::Scale}) {
+		SCOPED_TRACE(static_cast<int>(mode));
+		Controller controller(mode);
+		controller.Reset({line}, {1}, 1, {}, Canvas());
+		bool const supports_nudge = mode == Mode::RotateZ || mode == Mode::RotateXY || mode == Mode::Scale;
+		EXPECT_EQ(supports_nudge, controller.CanNudge());
+		EXPECT_EQ(mode == Mode::Scale, controller.CanNormalizeScale(Axis::X));
+		if (!supports_nudge) {
+			EXPECT_FALSE(controller.Nudge({1, 0}, 1, 10).geometry_changed);
+			EXPECT_TRUE(controller.DraftChanges().empty());
+		}
+		if (mode != Mode::Scale) {
+			EXPECT_FALSE(controller.NormalizeScale(Axis::X).geometry_changed);
+			EXPECT_TRUE(controller.DraftChanges().empty());
+		}
+		controller.SetFrame({.number = 101});
+		EXPECT_FALSE(controller.CanNudge());
+		EXPECT_FALSE(controller.CanNormalizeScale(Axis::X));
+		EXPECT_FALSE(controller.Nudge({1, 0}, 1, 10).geometry_changed);
+		EXPECT_FALSE(controller.NormalizeScale(Axis::X).geometry_changed);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+		controller.SetFrame({});
+		controller.SetSelection({}, 1);
+		EXPECT_FALSE(controller.CanNudge());
+		EXPECT_FALSE(controller.CanNormalizeScale(Axis::X));
+		EXPECT_FALSE(controller.Nudge({1, 0}, 1, 10).geometry_changed);
+		EXPECT_FALSE(controller.NormalizeScale(Axis::X).geometry_changed);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+		controller.SetSelection({1}, std::nullopt);
+		EXPECT_FALSE(controller.CanNudge());
+		EXPECT_FALSE(controller.CanNormalizeScale(Axis::X));
+		EXPECT_FALSE(controller.Nudge({1, 0}, 1, 10).geometry_changed);
+		EXPECT_FALSE(controller.NormalizeScale(Axis::X).geometry_changed);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+	}
+}
+
+TEST(visual_edit_controller, discrete_commands_reject_pointer_interaction_without_losing_its_draft) {
+	using Axis = visual_tool_scale_policy::Axis;
+	auto line = MakeLine(1, 0, R"({\pos(100,100)\fscx150\fscy80}Text)", {100, 100});
+	line.scale = {150, 80};
+	Controller controller(Mode::Scale);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {300, 200}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {340, 180}, true));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	auto const preview = controller.DraftChanges()[0].text;
+
+	EXPECT_FALSE(controller.CanNudge());
+	EXPECT_FALSE(controller.CanNormalizeScale(Axis::X));
+	EXPECT_FALSE(controller.Nudge({1, 0}, 1, 10).geometry_changed);
+	EXPECT_FALSE(controller.NormalizeScale(Axis::X).geometry_changed);
+	EXPECT_TRUE(controller.IsInteracting());
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(preview, controller.DraftChanges()[0].text);
+	EXPECT_EQ(line.text, controller.DraftChanges()[0].original_text);
+	controller.FinishInteraction();
+	controller.AcceptChanges();
+	EXPECT_TRUE(controller.CanNudge());
+	EXPECT_TRUE(controller.CanNormalizeScale(Axis::X));
+}
+
+TEST(visual_edit_controller, nudge_rejects_invalid_input_without_partial_geometry_or_draft_changes) {
+	float const infinity = std::numeric_limits<float>::infinity();
+	float const nan = std::numeric_limits<float>::quiet_NaN();
+	struct InvalidInput {
+		Vector2D direction;
+		float step;
+		float origin_step;
+	};
+	InvalidInput const invalid[] = {
+		{.direction = {nan, 0.f}, .step = 1, .origin_step = 10},
+		{.direction = {0.f, infinity}, .step = 1, .origin_step = 10},
+		{.direction = {1, 0}, .step = nan, .origin_step = 10},
+		{.direction = {1, 0}, .step = infinity, .origin_step = 10},
+		{.direction = {0, 1}, .step = 1, .origin_step = nan},
+		{.direction = {0, 1}, .step = 1, .origin_step = infinity},
+		{.direction = {1, 0}, .step = -1, .origin_step = 10},
+		{.direction = {0, 1}, .step = 1, .origin_step = -10},
+	};
+	for (auto mode : {Mode::RotateZ, Mode::RotateXY, Mode::Scale}) {
+		SCOPED_TRACE(static_cast<int>(mode));
+		auto line = MakeLine(1, 0, R"({\pos(100,100)\fscx150\fscy80\frz30\frx20\fry10}Text)", {100, 100});
+		line.scale = {150, 80};
+		line.rotation_z = 30;
+		line.rotation_x = 20;
+		line.rotation_y = 10;
+		for (size_t i = 0; i < std::size(invalid); ++i) {
+			SCOPED_TRACE(i);
+			Controller controller(mode);
+			controller.Reset({line}, {1}, 1, {}, Canvas());
+			auto const& input = invalid[i];
+			EXPECT_FALSE(controller.Nudge(input.direction, input.step, input.origin_step).geometry_changed);
+			EXPECT_TRUE(controller.DraftChanges().empty());
+			EXPECT_TRUE(controller.IncrementalChanges().empty());
+			EXPECT_FALSE(controller.IsInteracting());
+		}
+	}
+}
+
+TEST(visual_edit_controller, nudge_origin_rejects_late_selected_overflow_before_mutating_earlier_rows) {
+	auto first = MakeLine(1, 0, R"({\org(100,150)\frz20}First)", {100, 100});
+	first.origin = Vector2D(100, 150);
+	auto overflow = MakeLine(2, 8, R"({\b1}Overflow)", {300.f, std::numeric_limits<float>::max()});
+	overflow.first_frame = 101;
+	Controller controller(Mode::RotateZ);
+	controller.Reset({first, overflow}, {1, 2}, 1, {}, Canvas());
+
+	EXPECT_FALSE(controller.Nudge({0, 1}, 1, std::numeric_limits<float>::max()).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	controller.SetSelection({1}, 1);
+	EXPECT_TRUE(controller.Nudge({0, -1}, 1, 2.5f).geometry_changed);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(first.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(R"({\frz20\org(100,147.5)}First)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, opposite_nudges_restore_exact_burst_baseline) {
+	auto line = MakeLine(1, 0, R"({\pos(100,100)\frz020.00\fscx100.00\fscy080.0\b1}Text)", {100, 100});
+	line.rotation_z = 20;
+	line.scale = {100, 80};
+	for (auto mode : {Mode::RotateZ, Mode::RotateXY, Mode::Scale}) {
+		Controller controller(mode);
+		controller.Reset({line}, {1}, 1, {}, Canvas());
+		ASSERT_TRUE(controller.Nudge({1, 0}, 1, 2).geometry_changed);
+		ASSERT_TRUE(controller.Nudge({-1, 0}, 1, 2).geometry_changed);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+		ASSERT_EQ(1u, controller.IncrementalChanges().size());
+		EXPECT_EQ(line.text, controller.IncrementalChanges()[0].text);
+	}
+	Controller origin(Mode::RotateZ);
+	origin.Reset({line}, {1}, 1, {}, Canvas());
+	ASSERT_TRUE(origin.Nudge({0, 1}, 1, 2).geometry_changed);
+	ASSERT_TRUE(origin.Nudge({0, -1}, 1, 2).geometry_changed);
+	EXPECT_TRUE(origin.DraftChanges().empty());
+	EXPECT_EQ(line.text, origin.IncrementalChanges()[0].text);
 }

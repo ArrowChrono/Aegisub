@@ -320,8 +320,10 @@ bool VisualToolScale::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) 
 		"Tool/Visual/Nudge/Scale Step Large",
 		magnitude));
 
-	// Same polarity as UpdateHold: right -> +\fscx, up -> +\fscy.
-	scale = Vector2D(0, 0).Max(scale + Vector2D(direction.X(), -direction.Y()) * step);
+	auto const next = visual_tool_scale_policy::Nudge(scale, direction, step);
+	if (!next)
+		return false;
+	scale = *next;
 	QueueSelectedGeometryOverride("\\fscx", float_to_string(scale.X()));
 	QueueSelectedGeometryOverride("\\fscy", float_to_string(scale.Y()));
 
