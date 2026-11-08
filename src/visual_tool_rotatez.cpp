@@ -20,6 +20,8 @@
 
 #include "visual_tool_rotatez.h"
 
+#include "ass_dialogue.h"
+#include "ass_file.h"
 #include "compat.h"
 #include "include/aegisub/context.h"
 #include "include/aegisub/context_ui.h"
@@ -27,7 +29,10 @@
 #include "selection_controller.h"
 #include "video_overlay_draw_context.h"
 #include "video_overlay_helpers.h"
+#include "visual_ass_edit.h"
 #include "visual_tool_render_snapshot.h"
+#include "visual_tool_transform_policy.h"
+#include "visual_tool_transform_overlay.h"
 
 #include <libaegisub/format.h>
 
@@ -35,40 +40,8 @@
 #include <wx/colour.h>
 
 static const float deg2rad = 3.1415926536f / 180.f;
-static const float rad2deg = 180.f / 3.1415926536f;
 
 namespace {
-void DrawProjectedAnnulus(VideoOverlayDrawContext &context, Vector2D origin, Vector2D scale, float rx, float ry, float outer_radius, float inner_radius, float start_deg, float end_deg, float perspective_z_scale) {
-	bool const full_circle = std::abs(end_deg - start_deg) < 0.001f;
-	float arc_start = start_deg * deg2rad;
-	float arc_end = full_circle ? (start_deg + 360.0f) * deg2rad : end_deg * deg2rad;
-	if (arc_end <= arc_start)
-		arc_end += 2.0f * 3.1415926536f;
-
-	int const steps = std::max(24, static_cast<int>(outer_radius * (arc_end - arc_start) / 12.0f));
-	std::vector<Vector2D> outer_points;
-	std::vector<Vector2D> inner_points;
-	outer_points.reserve(steps + 1);
-	inner_points.reserve(steps + 1);
-	for (int i = 0; i <= steps; ++i) {
-		float const t = static_cast<float>(i) / steps;
-		float const angle = arc_start + (arc_end - arc_start) * t;
-		Vector2D const dir = Vector2D::FromAngle(angle);
-		outer_points.push_back(video_overlay_helpers::ProjectScaledRotatedPoint(dir * outer_radius, origin, scale, rx, ry, 0.0f, perspective_z_scale));
-		inner_points.push_back(video_overlay_helpers::ProjectScaledRotatedPoint(dir * inner_radius, origin, scale, rx, ry, 0.0f, perspective_z_scale));
-	}
-
-	for (int i = 0; i < steps; ++i) {
-		Vector2D const quad[] = {
-			outer_points[i],
-			outer_points[i + 1],
-			inner_points[i + 1],
-			inner_points[i],
-		};
-		context.DrawPolygon(quad, 4);
-	}
-}
-
 struct RotateZState {
 	Vector2D origin;
 	Vector2D pos;
@@ -224,70 +197,33 @@ std::shared_ptr<const VisualToolRenderSnapshot> VisualToolRotateZ::CaptureRender
 
 void VisualToolRotateZ::DrawOverlay(VideoOverlayDrawContext &context) {
 	if (!active_line) return;
-
 	DrawAllFeatures(context);
-
-	wxColour const line_color_primary = to_wx(line_color_primary_opt->GetColor());
-	wxColour const line_color_secondary = to_wx(line_color_secondary_opt->GetColor());
-	wxColour const highlight_color = to_wx(highlight_color_primary_opt->GetColor());
-	float const perspective_z_scale = video_overlay_helpers::GetLayoutResAdjustedPerspectiveZScale(script_res, layout_res);
-
-	float radius = (pos - org->pos).Len();
-	float const original_radius = radius;
-	if (radius < 50)
-		radius = 50;
-
-	context.SetLineColour(line_color_secondary, 1.0f, 1);
-	context.SetFillColour(highlight_color, 0.3f);
-	DrawProjectedAnnulus(context, org->pos, scale, rotation_x, rotation_y, radius + 4, radius - 4, 0.0f, 0.0f, perspective_z_scale);
-
-	int const markers = 6;
-	float const mark_start = -90.0f / markers;
-	float const mark_end = mark_start + (180.0f / markers);
-	for (int i = 0; i < markers; ++i) {
-		float const marker_angle = i * (360.0f / markers);
-		DrawProjectedAnnulus(context, org->pos, scale, rotation_x, rotation_y, radius + 30, radius + 12, marker_angle + mark_start, marker_angle + mark_end, perspective_z_scale);
-	}
-
-	Vector2D const angle_vec = Vector2D::FromAngle(angle * deg2rad);
-	context.SetLineColour(line_color_primary, 1.0f, 2);
-	context.SetFillColour(line_color_primary, 0.0f);
-	video_overlay_helpers::DrawProjectedLine(context, angle_vec * -radius, angle_vec * radius, org->pos, scale, rotation_x, rotation_y, 0.0f, perspective_z_scale);
-
-	if (org->pos != pos) {
-		Vector2D const rotated_pos = Vector2D::FromAngle(angle * deg2rad - (pos - org->pos).Angle()) * original_radius;
-		video_overlay_helpers::DrawProjectedLine(context, Vector2D(), rotated_pos, org->pos, scale, rotation_x, rotation_y, 0.0f, perspective_z_scale);
-		video_overlay_helpers::DrawProjectedLine(context, rotated_pos - angle_vec * 20, rotated_pos + angle_vec * 20, org->pos, scale, rotation_x, rotation_y, 0.0f, perspective_z_scale);
-	}
-
-	context.SetLineColour(line_color_secondary, 1.0f, 1);
-	context.SetFillColour(highlight_color, 0.3f);
-	context.DrawCircle(
-		video_overlay_helpers::ProjectScaledRotatedPoint(angle_vec * radius, org->pos, scale, rotation_x, rotation_y, 0.0f, perspective_z_scale),
-		video_overlay_helpers::ProjectCircleRadius(angle_vec * radius, 4.0f, org->pos, scale, rotation_x, rotation_y, 0.0f, perspective_z_scale));
-	context.DrawCircle(
-		video_overlay_helpers::ProjectScaledRotatedPoint(angle_vec * -radius, org->pos, scale, rotation_x, rotation_y, 0.0f, perspective_z_scale),
-		video_overlay_helpers::ProjectCircleRadius(angle_vec * -radius, 4.0f, org->pos, scale, rotation_x, rotation_y, 0.0f, perspective_z_scale));
-
+	aegisub::visual_transform::DrawRotateZOverlay(context, {
+															   .origin = org->pos,
+															   .pos = pos,
+															   .scale = scale,
+															   .rotation_x = rotation_x,
+															   .rotation_y = rotation_y,
+															   .angle = angle,
+															   .perspective_z_scale = video_overlay_helpers::GetLayoutResAdjustedPerspectiveZScale(script_res, layout_res),
+															   .primary_colour = line_color_primary_opt->GetColor(),
+															   .secondary_colour = line_color_secondary_opt->GetColor(),
+															   .highlight_colour = highlight_color_primary_opt->GetColor(),
+														   });
 	if (mouse_pos && (mouse_pos - org->pos).SquareLen() > 100) {
-		context.SetLineColour(line_color_secondary, 1.0f, 1);
-		context.SetFillColour(line_color_secondary, 0.0f);
+		context.SetLineColour(from_wx(to_wx(line_color_secondary_opt->GetColor())), 1.0f, 1);
+		context.SetFillColour(from_wx(to_wx(line_color_secondary_opt->GetColor())), 0.0f);
 		context.DrawLine(org->pos, mouse_pos);
 	}
 }
 
 bool VisualToolRotateZ::InitializeHold() {
-	orig_angle = angle + (org->pos - mouse_pos).Angle() * rad2deg;
+	orig_angle = aegisub::visual_transform::RotationAnchor(angle, org->pos, mouse_pos);
 	return true;
 }
 
 void VisualToolRotateZ::UpdateHold() {
-	angle = orig_angle - (org->pos - mouse_pos).Angle() * rad2deg;
-
-	if (ctrl_down)
-		angle = floorf(angle / 30.f + .5f) * 30.f;
-
-	angle = fmodf(angle + 360.f, 360.f);
+	angle = aegisub::visual_transform::RotateZ(orig_angle, org->pos, mouse_pos, ctrl_down);
 
 	QueueSelectedGeometryOverride("\\frz", agi::format("%.4g", angle));
 }
@@ -310,14 +246,13 @@ void VisualToolRotateZ::UpdateDrag(Feature *feature) {
 void VisualToolRotateZ::DoRefresh() {
 	if (!active_line) return;
 
-	pos = FromScriptCoords(GetLinePosition(active_line));
-	if (!(org->pos = GetLineOrigin(active_line)))
-		org->pos = pos;
-	else
-		org->pos = FromScriptCoords(org->pos);
-
-	GetLineRotation(active_line, rotation_x, rotation_y, angle);
-	GetLineScale(active_line, scale);
+	auto const line = aegisub::visual_edit::ReadLine(*active_line, c->GetCore().ass->GetStyle(active_line->Style), script_res);
+	pos = FromScriptCoords(line.position);
+	org->pos = FromScriptCoords(line.origin.value_or(line.position));
+	rotation_x = line.rotation_x;
+	rotation_y = line.rotation_y;
+	angle = line.rotation_z;
+	scale = line.scale;
 }
 
 bool VisualToolRotateZ::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) {

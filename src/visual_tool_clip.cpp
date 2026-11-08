@@ -37,13 +37,13 @@
 namespace {
 
 void DrawClipRectangles(VideoOverlayDrawContext& context, Vector2D cur_1, Vector2D cur_2,
-						Vector2D video_pos, Vector2D video_res, bool inverse, wxColour const& line_color, float shaded_alpha) {
+						Vector2D video_pos, Vector2D video_res, bool inverse, agi::Color const& line_color, float shaded_alpha) {
 	context.SetLineColour(line_color, 1.0f, 2);
 	context.SetFillColour(line_color, 0.0f);
 	context.DrawRectangle(cur_1, cur_2);
 
 	context.SetLineColour(line_color, 0.0f);
-	context.SetFillColour(*wxBLACK, shaded_alpha);
+	context.SetFillColour(agi::Color{}, shaded_alpha);
 	if (inverse) {
 		context.DrawRectangle(cur_1, cur_2);
 	}
@@ -91,16 +91,16 @@ class ClipRenderSnapshot final : public VisualToolRenderSnapshot {
 	}
 
 	void Draw(VideoOverlayDrawContext& context) const override {
-		context.SetLineColour(wxColour(grid_colour), 1.0f, 1);
+		context.SetLineColour(VideoOverlayColourFromRgb(grid_colour), 1.0f, 1);
 		for (auto const& marker : markers) {
-			context.SetFillColour(wxColour(marker.fill_colour), 0.3f);
+			context.SetFillColour(VideoOverlayColourFromRgb(marker.fill_colour), 0.3f);
 			VisualDraggableFeature feature;
 			feature.type = DRAG_SMALL_CIRCLE;
 			feature.pos = marker.pos;
 			feature.Draw(context);
 		}
 		DrawClipRectangles(context, cur_1, cur_2, video_pos, video_res, inverse,
-						   wxColour(line_colour), shaded_alpha);
+						   VideoOverlayColourFromRgb(line_colour), shaded_alpha);
 	}
 };
 
@@ -176,7 +176,7 @@ void VisualToolClip::DrawOverlay(VideoOverlayDrawContext &context) {
 
 	DrawAllFeatures(context);
 
-	wxColour const line_color = to_wx(line_color_primary_opt->GetColor());
+	auto const line_color = line_color_primary_opt->GetColor();
 	float const shaded_alpha = static_cast<float>(shaded_area_alpha_opt->GetDouble());
 	DrawClipRectangles(context, cur_1, cur_2, video_pos, video_res, inverse, line_color, shaded_alpha);
 }

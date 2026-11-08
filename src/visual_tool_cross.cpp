@@ -80,7 +80,7 @@ void VisualToolCross::DrawWithContext(VideoOverlayDrawContext &context) {
 
 	// Draw cross
 	context.SetInvert();
-	context.SetLineColour(*wxWHITE, 1.0f, 1);
+	context.SetLineColour(agi::Color{255, 255, 255}, 1.0f, 1);
 	float lines[] = {
 		0.f, mouse_pos.Y(),
 		canvas_size.X(), mouse_pos.Y(),
@@ -98,8 +98,8 @@ void VisualToolCross::DrawWithContext(VideoOverlayDrawContext &context) {
 	text_style.face = "Verdana";
 	text_style.size = font_size;
 	text_style.bold = true;
-	text_style.colour = *wxWHITE;
-	wxSize const extent = context.MeasureText(mouse_text, text_style);
+	text_style.colour = {255, 255, 255};
+	auto const extent = context.MeasureText(mouse_text, text_style);
 	int const tw = extent.GetWidth();
 	int const th = extent.GetHeight();
 

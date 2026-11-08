@@ -141,6 +141,7 @@ inline void ResetCompatibilityState() {
 	glDisable(GL_LINE_SMOOTH);
 	glDisable(GL_COLOR_LOGIC_OP);
 	glDisable(GL_ALPHA_TEST);
+	glDisable(GL_COLOR_MATERIAL);
 	glBlendFunc(GL_ONE, GL_ZERO);
 	glLogicOp(GL_COPY);
 	glAlphaFunc(GL_ALWAYS, 0.0f);
@@ -149,6 +150,9 @@ inline void ResetCompatibilityState() {
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 	ResetPixelStoreState();
 }
+
+int QueryMaxClipPlanes();
+void PrepareVisualToolState(int max_clip_planes);
 
 inline void SetupBottomLeftOrtho(int canvas_width, int canvas_height) {
 	glMatrixMode(GL_PROJECTION);

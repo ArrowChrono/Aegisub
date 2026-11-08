@@ -1516,11 +1516,11 @@ void VisualToolMeasure::DrawHandles(VideoOverlayDrawContext& context, VisualGuid
 	auto const style = MakeOverlayStyle(line_color_primary_opt, highlight_color_primary_opt);
 	auto const draw_handle = [&](VisualGuidePoint point) {
 		auto const canvas_point = VisualGuideToCanvas(point, viewport);
-		context.SetLineColour(style.outline_colour, 0.95f, 2);
-		context.SetFillColour(style.outline_colour, 0.85f);
+		context.SetLineColour(from_wx(style.outline_colour), 0.95f, 2);
+		context.SetFillColour(from_wx(style.outline_colour), 0.85f);
 		context.DrawCircle(canvas_point, kHandleRadius + 1.0f);
-		context.SetLineColour(style.highlight_colour, 1.0f, 1);
-		context.SetFillColour(style.highlight_colour, 0.85f);
+		context.SetLineColour(from_wx(style.highlight_colour), 1.0f, 1);
+		context.SetFillColour(from_wx(style.highlight_colour), 0.85f);
 		context.DrawCircle(canvas_point, kHandleRadius);
 	};
 
@@ -1585,7 +1585,7 @@ void VisualToolMeasure::DrawPerspectivePreview(
 	// and a snapped result applies fine, it just lands slightly off. Reusing it
 	// here would teach the user to ignore it.
 	context.SetLineColour(
-		to_wx(highlight_color_secondary_opt->GetColor()), 0.9f, 2);
+		highlight_color_secondary_opt->GetColor(), 0.9f, 2);
 	for (std::size_t index = 0; index < corners.size(); ++index)
 		stroke(corners[index], corners[(index + 1) % corners.size()]);
 
@@ -1594,7 +1594,7 @@ void VisualToolMeasure::DrawPerspectivePreview(
 	// whole point when only one or two edges have a reference in the video.
 	if (auto const& target = perspective_state.Target()) {
 		context.SetLineColour(
-			to_wx(highlight_color_secondary_opt->GetColor()), 0.45f, 1);
+			highlight_color_secondary_opt->GetColor(), 0.45f, 1);
 		for (std::size_t index = 0; index < corners.size(); ++index) {
 			context.DrawLine(
 				VisualGuideToCanvas(ToGuidePoint((*target)[index]), viewport),
@@ -1625,7 +1625,7 @@ void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
 					ToGuidePoint((*current)[index]), viewport);
 			current_outline.back() = current_outline.front();
 			context.SetLineColour(
-				to_wx(line_color_secondary_opt->GetColor()), 0.4f, 1);
+				line_color_secondary_opt->GetColor(), 0.4f, 1);
 			context.DrawLineStrip(current_outline.data(), current_outline.size());
 		}
 	}
@@ -1634,7 +1634,7 @@ void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
 		VideoOverlayTextStyle style;
 		style.size = static_cast<int>(
 			OPT_GET("Tool/Visual/Coordinate Font Size")->GetInt() * ui_scale);
-		style.colour = to_wx(invalid_line_color_opt->GetColor());
+		style.colour = invalid_line_color_opt->GetColor();
 		style.outline = true;
 		context.DrawText(
 			diagnostic,
@@ -1673,9 +1673,9 @@ void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
 			? highlight_color_primary_opt : highlight_color_secondary_opt)->GetColor());
 	wxColour const handle_outline(20, 20, 20);
 
-	context.SetLineColour(handle_outline, 0.95f, 3);
+	context.SetLineColour(from_wx(handle_outline), 0.95f, 3);
 	context.DrawLineStrip(outline.data(), outline.size());
-	context.SetLineColour(line_colour, 1.0f, 1);
+	context.SetLineColour(from_wx(line_colour), 1.0f, 1);
 	context.DrawLineStrip(outline.data(), outline.size());
 
 	// The held edge, drawn heavier than the rest of the outline. Without this
@@ -1695,9 +1695,9 @@ void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
 			case perspective::PerspectiveEdgeAnchor::None: break;
 		}
 		wxColour const anchored_colour = valid ? handle_colour : line_colour;
-		context.SetLineColour(handle_outline, 0.95f, 5);
+		context.SetLineColour(from_wx(handle_outline), 0.95f, 5);
 		context.DrawLine(outline[from], outline[to]);
-		context.SetLineColour(anchored_colour, 1.0f, 3);
+		context.SetLineColour(from_wx(anchored_colour), 1.0f, 3);
 		context.DrawLine(outline[from], outline[to]);
 	}
 
@@ -1720,11 +1720,11 @@ void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
 	for (std::size_t index = 0; index < target->size(); ++index) {
 		float const radius = corner_handles[index] == active_handle
 			? handle_radius + 1.0f : handle_radius;
-		context.SetLineColour(handle_outline, 0.95f, 2);
-		context.SetFillColour(handle_outline, 0.85f);
+		context.SetLineColour(from_wx(handle_outline), 0.95f, 2);
+		context.SetFillColour(from_wx(handle_outline), 0.85f);
 		context.DrawCircle(outline[index], radius + 1.0f);
-		context.SetLineColour(handle_colour, 1.0f, 1);
-		context.SetFillColour(handle_colour, 0.9f);
+		context.SetLineColour(from_wx(handle_colour), 1.0f, 1);
+		context.SetFillColour(from_wx(handle_colour), 0.9f);
 		context.DrawCircle(outline[index], radius);
 	}
 
@@ -1735,11 +1735,11 @@ void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
 		Vector2D const midpoint = (outline[index] + outline[(index + 1) % target->size()]) / 2.0;
 		float const radius = edge_handle == active_handle
 			? handle_radius : handle_radius - 1.0f;
-		context.SetLineColour(handle_outline, 0.95f, 2);
-		context.SetFillColour(handle_outline, 0.85f);
+		context.SetLineColour(from_wx(handle_outline), 0.95f, 2);
+		context.SetFillColour(from_wx(handle_outline), 0.85f);
 		context.DrawCircle(midpoint, radius + 1.0f);
-		context.SetLineColour(handle_colour, 1.0f, 1);
-		context.SetFillColour(handle_colour, 0.75f);
+		context.SetLineColour(from_wx(handle_colour), 1.0f, 1);
+		context.SetFillColour(from_wx(handle_colour), 0.75f);
 		context.DrawCircle(midpoint, radius);
 	}
 
@@ -1747,11 +1747,11 @@ void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
 		auto const canvas_center = VisualGuideToCanvas(ToGuidePoint(*center), viewport);
 		float const center_radius = active_handle == perspective::PerspectiveQuadHandle::Center
 			? handle_radius + 2.0f : handle_radius + 1.0f;
-		context.SetLineColour(handle_outline, 0.95f, 2);
-		context.SetFillColour(handle_outline, 0.85f);
+		context.SetLineColour(from_wx(handle_outline), 0.95f, 2);
+		context.SetFillColour(from_wx(handle_outline), 0.85f);
 		context.DrawCircle(canvas_center, center_radius + 1.0f);
-		context.SetLineColour(handle_colour, 1.0f, 1);
-		context.SetFillColour(handle_colour, 0.9f);
+		context.SetLineColour(from_wx(handle_colour), 1.0f, 1);
+		context.SetFillColour(from_wx(handle_colour), 0.9f);
 		context.DrawCircle(canvas_center, center_radius);
 	}
 }

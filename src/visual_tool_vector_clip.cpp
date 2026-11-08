@@ -217,8 +217,8 @@ void VisualToolVectorClip::DrawOverlay(VideoOverlayDrawContext &context) {
 	wxColour const highlight_color_secondary = to_wx(highlight_color_secondary_opt->GetColor());
 	float const shaded_alpha = static_cast<float>(shaded_area_alpha_opt->GetDouble());
 
-	context.SetLineColour(line_color, .5f, 2);
-	context.SetFillColour(*wxBLACK, shaded_alpha);
+	context.SetLineColour(from_wx(line_color), .5f, 2);
+	context.SetFillColour(from_wx(*wxBLACK), shaded_alpha);
 	context.DrawMultiPolygon(points, start, count, video_pos, video_res, !inverse);
 
 	if (mode == 0 && holding && drag_start && mouse_pos) {
@@ -240,14 +240,14 @@ void VisualToolVectorClip::DrawOverlay(VideoOverlayDrawContext &context) {
 	if ((mode == 3 || mode == 4) && !active_feature && points.size() > 2) {
 		auto highlighted_points = spline.GetPointList(highlighted_curve);
 		if (!highlighted_points.empty()) {
-			context.SetLineColour(highlight_color_secondary, 1.f, 2);
-			context.SetFillColour(highlight_color_secondary, 0.0f);
+			context.SetLineColour(from_wx(highlight_color_secondary), 1.f, 2);
+			context.SetFillColour(from_wx(highlight_color_secondary), 0.0f);
 			video_overlay_helpers::DrawLineStripFromFloatPoints(context, highlighted_points);
 		}
 	}
 
-	context.SetLineColour(line_color, 0.9f, 1);
-	context.SetFillColour(line_color, 0.0f);
+	context.SetLineColour(from_wx(line_color), 0.9f, 1);
+	context.SetFillColour(from_wx(line_color), 0.0f);
 	for (auto const& curve : spline) {
 		if (curve.type == SplineCurve::BICUBIC) {
 			video_overlay_helpers::DrawDashedLine(context, curve.p1, curve.p2, 6);
@@ -261,14 +261,14 @@ void VisualToolVectorClip::DrawOverlay(VideoOverlayDrawContext &context) {
 			feature_color = highlight_color_primary;
 		else if (sel_features.count(&feature))
 			feature_color = highlight_color_secondary;
-		context.SetFillColour(feature_color, .6f);
+		context.SetFillColour(from_wx(feature_color), .6f);
 
 		if (feature.type == DRAG_SMALL_SQUARE) {
-			context.SetLineColour(line_color, .5f, 1);
+			context.SetLineColour(from_wx(line_color), .5f, 1);
 			feature.Draw(context);
 		}
 		else {
-			context.SetLineColour(feature_color, .5f, 1);
+			context.SetLineColour(from_wx(feature_color), .5f, 1);
 			feature.Draw(context);
 		}
 	}
@@ -278,16 +278,16 @@ void VisualToolVectorClip::DrawOverlay(VideoOverlayDrawContext &context) {
 			auto c0 = std::find_if(spline.rbegin(), spline.rend(),
 				[](SplineCurve const& s) { return s.type == SplineCurve::POINT; });
 			SplineCurve *c1 = &spline.back();
-			context.SetLineColour(line_color, 0.9f, 1);
-			context.SetFillColour(line_color, 0.0f);
+			context.SetLineColour(from_wx(line_color), 0.9f, 1);
+			context.SetFillColour(from_wx(line_color), 0.0f);
 			video_overlay_helpers::DrawDashedLine(context, mouse_pos, c0->p1, 6);
 			video_overlay_helpers::DrawDashedLine(context, mouse_pos, c1->EndPoint(), 6);
 		}
 	}
 
 	if (mode == 4) {
-		context.SetLineColour(line_color, 0.5f, 1);
-		context.SetFillColour(line_color, 0.0f);
+		context.SetLineColour(from_wx(line_color), 0.5f, 1);
+		context.SetFillColour(from_wx(line_color), 0.0f);
 		context.DrawCircle(pt, 4);
 	}
 }

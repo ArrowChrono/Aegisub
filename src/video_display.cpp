@@ -645,6 +645,8 @@ bool VideoDisplay::InitContext() {
 	if (!made_current) {
 		return false;
 	}
+	if (!maximum_clip_planes)
+		maximum_clip_planes = legacy_gl::QueryMaxClipPlanes();
 	if (!presentation_configuration_traced && perf_trace::IsCategoryEnabled(perf_trace::Category::Video)) {
 		presentation_configuration_traced = true;
 		TraceVideoPresentationConfiguration(this);
@@ -1574,20 +1576,8 @@ void VideoDisplay::DrawSceneCache(wxSize const&, int canvas_width, int canvas_he
 }
 
 void VideoDisplay::DrawLegacyOverlayPass(wxSize const& client_size) {
-	// Restore legacy-compatible GL state before the overlay pass, since the
-	// video backend (libplacebo or modern OpenGL pipeline) may have left VAOs,
-	// shader programs, or other non-fixed-function state bound.
-	legacy_gl::ResetCompatibilityState();
-
-	// Overlay pass (overscan mask, visual tools) renders in client/window coordinates.
-	// Always use a viewport anchored at (0,0) so that ortho coords == mouse coords.
-	// The video_pos offset already positions tool features relative to the video.
-	E(glViewport(0, 0, client_size.GetWidth() * scale_factor, client_size.GetHeight() * scale_factor));
-	E(glMatrixMode(GL_PROJECTION));
-	E(glLoadIdentity());
-	E(glOrtho(0.0f, client_size.GetWidth(), client_size.GetHeight(), 0.0f, -1000.0f, 1000.0f));
-	E(glMatrixMode(GL_MODELVIEW));
-	E(glLoadIdentity());
+	auto const canvas = OpenGLWindowOverlayPass::SetupCanvas(client_size.GetWidth() * scale_factor,
+															 client_size.GetHeight() * scale_factor, client_size.GetWidth(), client_size.GetHeight(), 1000.0);
 
 	if (OPT_GET("Video/Overscan Mask")->GetBool()) {
 		double ar = con->videoController->GetAspectRatioValue();
@@ -1614,6 +1604,7 @@ void VideoDisplay::DrawLegacyOverlayPass(wxSize const& client_size) {
 	}
 
 	if ((mouse_pos || !autohideTools->GetBool()) && tool) {
+		OpenGLWindowOverlayPass pass(canvas, true, maximum_clip_planes);
 		if (tool_presentation.IsActive() && (con->GetUI().videoDisplay != this || con->videoController->IsPlaying()))
 			ResetToolPresentation();
 		if (auto snapshot = GetToolPresentationSnapshot()) {
@@ -1621,12 +1612,23 @@ void VideoDisplay::DrawLegacyOverlayPass(wxSize const& client_size) {
 			if (!visualGuideText)
 				visualGuideText = CreateTextRenderer();
 			OpenGLWrapper snapshot_gl;
-			LegacyVideoOverlayDrawContext snapshot_context(snapshot_gl, *visualGuideText);
+			LegacyVideoOverlayDrawContext snapshot_context(snapshot_gl, *visualGuideText, pass);
 			snapshot->Draw(snapshot_context);
 			snapshot->DrawLiveFeedback(mouse_pos);
+			pass.Finish();
 		}
-		else
-			tool->Draw();
+		else {
+			if (tool->SupportsOverlayContext()) {
+				if (!visualGuideText)
+					visualGuideText = CreateTextRenderer();
+				OpenGLWrapper live_gl;
+				LegacyVideoOverlayDrawContext live_context(live_gl, *visualGuideText, pass);
+				tool->DrawOverlay(live_context);
+			}
+			else
+				tool->Draw();
+			pass.Finish();
+		}
 	}
 }
 
@@ -2716,6 +2718,7 @@ void VideoDisplay::Unload() {
 		text_texture_deleter.reset();
 	}
 	glContext.reset();
+	maximum_clip_planes = 0;
 	presentation_configuration_traced = false;
 	pending_packet = { };
 	has_pending_packet = false;

@@ -2,6 +2,7 @@
 *.[oadi]
 *.ass
 !tests/gui-automation/wx-boundary-fixtures/fixture.ass
+!tests/gui-automation/wx-transform-port/fixture.ass
 !tests/gui-automation/lua-workspace/fixtures/generated-history-long-preview.ass
 *.avi
 *.bz2

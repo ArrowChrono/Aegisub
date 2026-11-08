@@ -36,22 +36,22 @@ VisualGuideSnapshotView View(VisualGuideSnapshot const& snapshot) {
 // Minimal context whose MeasureText is a stable function of the text length so
 // the label rectangle is deterministic in tests. Draw primitives are no-ops.
 class StubOverlayContext final : public VideoOverlayDrawContext {
-public:
-	void SetLineColour(wxColour const&, float, int) override { }
-	void SetFillColour(wxColour const&, float) override { }
-	void SetInvert() override { }
-	void ClearInvert() override { }
-	void DrawLine(Vector2D, Vector2D) override { }
-	void DrawLines(size_t, float const*, size_t) override { }
-	void DrawLineStrip(Vector2D const*, size_t) override { }
-	void DrawRectangle(Vector2D, Vector2D) override { }
-	void DrawPolygon(Vector2D const*, size_t) override { }
+	public:
+	void SetLineColour(agi::Color const&, float, int) override {}
+	void SetFillColour(agi::Color const&, float) override {}
+	void SetInvert() override {}
+	void ClearInvert() override {}
+	void DrawLine(Vector2D, Vector2D) override {}
+	void DrawLines(size_t, float const *, size_t) override {}
+	void DrawLineStrip(Vector2D const *, size_t) override {}
+	void DrawRectangle(Vector2D, Vector2D) override {}
+	void DrawPolygon(Vector2D const *, size_t) override {}
 	void DrawMultiPolygon(std::vector<float> const&, std::vector<int> const&,
-		std::vector<int> const&, Vector2D, Vector2D, bool) override { }
-	void DrawCircle(Vector2D, float) override { }
-	void DrawTriangle(Vector2D, Vector2D, Vector2D) override { }
-	wxSize MeasureText(std::string const& text, VideoOverlayTextStyle const&) override {
-		return wxSize(static_cast<int>(text.size()) * 7, 12);
+						  std::vector<int> const&, Vector2D, Vector2D, bool) override {}
+	void DrawCircle(Vector2D, float) override {}
+	void DrawTriangle(Vector2D, Vector2D, Vector2D) override {}
+	VideoOverlayTextExtent MeasureText(std::string const& text, VideoOverlayTextStyle const&) override {
+		return VideoOverlayTextExtent(static_cast<int>(text.size()) * 7, 12);
 	}
 	void DrawText(std::string const&, int, int, VideoOverlayTextStyle const&) override { }
 };

@@ -10,8 +10,6 @@
 #include <cmath>
 #include <vector>
 
-#include <wx/colour.h>
-
 namespace video_overlay_helpers {
 
 constexpr float kDegToRad = 3.1415926536f / 180.0f;
@@ -136,7 +134,7 @@ inline void DrawProjectedLine(VideoOverlayDrawContext &context, Vec3 p1, Vec3 p2
 		ProjectRotatedShearedPoint(p2, origin, ax, ay, az, fax, fay, perspective_z_scale));
 }
 
-inline void DrawProjectedFadedLine(VideoOverlayDrawContext &context, Vec3 p1, Vec3 p2, Vector2D origin, float ax, float ay, float az, float fax, float fay, wxColour const& colour, float alpha1, float alpha2, int width, float perspective_z_scale = kPerspectiveZScale) {
+inline void DrawProjectedFadedLine(VideoOverlayDrawContext& context, Vec3 p1, Vec3 p2, Vector2D origin, float ax, float ay, float az, float fax, float fay, agi::Color const& colour, float alpha1, float alpha2, int width, float perspective_z_scale = kPerspectiveZScale) {
 	static constexpr int segments = 8;
 	for (int i = 0; i < segments; ++i) {
 		float const t0 = static_cast<float>(i) / segments;

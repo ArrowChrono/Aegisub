@@ -20,6 +20,8 @@
 
 #include "visual_tool.h"
 
+#include "visual_ass_edit.h"
+
 #include "ass_compat.h"
 #include "ass_tag_scanner.h"
 #include "perspective_quad_geometry.h"
@@ -667,7 +669,7 @@ void VisualTool<FeatureType>::DrawAllFeatures() {
 template<class FeatureType>
 void VisualTool<FeatureType>::DrawAllFeatures(VideoOverlayDrawContext &context) {
 	wxColour const grid_color = to_wx(line_color_secondary_opt->GetColor());
-	context.SetLineColour(grid_color, 1.0f, 1);
+	context.SetLineColour(from_wx(grid_color), 1.0f, 1);
 	wxColour const base_fill = to_wx(highlight_color_primary_opt->GetColor());
 	wxColour const active_fill = to_wx(highlight_color_secondary_opt->GetColor());
 	wxColour const alt_fill = to_wx(line_color_primary_opt->GetColor());
@@ -677,7 +679,7 @@ void VisualTool<FeatureType>::DrawAllFeatures(VideoOverlayDrawContext &context) 
 			fill = active_fill;
 		else if (sel_features.count(&feature))
 			fill = alt_fill;
-		context.SetFillColour(fill, 0.3f);
+		context.SetFillColour(from_wx(fill), 0.3f);
 		feature.Draw(context);
 	}
 }
@@ -743,17 +745,6 @@ static param_vec find_tag(std::vector<std::unique_ptr<AssDialogueBlock>> const& 
 	return nullptr;
 }
 
-// Get a Vector2D from the given tag parameters, or Vector2D::Bad() if they are not valid
-static Vector2D vec_or_bad(param_vec tag, size_t x_idx, size_t y_idx) {
-	if (!tag ||
-		tag->size() <= x_idx || tag->size() <= y_idx ||
-		(*tag)[x_idx].omitted || (*tag)[y_idx].omitted)
-	{
-		return Vector2D();
-	}
-	return Vector2D((*tag)[x_idx].Get<float>(), (*tag)[y_idx].Get<float>());
-}
-
 struct DefaultPositionLayout {
 	std::array<int, 3> margins;
 	int alignment;
@@ -781,125 +772,46 @@ static DefaultPositionLayout ResolveDefaultPositionLayout(AssDialogue const& lin
 }
 
 Vector2D VisualToolBase::GetLinePosition(AssDialogue *diag) {
-	auto blocks = diag->ParseTags();
-	if (Vector2D ret = vec_or_bad(find_tag(blocks, "\\pos"), 0, 1))
-		return ret;
-	if (Vector2D ret = vec_or_bad(find_tag(blocks, "\\move"), 0, 1))
-		return ret;
-	auto layout = ResolveDefaultPositionLayout(*diag, c->GetCore().ass->GetStyle(diag->Style), ReadLineAlignment(blocks));
-	auto const& margin = layout.margins;
-	int const align = layout.alignment;
-	// Alignment type
-	int hor = (align - 1) % 3;
-	int vert = (align - 1) / 3;
-
-	// Calculate positions
-	int x, y;
-	if (hor == 0)
-		x = margin[0];
-	else if (hor == 1)
-		x = (script_res.X() + margin[0] - margin[1]) / 2;
-	else
-		x = script_res.X() - margin[1];
-
-	if (vert == 0)
-		y = script_res.Y() - margin[2];
-	else if (vert == 1)
-		y = script_res.Y() / 2;
-	else
-		y = margin[2];
-
-	return Vector2D(x, y);
+	return aegisub::visual_edit::ReadLine(*diag, c->GetCore().ass->GetStyle(diag->Style), script_res).position;
 }
 
 Vector2D VisualToolBase::GetLineOrigin(AssDialogue *diag) {
-	auto blocks = diag->ParseTags();
-	return vec_or_bad(find_tag(blocks, "\\org"), 0, 1);
+	return aegisub::visual_edit::ReadLine(*diag, nullptr, script_res).origin.value_or(Vector2D{});
 }
 
-bool VisualToolBase::GetLineMove(AssDialogue *diag, Vector2D &p1, Vector2D &p2, int &t1, int &t2) {
-	auto blocks = diag->ParseTags();
-
-	param_vec tag = find_tag(blocks, "\\move");
-	if (!tag)
+bool VisualToolBase::GetLineMove(AssDialogue *diag, Vector2D& p1, Vector2D& p2, int& t1, int& t2) {
+	auto move = aegisub::visual_edit::ReadLine(*diag, nullptr, script_res).move;
+	if (!move)
 		return false;
-
-	p1 = vec_or_bad(tag, 0, 1);
-	p2 = vec_or_bad(tag, 2, 3);
-	// VSFilter actually defaults to -1, but it uses <= 0 to check for default and 0 seems less bug-prone
-	t1 = (*tag)[4].Get<int>(0);
-	t2 = (*tag)[5].Get<int>(0);
-
-	return p1 && p2;
+	p1 = move->start;
+	p2 = move->end;
+	t1 = move->start_ms;
+	t2 = move->end_ms;
+	return true;
 }
 
-void VisualToolBase::GetLineRotation(AssDialogue *diag, float &rx, float &ry, float &rz) {
-	rx = ry = rz = 0.f;
-
-	auto core = c->GetCore();
-	if (AssStyle *style = core.ass->GetStyle(diag->Style))
-		rz = style->angle;
-
-	auto blocks = diag->ParseTags();
-
-	if (param_vec tag = find_tag(blocks, "\\frx"))
-		rx = tag->front().Get(rx);
-	if (param_vec tag = find_tag(blocks, "\\fry"))
-		ry = tag->front().Get(ry);
-	if (param_vec tag = find_tag(blocks, "\\frz"))
-		rz = tag->front().Get(rz);
-	else if ((tag = find_tag(blocks, "\\fr")))
-		rz = tag->front().Get(rz);
+void VisualToolBase::GetLineRotation(AssDialogue *diag, float& rx, float& ry, float& rz) {
+	auto const line = aegisub::visual_edit::ReadLine(*diag, c->GetCore().ass->GetStyle(diag->Style), script_res);
+	rx = line.rotation_x;
+	ry = line.rotation_y;
+	rz = line.rotation_z;
 }
 
 void VisualToolBase::GetLineShear(AssDialogue *diag, float& fax, float& fay) {
-	fax = fay = 0.f;
-
-	auto blocks = diag->ParseTags();
-
-	if (param_vec tag = find_tag(blocks, "\\fax"))
-		fax = tag->front().Get(fax);
-	if (param_vec tag = find_tag(blocks, "\\fay"))
-		fay = tag->front().Get(fay);
+	auto const line = aegisub::visual_edit::ReadLine(*diag, nullptr, script_res);
+	fax = line.fax;
+	fay = line.fay;
 }
 
 void VisualToolBase::GetLineScale(AssDialogue *diag, Vector2D &scale) {
-	float x = 100.f, y = 100.f;
-
-	auto core = c->GetCore();
-	if (AssStyle *style = core.ass->GetStyle(diag->Style)) {
-		x = style->scalex;
-		y = style->scaley;
-	}
-
-	auto blocks = diag->ParseTags();
-
-	if (param_vec tag = find_tag(blocks, "\\fscx"))
-		x = tag->front().Get(x);
-	if (param_vec tag = find_tag(blocks, "\\fscy"))
-		y = tag->front().Get(y);
-
-	scale = Vector2D(x, y);
+	scale = aegisub::visual_edit::ReadLine(*diag, c->GetCore().ass->GetStyle(diag->Style), script_res).scale;
 }
 
-void VisualToolBase::GetLineClip(AssDialogue *diag, Vector2D &p1, Vector2D &p2, bool &inverse) {
-	inverse = false;
-
-	auto blocks = diag->ParseTags();
-	param_vec tag = find_tag(blocks, "\\iclip");
-	if (tag)
-		inverse = true;
-	else
-		tag = find_tag(blocks, "\\clip");
-
-	if (tag && tag->size() == 4) {
-		p1 = vec_or_bad(tag, 0, 1);
-		p2 = vec_or_bad(tag, 2, 3);
-	}
-	else {
-		p1 = Vector2D(0, 0);
-		p2 = script_res - 1;
-	}
+void VisualToolBase::GetLineClip(AssDialogue *diag, Vector2D& p1, Vector2D& p2, bool& inverse) {
+	auto clip = aegisub::visual_edit::ReadLine(*diag, nullptr, script_res).clip;
+	p1 = clip.first;
+	p2 = clip.second;
+	inverse = clip.inverse;
 }
 
 std::string VisualToolBase::GetLineVectorClip(AssDialogue *diag, int &scale, bool &inverse) {
@@ -965,37 +877,6 @@ void VisualToolBase::ScheduleInteractionRender() {
 	}
 }
 
-static void ApplyVisualOverride(AssDialogue& dialogue, std::string const& tag, std::string const& value) {
-	auto *line = &dialogue;
-	std::string removeTag;
-	if (tag == "\\1c") removeTag = "\\c";
-	else if (tag == "\\frz") removeTag = "\\fr";
-	else if (tag == "\\pos") removeTag = "\\move";
-	else if (tag == "\\move") removeTag = "\\pos";
-	else if (tag == "\\clip") removeTag = "\\iclip";
-	else if (tag == "\\iclip") removeTag = "\\clip";
-
-	// Get block at start
-	auto blocks = line->ParseTags();
-	AssDialogueBlock *block = blocks.front().get();
-
-	if (block->GetType() == AssBlockType::OVERRIDE) {
-		auto ovr = static_cast<AssDialogueBlockOverride*>(block);
-		// Remove old of same
-		for (size_t i = 0; i < ovr->Tags.size(); i++) {
-			std::string const& name = ovr->Tags[i].Name;
-			if (tag == name || removeTag == name) {
-				ovr->Tags.erase(ovr->Tags.begin() + i);
-				i--;
-			}
-		}
-		ovr->AddTag(tag + value);
-
-		line->UpdateText(blocks);
-	}
-	else
-		line->Text = "{" + tag + value + "}" + line->Text.get();
-}
 
 void VisualToolBase::SetOverride(AssDialogue *line, std::string const& tag, std::string const& value) {
 	if (!line)
@@ -1004,7 +885,7 @@ void VisualToolBase::SetOverride(AssDialogue *line, std::string const& tag, std:
 	perf_trace::VideoUiDurationScope override_trace("visual_tool.override");
 	std::string const original_text = line->Text.get();
 
-	ApplyVisualOverride(*line, tag, value);
+	aegisub::visual_edit::SetOverride(*line, tag, value);
 
 	bool const text_changed = original_text != line->Text.get();
 	if (override_trace.IsActive())
@@ -1176,15 +1057,17 @@ void VisualToolBase::BeginGeometryGesture(bool mouse) {
 	int script_width, script_height;
 	c->GetCore().ass->GetResolution(ScriptResolutionType::PlayRes, script_width, script_height);
 	for (auto *line : c->GetCore().selectionController->GetSelectedSet()) {
-		GeometryState state;
-		state.position = GetLinePosition(line);
-		state.origin = GetLineOrigin(line);
-		if (!state.origin)
-			state.origin = state.position;
-		GetLineScale(line, state.scale);
-		GetLineRotation(line, state.rx, state.ry, state.rz);
-		GetLineShear(line, state.fax, state.fay);
 		auto const *style = c->GetCore().ass->GetStyle(line->Style);
+		auto const geometry = aegisub::visual_edit::ReadLine(*line, style, script_res);
+		GeometryState state;
+		state.position = geometry.position;
+		state.origin = geometry.origin.value_or(geometry.position);
+		state.scale = geometry.scale;
+		state.rx = geometry.rotation_x;
+		state.ry = geometry.rotation_y;
+		state.rz = geometry.rotation_z;
+		state.fax = geometry.fax;
+		state.fay = geometry.fay;
 		geometry_snapshots.try_emplace(line, *line, state, style, script_width, script_height);
 	}
 }
@@ -1319,7 +1202,7 @@ bool VisualToolBase::FinishGeometryEdit() {
 			candidate.Text = linked.text;
 		}
 		for (auto const& edit : edits)
-			ApplyVisualOverride(candidate, edit.tag, edit.value);
+			aegisub::visual_edit::SetOverride(candidate, edit.tag, edit.value);
 		planned.emplace(line, candidate.Text.get());
 	}
 	for (auto const& [line, text] : planned) {

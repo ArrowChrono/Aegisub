@@ -884,6 +884,10 @@ set(AEGISUB_CORE_SOURCES
     # Subtitle edit / grid / timing ops (framework-agnostic)
     src/subtitle_character_markers.cpp
     src/subtitle_edit_ops.cpp
+    src/visual_ass_edit.cpp
+    src/visual_edit_controller.cpp
+    src/visual_feature_overlay.cpp
+    src/visual_tool_drag_snapshot.cpp
     src/subtitle_editor_ops.cpp
     src/subtitle_grid_ops.cpp
     src/subtitle_grid_folding.cpp
@@ -1290,6 +1294,7 @@ add_executable(Aegisub WIN32
     src/frame_main.cpp
     src/gl_text.cpp
     src/gl_wrap.cpp
+    src/gl_wrap_wx.cpp
     ${AEGISUB_GUI_RUNTIME_WX_HOST_SOURCES}
     src/grid_column.cpp
     src/grid_column_painter.cpp
@@ -1326,6 +1331,7 @@ add_executable(Aegisub WIN32
     src/validators.cpp
     src/video_overlay_draw_context.h
     src/video_overlay_draw_context_legacy_gl.cpp
+    src/video_overlay_draw_context_opengl.cpp
     src/video_overlay_draw_context_legacy_gl.h
     src/video_box.cpp
     src/watched_file_wx.cpp
@@ -1341,7 +1347,6 @@ add_executable(Aegisub WIN32
     src/video_renderer_opengl_tile.cpp
     src/video_slider.cpp
     src/visual_feature.cpp
-    src/visual_feature_overlay.cpp
     src/visual_guide_controller.cpp
     src/visual_guide_interaction.cpp
     src/visual_guide_model.cpp
@@ -1350,7 +1355,6 @@ add_executable(Aegisub WIN32
     src/visual_tool_clip.cpp
     src/visual_tool_cross.cpp
     src/visual_tool_drag.cpp
-    src/visual_tool_drag_snapshot.cpp
     src/visual_tool_measure.cpp
     src/visual_tool_motion_track.cpp
     src/visual_tool_rotatexy.cpp

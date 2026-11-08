@@ -488,8 +488,8 @@ void VisualToolMotionTrack::DrawWith(VideoOverlayDrawContext& draw) {
 
 	wxColour const line =
 		to_wx(OPT_GET("Colour/Visual Tools/Lines Primary")->GetColor());
-	draw.SetLineColour(line, 1.0f, 2);
-	draw.SetFillColour(wxColour(0, 0, 0), 0.0f);
+	draw.SetLineColour(from_wx(line), 1.0f, 2);
+	draw.SetFillColour(from_wx(wxColour(0, 0, 0)), 0.0f);
 
 	auto snap = SnapshotForOverlay();
 	// Trajectory and failure marks only make sense while the presented frame
@@ -508,8 +508,8 @@ void VisualToolMotionTrack::DrawWith(VideoOverlayDrawContext& draw) {
 			plan && !plan->paths.empty()) {
 			wxColour const ghost =
 				to_wx(OPT_GET("Colour/Visual Tools/Lines Secondary")->GetColor());
-			draw.SetLineColour(ghost, 0.8f, 1);
-			draw.SetFillColour(ghost, 0.8f);
+			draw.SetLineColour(from_wx(ghost), 0.8f, 1);
+			draw.SetFillColour(from_wx(ghost), 0.8f);
 			for (auto const& path : plan->paths) {
 				std::vector<Vector2D> pts;
 				pts.reserve(path.size());
@@ -588,9 +588,9 @@ void VisualToolMotionTrack::DrawWith(VideoOverlayDrawContext& draw) {
 					static_cast<float>(video_pos.X() + storage_pts[i].X() * scale_x),
 					static_cast<float>(video_pos.Y() + storage_pts[i].Y() * scale_y));
 			Vector2D const quad[4] = {pts[0], pts[2], pts[4], pts[6]};
-			draw.SetFillColour(wxColour(0, 0, 0), 0.0f);
+			draw.SetFillColour(from_wx(wxColour(0, 0, 0)), 0.0f);
 			draw.DrawPolygon(quad, 4);
-			draw.SetFillColour(line, 1.0f);
+			draw.SetFillColour(from_wx(line), 1.0f);
 			for (auto const& p : pts)
 				draw.DrawRectangle(
 					Vector2D(p.X() - kHandleHalfPx, p.Y() - kHandleHalfPx),
@@ -604,9 +604,9 @@ void VisualToolMotionTrack::DrawWith(VideoOverlayDrawContext& draw) {
 							  float(video_pos.Y() + roi.y * scale_y));
 			Vector2D const p2(p1.X() + float(roi.w * scale_x),
 							  p1.Y() + float(roi.h * scale_y));
-			draw.SetFillColour(wxColour(0, 0, 0), 0.0f);
+			draw.SetFillColour(from_wx(wxColour(0, 0, 0)), 0.0f);
 			draw.DrawRectangle(p1, p2);
-			draw.SetFillColour(line, 1.0f);
+			draw.SetFillColour(from_wx(line), 1.0f);
 			for (auto const& storage_pt : storage_pts) {
 				Vector2D const p(
 					static_cast<float>(video_pos.X() + storage_pt.X() * scale_x),
@@ -630,10 +630,10 @@ void VisualToolMotionTrack::DrawWith(VideoOverlayDrawContext& draw) {
 				std::snprintf(label, sizeof(label), "lost");
 			if (label[0]) {
 				VideoOverlayTextStyle style;
-				style.colour = line;
-				wxSize const extent = draw.MeasureText(label, style);
-				draw.DrawText(label, int(box_top_left.X()),
-							  int(box_top_left.Y()) - extent.GetY() - 4, style);
+				style.colour = from_wx(line);
+				auto const extent = draw.MeasureText(label, style);
+				draw.DrawText(label, static_cast<int>(box_top_left.X()),
+							  static_cast<int>(box_top_left.Y()) - extent.GetHeight() - 4, style);
 			}
 		}
 	}
@@ -660,9 +660,9 @@ void VisualToolMotionTrack::DrawWith(VideoOverlayDrawContext& draw) {
 	if (past.size() >= 2)
 		draw.DrawLineStrip(past.data(), past.size());
 	if (future.size() >= 2) {
-		draw.SetLineColour(line, 0.3f, 2);
+		draw.SetLineColour(from_wx(line), 0.3f, 2);
 		draw.DrawLineStrip(future.data(), future.size());
-		draw.SetLineColour(line, 1.0f, 2);
+		draw.SetLineColour(from_wx(line), 1.0f, 2);
 	}
 
 	for (auto const& s : snap->samples) {
@@ -677,9 +677,6 @@ void VisualToolMotionTrack::DrawWith(VideoOverlayDrawContext& draw) {
 }
 
 void VisualToolMotionTrack::Draw() {
-	// The legacy GL pass calls Draw(); only the Skia overlay pass calls
-	// DrawOverlay(), and Skia is off by default. Leaving this empty made the ROI
-	// box invisible in every default configuration.
 	LegacyVideoOverlayDrawContext draw(gl, *gl_text);
 	DrawWith(draw);
 }

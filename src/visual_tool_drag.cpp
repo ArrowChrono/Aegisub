@@ -323,7 +323,7 @@ void VisualToolDrag::Draw() {
 void VisualToolDrag::DrawOverlay(VideoOverlayDrawContext &context) {
 	DrawAllFeatures(context);
 
-	wxColour const line_color = to_wx(line_color_primary_opt->GetColor());
+	auto const line_color = line_color_primary_opt->GetColor();
 
 	for (auto& feature : features) {
 		if (feature.type == DRAG_START) continue;

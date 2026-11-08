@@ -190,12 +190,12 @@ void VisualToolShear::Draw() {
 	LegacyVideoOverlayDrawContext context(gl, *text);
 	VideoOverlayTextStyle style;
 	style.size = static_cast<int>(OPT_GET("Tool/Visual/Coordinate Font Size")->GetInt());
-	style.colour = to_wx(line_color_primary_opt->GetColor());
+	style.colour = line_color_primary_opt->GetColor();
 	if (!diagnostic.empty()) {
 		context.DrawText(diagnostic, static_cast<int>(video_pos.X()) + 8, static_cast<int>(video_pos.Y()) + 8, style);
 		return;
 	}
-	context.SetLineColour(to_wx(line_color_secondary_opt->GetColor()), 0.7f, 1);
+	context.SetLineColour(line_color_secondary_opt->GetColor(), 0.7f, 1);
 	context.DrawLine(center + Vector2D(-120, -100), center + Vector2D(120, -100));
 	context.DrawLine(center + Vector2D(100, -120), center + Vector2D(100, 120));
 	context.DrawLine(center + Vector2D(0, -106), center + Vector2D(0, -94));

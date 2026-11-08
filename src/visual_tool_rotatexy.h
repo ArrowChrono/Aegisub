@@ -21,6 +21,7 @@
 
 #include "visual_feature.h"
 #include "visual_tool.h"
+#include "visual_tool_transform_overlay.h"
 
 class VisualToolRotateXY final : public VisualTool<VisualDraggableFeature> {
 	float angle_x = 0.f; /// Current x rotation
@@ -34,6 +35,7 @@ class VisualToolRotateXY final : public VisualTool<VisualDraggableFeature> {
 	float orig_y = 0.f; ///< y rotation at the beginning of the current hold
 
 	Feature *org;
+	mutable aegisub::visual_transform::RotateXYOverlayGeometryCache overlay_geometry;
 
 	void DoRefresh() override;
 	void Draw() override;

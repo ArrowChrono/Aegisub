@@ -21,9 +21,9 @@ std::optional<VisualToolFeatureKey> VisualToolDragSnapshot::HitTest(Vector2D con
 }
 
 void VisualToolDragSnapshot::Draw(VideoOverlayDrawContext& target) const {
-	target.SetLineColour(wxColour(grid_colour), 1.0f, 1);
+	target.SetLineColour(VideoOverlayColourFromRgb(grid_colour), 1.0f, 1);
 	for (auto const& feature : features) {
-		target.SetFillColour(wxColour(feature.fill_colour), 0.3f);
+		target.SetFillColour(VideoOverlayColourFromRgb(feature.fill_colour), 0.3f);
 		VisualDraggableFeature marker;
 		marker.type = feature.type;
 		marker.pos = feature.pos;
@@ -41,13 +41,13 @@ void VisualToolDragSnapshot::Draw(VideoOverlayDrawContext& target) const {
 		Vector2D const start = *feature.parent + direction * 10;
 		Vector2D const end = feature.pos - direction * (10 + arrow_len);
 		if (has_arrow) {
-			target.SetLineColour(wxColour(line_colour), 0.8f, 2);
+			target.SetLineColour(VideoOverlayColourFromRgb(line_colour), 0.8f, 2);
 			target.DrawLine(start, end);
 			Vector2D const half_base = Vector2D(-direction.Y(), direction.X()) * 4;
 			target.DrawTriangle(end + direction * arrow_len, end + half_base, end - half_base);
 		}
 		else {
-			target.SetLineColour(wxColour(line_colour), 0.5f, 2);
+			target.SetLineColour(VideoOverlayColourFromRgb(line_colour), 0.5f, 2);
 			video_overlay_helpers::DrawDashedLine(target, start, end, 6);
 		}
 	}

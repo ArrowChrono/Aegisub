@@ -186,6 +186,7 @@ class VideoDisplay final : public wxGLCanvas {
 
 	/// The OpenGL context for this display
 	std::unique_ptr<wxGLContext> glContext;
+	int maximum_clip_planes = 0;
 #ifdef _WIN32
 	std::unique_ptr<OpenGLPresenterD3D11> dxgi_presenter;
 	bool dxgi_presentation_attempted = false;

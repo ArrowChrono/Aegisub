@@ -20,6 +20,8 @@
 
 #include "visual_tool_scale.h"
 
+#include "ass_dialogue.h"
+#include "ass_file.h"
 #include "compat.h"
 #include "include/aegisub/context.h"
 #include "libresrc/libresrc.h"
@@ -29,8 +31,10 @@
 #include "utils.h"
 #include "video_overlay_draw_context.h"
 #include "video_overlay_helpers.h"
+#include "visual_ass_edit.h"
 #include "visual_tool_render_snapshot.h"
 #include "visual_tool_scale_policy.h"
+#include "visual_tool_transform_overlay.h"
 
 #include <libaegisub/scope_exit.h>
 
@@ -53,84 +57,8 @@ std::optional<Axis> ToPolicyAxis(VisualScaleAxis axis) {
 	return std::nullopt;
 }
 
-struct ScaleOverlayState {
-	Vector2D scale;
-	Vector2D pos;
-	Vector2D video_res;
-	float rx;
-	float ry;
-	float rz;
-	float perspective_z_scale;
-	unsigned long line_color_primary;
-	unsigned long line_color_secondary;
-	unsigned long highlight_color;
-};
-
-void DrawScaleOverlay(VideoOverlayDrawContext &context, ScaleOverlayState const& state) {
-	static const int base_len = 160;
-	static const int guide_size = 10;
-
-	wxColour const line_color_primary(state.line_color_primary);
-	wxColour const line_color_secondary(state.line_color_secondary);
-	wxColour const highlight_color(state.highlight_color);
-	Vector2D const overlay_scale(100.0f, 100.0f);
-
-	Vector2D const base_point = state.pos
-		.Max(Vector2D(base_len / 2 + guide_size, base_len / 2 + guide_size))
-		.Min(state.video_res - base_len / 2 - guide_size * 3);
-
-	Vector2D const scale_half_length = state.scale * base_len / 200;
-	float const minor_dim_offset = base_len / 2 + guide_size * 1.5f;
-
-	Vector2D const x_p1(minor_dim_offset, -scale_half_length.Y());
-	Vector2D const x_p2(minor_dim_offset, scale_half_length.Y());
-	Vector2D const y_p1(-scale_half_length.X(), minor_dim_offset);
-	Vector2D const y_p2(scale_half_length.X(), minor_dim_offset);
-
-	context.SetLineColour(line_color_primary, 1.f, 2);
-	video_overlay_helpers::DrawProjectedLine(context, x_p1, x_p2, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale);
-	video_overlay_helpers::DrawProjectedLine(context, y_p1, y_p2, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale);
-
-	context.SetLineColour(line_color_secondary, 1.f, 1);
-	context.SetFillColour(highlight_color, 0.3f);
-	context.DrawCircle(
-		video_overlay_helpers::ProjectScaledRotatedPoint(x_p1, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale),
-		video_overlay_helpers::ProjectCircleRadius(x_p1, 4.0f, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale));
-	context.DrawCircle(
-		video_overlay_helpers::ProjectScaledRotatedPoint(x_p2, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale),
-		video_overlay_helpers::ProjectCircleRadius(x_p2, 4.0f, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale));
-	context.DrawCircle(
-		video_overlay_helpers::ProjectScaledRotatedPoint(y_p1, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale),
-		video_overlay_helpers::ProjectCircleRadius(y_p1, 4.0f, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale));
-	context.DrawCircle(
-		video_overlay_helpers::ProjectScaledRotatedPoint(y_p2, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale),
-		video_overlay_helpers::ProjectCircleRadius(y_p2, 4.0f, base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale));
-
-	int const half_len = base_len / 2;
-	context.SetLineColour(line_color_secondary, 1.0f, 1);
-	context.SetFillColour(highlight_color, 0.3f);
-	video_overlay_helpers::DrawProjectedQuad(
-		context,
-		Vector2D(half_len, -half_len),
-		Vector2D(half_len + guide_size, -half_len),
-		Vector2D(half_len + guide_size, half_len),
-		Vector2D(half_len, half_len),
-		base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale);
-	video_overlay_helpers::DrawProjectedQuad(
-		context,
-		Vector2D(-half_len, half_len),
-		Vector2D(half_len, half_len),
-		Vector2D(half_len, half_len + guide_size),
-		Vector2D(-half_len, half_len + guide_size),
-		base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale);
-	context.SetFillColour(highlight_color, 0.0f);
-
-	context.SetLineColour(line_color_secondary, 1.f, 2);
-	video_overlay_helpers::DrawProjectedLine(context, Vector2D(half_len + guide_size, -half_len), Vector2D(half_len + guide_size + guide_size / 2, -half_len), base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale);
-	video_overlay_helpers::DrawProjectedLine(context, Vector2D(half_len + guide_size, half_len), Vector2D(half_len + guide_size + guide_size / 2, half_len), base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale);
-	video_overlay_helpers::DrawProjectedLine(context, Vector2D(-half_len, half_len + guide_size), Vector2D(-half_len, half_len + guide_size + guide_size / 2), base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale);
-	video_overlay_helpers::DrawProjectedLine(context, Vector2D(half_len, half_len + guide_size), Vector2D(half_len, half_len + guide_size + guide_size / 2), base_point, overlay_scale, state.rx, state.ry, state.rz, state.perspective_z_scale);
-}
+using aegisub::visual_transform::DrawScaleOverlay;
+using aegisub::visual_transform::ScaleOverlayState;
 
 class ScaleRenderSnapshot final : public VisualToolRenderSnapshot {
 	ScaleOverlayState state;
@@ -373,9 +301,12 @@ void VisualToolScale::DoRefresh() {
 		return;
 	}
 
-	GetLineScale(active_line, scale);
-	GetLineRotation(active_line, rx, ry, rz);
-	pos = FromScriptCoords(GetLinePosition(active_line));
+	auto const line = aegisub::visual_edit::ReadLine(*active_line, c->GetCore().ass->GetStyle(active_line->Style), script_res);
+	scale = line.scale;
+	rx = line.rotation_x;
+	ry = line.rotation_y;
+	rz = line.rotation_z;
+	pos = FromScriptCoords(line.position);
 	UpdateToolbarState();
 }
 

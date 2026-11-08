@@ -12,8 +12,8 @@ public:
 	size_t draw_line_calls = 0;
 	size_t draw_lines_calls = 0;
 
-	void SetLineColour(wxColour const&, float = 1.0f, int = 1) override { }
-	void SetFillColour(wxColour const&, float = 1.0f) override { }
+	void SetLineColour(agi::Color const&, float = 1.0f, int = 1) override {}
+	void SetFillColour(agi::Color const&, float = 1.0f) override {}
 	void SetInvert() override { }
 	void ClearInvert() override { }
 
@@ -40,8 +40,8 @@ public:
 	void DrawCircle(Vector2D, float) override { }
 	void DrawTriangle(Vector2D, Vector2D, Vector2D) override { }
 
-	wxSize MeasureText(std::string const&, VideoOverlayTextStyle const&) override {
-		return wxSize();
+	VideoOverlayTextExtent MeasureText(std::string const&, VideoOverlayTextStyle const&) override {
+		return VideoOverlayTextExtent();
 	}
 
 	void DrawText(std::string const&, int, int, VideoOverlayTextStyle const&) override { }

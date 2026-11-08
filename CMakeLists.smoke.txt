@@ -535,6 +535,8 @@ if(WIN32)
         src/async_video_trace.cpp
         src/gl_text.cpp
         src/gl_wrap.cpp
+        src/gl_wrap_wx.cpp
+        src/video_overlay_draw_context_opengl.cpp
         src/video_overlay_draw_context_legacy_gl.cpp
         src/video_renderer_opengl.cpp
         src/video_renderer_opengl_tile.cpp

@@ -2461,6 +2461,7 @@ TEST(host_boundary_policy, explicit_wx_surface_inventory_stays_current) {
 	ASSERT_TRUE(std::filesystem::exists(src_root));
 
 	std::set<std::string> const expected_explicit_wx_surfaces = {
+		"src/gl_wrap_wx.cpp",
 		"src/gui_test_wx_boundary.cpp",
 		"src/gui_test_wx_boundary.h",
 		"src/gui_wx_bootstrap_ui_host.cpp",

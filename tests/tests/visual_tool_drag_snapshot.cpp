@@ -52,12 +52,12 @@ class Recorder final : public VideoOverlayDrawContext {
 	int line_changes = 0;
 	int fill_changes = 0;
 
-	void SetLineColour(wxColour const& colour, float alpha, int width) override {
-		stroke = {.colour = colour.GetRGB(), .alpha = alpha, .width = width};
+	void SetLineColour(agi::Color const& colour, float alpha, int width) override {
+		stroke = {.colour = (static_cast<unsigned long>(colour.r) | (static_cast<unsigned long>(colour.g) << 8) | (static_cast<unsigned long>(colour.b) << 16)), .alpha = alpha, .width = width};
 		++line_changes;
 	}
-	void SetFillColour(wxColour const& colour, float alpha) override {
-		fill = {.colour = colour.GetRGB(), .alpha = alpha};
+	void SetFillColour(agi::Color const& colour, float alpha) override {
+		fill = {.colour = (static_cast<unsigned long>(colour.r) | (static_cast<unsigned long>(colour.g) << 8) | (static_cast<unsigned long>(colour.b) << 16)), .alpha = alpha};
 		++fill_changes;
 	}
 	void DrawLine(Vector2D p1, Vector2D p2) override { Record(Kind::Line, {p1, p2}); }
@@ -80,7 +80,7 @@ class Recorder final : public VideoOverlayDrawContext {
 	void DrawMultiPolygon(std::vector<float> const&, std::vector<int> const&, std::vector<int> const&, Vector2D, Vector2D, bool) override {
 		ADD_FAILURE() << "Unexpected multi-polygon";
 	}
-	wxSize MeasureText(std::string const&, VideoOverlayTextStyle const&) override {
+	VideoOverlayTextExtent MeasureText(std::string const&, VideoOverlayTextStyle const&) override {
 		ADD_FAILURE() << "Unexpected text measurement";
 		return {};
 	}
@@ -250,8 +250,8 @@ TEST(visual_tool_drag_snapshot, completed_final_cannot_draw_released_colour_for_
 
 TEST(visual_tool_drag_snapshot, shared_feature_draw_keeps_small_geometry_and_skips_invalid_features) {
 	Recorder recorder;
-	recorder.SetLineColour(wxColour(GridColour), 1.0f, 1);
-	recorder.SetFillColour(wxColour(0x00123456UL), 0.3f);
+	recorder.SetLineColour(VideoOverlayColourFromRgb(GridColour), 1.0f, 1);
+	recorder.SetFillColour(VideoOverlayColourFromRgb(0x00123456UL), 0.3f);
 	VisualDraggableFeature square;
 	square.type = DRAG_SMALL_SQUARE;
 	square.pos = {25, 35};
@@ -259,8 +259,8 @@ TEST(visual_tool_drag_snapshot, shared_feature_draw_keeps_small_geometry_and_ski
 	ASSERT_EQ(1u, recorder.commands.size());
 	ExpectCommand(recorder.commands[0], Kind::Rectangle, {{22, 32}, {28, 38}}, 0x00123456);
 
-	recorder.SetLineColour(wxColour(LinkColour), 0.8f, 2);
-	recorder.SetFillColour(wxColour(0x00654321UL), 0.3f);
+	recorder.SetLineColour(VideoOverlayColourFromRgb(LinkColour), 0.8f, 2);
+	recorder.SetFillColour(VideoOverlayColourFromRgb(0x00654321UL), 0.3f);
 	VisualDraggableFeature circle;
 	circle.type = DRAG_SMALL_CIRCLE;
 	circle.pos = {60, 70};

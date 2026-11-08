@@ -1,5 +1,7 @@
 #include "visual_guide_overlay.h"
 
+#include "compat.h"
+
 #include "video_overlay_draw_context.h"
 
 #include <algorithm>
@@ -72,8 +74,8 @@ void DrawGuideStroke(
 	};
 
 	// Fill only: line alpha 0 skips stroke on both legacy and Skia backends.
-	context.SetFillColour(colour, alpha);
-	context.SetLineColour(colour, 0.0f, 1);
+	context.SetFillColour(from_wx(colour), alpha);
+	context.SetLineColour(from_wx(colour), 0.0f, 1);
 	context.DrawPolygon(polygon, 4);
 }
 
@@ -100,8 +102,8 @@ void DrawGuideArrowhead(
 		base - perp * half_width,
 	};
 
-	context.SetFillColour(colour, alpha);
-	context.SetLineColour(colour, 0.0f, 1);
+	context.SetFillColour(from_wx(colour), alpha);
+	context.SetLineColour(from_wx(colour), 0.0f, 1);
 	context.DrawPolygon(polygon, 3);
 }
 
@@ -204,7 +206,7 @@ VideoOverlayTextStyle MakeLabelTextStyle(VisualGuideOverlayStyle const& style) {
 	// (e.g. the saturated red default) and collapses to ~2:1 contrast on the
 	// semi-transparent black label background. White keeps the label legible
 	// regardless of the user's Lines Primary colour.
-	text_style.colour = wxColour(255, 255, 255);
+	text_style.colour = {255, 255, 255};
 	return text_style;
 }
 } // close anonymous namespace; label-layout helpers below are file-scope so
@@ -313,9 +315,9 @@ void DrawMeasurementLabel(
 
 	Vector2D const background_end = origin + Vector2D(
 		static_cast<float>(width), static_cast<float>(height));
-	context.SetFillColour(style.label_background_colour, 0.70f);
+	context.SetFillColour(from_wx(style.label_background_colour), 0.70f);
 	wxColour const border = selected ? style.highlight_colour : style.label_border_colour;
-	context.SetLineColour(border, 0.9f, 1);
+	context.SetLineColour(from_wx(border), 0.9f, 1);
 	context.DrawRectangle(origin, background_end);
 
 	std::array<std::string_view, 7> const lines = {

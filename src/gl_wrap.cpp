@@ -21,7 +21,11 @@
 
 #include "gl_wrap.h"
 
-#include <wx/colour.h>
+#include <libaegisub/color.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifdef HAVE_OPENGL_GL_H
 #include <OpenGL/gl.h>
@@ -38,7 +42,7 @@ typedef void (*PFNGLMULTIDRAWARRAYSPROC) (GLenum mode, const GLint* first, const
 static const float deg2rad = 3.1415926536f / 180.f;
 static const float pi = 3.1415926535897932384626433832795f;
 
-#ifdef __WIN32__
+#ifdef _WIN32
 #define glGetProc(a) wglGetProcAddress(a)
 #elif !defined(__APPLE__)
 #include <GL/glx.h>
@@ -266,19 +270,23 @@ void OpenGLWrapper::DrawRing(Vector2D center, float r1, float r2, float ar, floa
 	buf.Draw(GL_LINES);
 }
 
-void OpenGLWrapper::SetLineColour(wxColour col, float alpha, int width) {
-	line_r = col.Red() / 255.f;
-	line_g = col.Green() / 255.f;
-	line_b = col.Blue() / 255.f;
+void OpenGLWrapper::SetLineColour(agi::Color const& col, float alpha, int width) {
+	line_r = col.r / 255.f;
+	line_g = col.g / 255.f;
+	line_b = col.b / 255.f;
 	line_a = alpha;
 	line_width = width;
 }
 
-void OpenGLWrapper::SetFillColour(wxColour col, float alpha) {
-	fill_r = col.Red() / 255.f;
-	fill_g = col.Green() / 255.f;
-	fill_b = col.Blue() / 255.f;
+void OpenGLWrapper::SetFillColour(agi::Color const& col, float alpha) {
+	fill_r = col.r / 255.f;
+	fill_g = col.g / 255.f;
+	fill_b = col.b / 255.f;
 	fill_a = alpha;
+}
+
+void OpenGLWrapper::ApplyLineColour() const {
+	glColor4f(line_r, line_g, line_b, line_a);
 }
 
 void OpenGLWrapper::SetModeLine() const {
@@ -340,6 +348,17 @@ void OpenGLWrapper::DrawLines(size_t dim, const float *lines, size_t n) {
 	glDisableClientState(GL_VERTEX_ARRAY);
 }
 
+void OpenGLWrapper::DrawLineStrip(Vector2D const *points, size_t n) {
+	if (!points || n < 2)
+		return;
+
+	SetModeLine();
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glVertexPointer(2, GL_FLOAT, sizeof(Vector2D), points);
+	glDrawArrays(GL_LINE_STRIP, 0, static_cast<GLsizei>(n));
+	glDisableClientState(GL_VERTEX_ARRAY);
+}
+
 void OpenGLWrapper::DrawLineStrip(size_t dim, std::vector<float> const& lines) {
 	SetModeLine();
 	glEnableClientState(GL_VERTEX_ARRAY);
@@ -358,7 +377,7 @@ static void APIENTRY glMultiDrawArraysFallback(GLenum mode, const GLint *first, 
 }
 #endif
 
-void OpenGLWrapper::DrawMultiPolygon(std::vector<float> const& points, std::vector<int> &start, std::vector<int> &count, Vector2D video_pos, Vector2D video_size, bool invert) {
+void OpenGLWrapper::DrawMultiPolygon(std::vector<float> const& points, std::vector<int> const& start, std::vector<int> const& count, Vector2D video_pos, Vector2D video_size, bool invert) {
 	GL_EXT(PFNGLMULTIDRAWARRAYSPROC, glMultiDrawArrays);
 
 	float real_line_a = line_a;

@@ -23,6 +23,10 @@
 
 #include <vector>
 
+namespace agi {
+struct Color;
+}
+
 class wxColour;
 
 class OpenGLWrapper {
@@ -38,8 +42,11 @@ class OpenGLWrapper {
 public:
 	OpenGLWrapper();
 
-	void SetLineColour(wxColour col, float alpha = 1.0f, int width = 1);
-	void SetFillColour(wxColour col, float alpha = 1.0f);
+	void SetLineColour(agi::Color const& col, float alpha = 1.0f, int width = 1);
+	void SetFillColour(agi::Color const& col, float alpha = 1.0f);
+	void SetLineColour(wxColour const& col, float alpha = 1.0f, int width = 1);
+	void SetFillColour(wxColour const& col, float alpha = 1.0f);
+	void ApplyLineColour() const;
 	void SetModeLine() const;
 	void SetModeFill() const;
 
@@ -64,6 +71,7 @@ public:
 	void DrawLines(size_t dim, std::vector<float> const& lines);
 	void DrawLines(size_t dim, std::vector<float> const& lines, size_t c_dim, std::vector<float> const& colors);
 	void DrawLines(size_t dim, const float *lines, size_t n);
+	void DrawLineStrip(Vector2D const *points, size_t n);
 	void DrawLineStrip(size_t dim, std::vector<float> const& lines);
 
 	/// Draw a multipolygon serialized into a single array
@@ -73,7 +81,7 @@ public:
 	/// @param video_pos Top-left corner of the visible area
 	/// @param video_size Bottom-right corner of the visible area
 	/// @param invert Draw the area outside the polygons instead
-	void DrawMultiPolygon(std::vector<float> const& points, std::vector<int> &start, std::vector<int> &count, Vector2D video_pos, Vector2D video_size, bool invert);
+	void DrawMultiPolygon(std::vector<float> const& points, std::vector<int> const& start, std::vector<int> const& count, Vector2D video_pos, Vector2D video_size, bool invert);
 
 	static bool IsExtensionSupported(const char *ext);
 };

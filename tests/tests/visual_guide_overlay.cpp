@@ -3,6 +3,8 @@
 #include "../../src/visual_guide_overlay.h"
 #include "../../src/video_overlay_draw_context.h"
 
+#include <wx/colour.h>
+
 #include <limits>
 #include <string>
 #include <utility>
@@ -24,7 +26,7 @@ class CaptureOverlayContext final : public VideoOverlayDrawContext {
 public:
 	struct Polygon {
 		std::vector<Vector2D> points;
-		wxColour fill_colour;
+		agi::Color fill_colour;
 		float fill_alpha = 0.0f;
 	};
 
@@ -39,22 +41,22 @@ public:
 		int y = 0;
 	};
 
-	wxColour line_colour;
+	agi::Color line_colour;
 	float line_alpha = 1.0f;
 	int line_width = 1;
-	wxColour fill_colour;
+	agi::Color fill_colour;
 	float fill_alpha = 1.0f;
 	std::vector<Polygon> polygons;
 	std::vector<Rectangle> rectangles;
 	std::vector<Text> text;
 	int invert_count = 0;
 
-	void SetLineColour(wxColour const& colour, float alpha = 1.0f, int width = 1) override {
+	void SetLineColour(agi::Color const& colour, float alpha = 1.0f, int width = 1) override {
 		line_colour = colour;
 		line_alpha = alpha;
 		line_width = width;
 	}
-	void SetFillColour(wxColour const& colour, float alpha = 1.0f) override {
+	void SetFillColour(agi::Color const& colour, float alpha = 1.0f) override {
 		fill_colour = colour;
 		fill_alpha = alpha;
 	}
@@ -77,8 +79,8 @@ public:
 	void DrawCircle(Vector2D, float) override { }
 	void DrawTriangle(Vector2D, Vector2D, Vector2D) override { }
 
-	wxSize MeasureText(std::string const& value, VideoOverlayTextStyle const&) override {
-		return wxSize(static_cast<int>(value.size()) * 7, 12);
+	VideoOverlayTextExtent MeasureText(std::string const& value, VideoOverlayTextStyle const&) override {
+		return VideoOverlayTextExtent(static_cast<int>(value.size()) * 7, 12);
 	}
 	void DrawText(std::string const& value, int x, int y, VideoOverlayTextStyle const&) override {
 		text.push_back({ value, x, y });
@@ -156,12 +158,12 @@ TEST(visual_guide_overlay, draws_selected_measurement_with_filled_quads_and_labe
 	EXPECT_EQ(4u, context.polygons[1].points.size());
 	EXPECT_EQ(3u, context.polygons[2].points.size());
 	EXPECT_EQ(3u, context.polygons[3].points.size());
-	EXPECT_EQ(40, context.polygons[1].fill_colour.Red());
-	EXPECT_EQ(50, context.polygons[1].fill_colour.Green());
-	EXPECT_EQ(60, context.polygons[1].fill_colour.Blue());
+	EXPECT_EQ(40, context.polygons[1].fill_colour.r);
+	EXPECT_EQ(50, context.polygons[1].fill_colour.g);
+	EXPECT_EQ(60, context.polygons[1].fill_colour.b);
 	EXPECT_FLOAT_EQ(1.0f, context.polygons[1].fill_alpha);
 	// Arrowhead core uses the highlight colour for a selected guide.
-	EXPECT_EQ(40, context.polygons[3].fill_colour.Red());
+	EXPECT_EQ(40, context.polygons[3].fill_colour.r);
 	EXPECT_EQ(0, context.invert_count);
 
 	// Label background rectangle plus the seven metric rows.
