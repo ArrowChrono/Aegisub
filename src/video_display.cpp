@@ -95,6 +95,8 @@
 #include <locale>
 #include <sstream>
 #include <string_view>
+#include <stdexcept>
+#include <wx/thread.h>
 #include <wx/combobox.h>
 #include <wx/dcclient.h>
 #include <wx/display.h>
@@ -1135,6 +1137,79 @@ void VideoDisplay::RenderNow() {
 	}
 	TraceRenderState("video_display.render_dispatch.now");
 	DoRender();
+}
+
+RenderedViewportCapture VideoDisplay::CaptureRenderedViewport() {
+	RenderedViewportCapture result;
+	if (!wxIsMainThread() || render_in_progress || viewport_capture || con->videoController->IsPlaying()) {
+		result.error = "viewport capture requires an idle, paused UI thread";
+		return result;
+	}
+	viewport_capture = &result;
+	auto reset = agi::make_scope_exit([&] { viewport_capture = nullptr; });
+	try {
+		RenderNow();
+	}
+	catch (std::exception const& error) {
+		result.error = error.what();
+	}
+	if (result.error.empty() && !result.image.IsOk())
+		result.error = "normal render did not reach viewport readback";
+	else if (result.error.empty() && !result.swapped)
+		result.error = "normal render did not swap the captured viewport";
+	return result;
+}
+
+void VideoDisplay::ReadRenderedViewport(int width, int height) try {
+	auto& result = *viewport_capture;
+	result.frame = has_displayed_packet ? displayed_packet.frame_number : -1;
+	result.backing_scale = scale_factor;
+	result.current = has_displayed_packet && con->project->VideoProvider()->IsCurrent(displayed_packet.delivery_version);
+	if (!has_displayed_packet)
+		throw std::runtime_error("normal render has no displayed frame");
+	if (auto error = glGetError())
+		throw OpenGlException("viewport render before readback", error);
+	auto bind_framebuffer = LoadOptionalProc<PFNGLBINDFRAMEBUFFERPROC>("glBindFramebuffer");
+	auto bind_buffer = LoadOptionalProc<PFNGLBINDBUFFERPROC>("glBindBuffer", "glBindBufferARB");
+	if (!bind_framebuffer || !bind_buffer)
+		throw std::runtime_error("viewport readback requires framebuffer and pixel-buffer state access");
+	GLint read_framebuffer = 0, read_buffer = 0, pack_buffer = 0;
+	std::array<GLenum, 6> const pack_names = {
+		GL_PACK_ALIGNMENT, GL_PACK_ROW_LENGTH, GL_PACK_SKIP_ROWS, GL_PACK_SKIP_PIXELS,
+		GL_PACK_SWAP_BYTES, GL_PACK_LSB_FIRST};
+	std::array<GLint, 6> pack_values{};
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_framebuffer);
+	glGetIntegerv(GL_READ_BUFFER, &read_buffer);
+	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+	for (size_t i = 0; i < pack_names.size(); ++i)
+		glGetIntegerv(pack_names[i], &pack_values[i]);
+	if (auto error = glGetError())
+		throw OpenGlException("viewport readback state query", error);
+	auto restore = agi::make_scope_exit([&] {
+		bind_framebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_framebuffer));
+		glReadBuffer(static_cast<GLenum>(read_buffer));
+		bind_buffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
+		for (size_t i = 0; i < pack_names.size(); ++i)
+			glPixelStorei(pack_names[i], pack_values[i]);
+	});
+	bind_framebuffer(GL_READ_FRAMEBUFFER, 0);
+	glReadBuffer(GL_BACK);
+	bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
+	for (auto name : pack_names)
+		glPixelStorei(name, name == GL_PACK_ALIGNMENT ? 1 : 0);
+	wxImage image(width, height, false);
+	if (!image.IsOk())
+		throw std::runtime_error("could not allocate viewport image");
+	glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, image.GetData());
+	if (auto error = glGetError())
+		throw OpenGlException("viewport glReadPixels", error);
+	result.image = image.Mirror(false);
+}
+catch (agi::Exception const& error) {
+	viewport_capture->error = error.GetMessage();
+}
+catch (std::exception const& error) {
+	viewport_capture->error = error.what();
 }
 
 void VideoDisplay::RenderToolFeedback() {
@@ -2418,6 +2493,8 @@ void VideoDisplay::DoRender() try {
 
 	int const overlay_frame_number = con->videoController->GetPresentedFrameN();
 	DrawOverlayPass(client_size);
+	if (viewport_capture)
+		ReadRenderedViewport(canvas_width, canvas_height);
 
 	bool swapped = false;
 	{
@@ -2459,6 +2536,8 @@ void VideoDisplay::DoRender() try {
 		swap_trace.SetDetails(swapped ? 1 : 0, presented_new_frame ? 1 : 0);
 	}
 	last_render_succeeded = swapped;
+	if (viewport_capture)
+		viewport_capture->swapped = swapped;
 	if (swapped && tool_presentation.IsActive() && tool && !tool->IsInteracting()) {
 		auto *provider = con->project->VideoProvider();
 		if (provider && provider->IsCurrent(displayed_packet.delivery_version)) {
@@ -3036,7 +3115,8 @@ void VideoDisplay::OnMouseEvent(wxMouseEvent& event) {
 	else if (event.Dragging() && event.MiddleIsDown())
 		Pan(current_pos - last_mouse_pos);
 
-	last_mouse_pos = mouse_pos = current_pos;
+	if (!(event.Entering() && tool && tool->IgnoresMouseBoundaryEvents()))
+		last_mouse_pos = mouse_pos = current_pos;
 
 	bool const interaction_was_active = IsVisualToolInteracting();
 	if (tool)
@@ -3046,7 +3126,8 @@ void VideoDisplay::OnMouseEvent(wxMouseEvent& event) {
 }
 
 void VideoDisplay::OnMouseLeave(wxMouseEvent& event) {
-	mouse_pos = Vector2D();
+	if (!tool || !tool->IgnoresMouseBoundaryEvents())
+		mouse_pos = Vector2D();
 	if (zoom_preview)
 		zoom_preview->UpdateAt(std::nullopt, wxPoint());
 	if (tool)

@@ -54,6 +54,7 @@
 #include <vector>
 #include <wx/cursor.h>
 #include <wx/glcanvas.h>
+#include <wx/image.h>
 
 #ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
 #include <include/core/SkRefCnt.h>  // for sk_sp<SkSurface> member
@@ -97,7 +98,17 @@ namespace agi {
 	class OptionValue;
 }
 
+struct RenderedViewportCapture {
+	wxImage image;
+	int frame = -1;
+	int backing_scale = 1;
+	bool current = false;
+	bool swapped = false;
+	std::string error;
+};
+
 class VideoDisplay final : public wxGLCanvas {
+	friend class GuiTestWxBoundary;
 	/// Signals the display is connected to
 	std::vector<agi::signal::Connection> connections;
 	agi::signal::Signal<int> FramePresented;
@@ -209,6 +220,8 @@ class VideoDisplay final : public wxGLCanvas {
 	VideoRenderPacket displayed_packet;
 	bool has_displayed_packet = false;
 	bool last_render_succeeded = false;
+	RenderedViewportCapture *viewport_capture = nullptr;
+	void ReadRenderedViewport(int width, int height);
 	VisualToolPresentation tool_presentation;
 	void PrepareToolPresentation(VideoSubtitleUpdateOptions& options);
 
@@ -411,6 +424,7 @@ public:
 	/// Invalidate only the release window; ordinary repaint requests remain intact.
 	void CancelReleaseToolFeedback();
 	wxImage GetFrameImage(bool raw);
+	RenderedViewportCapture CaptureRenderedViewport();
 	VideoDisplayMemoryStats CollectMemoryStats() const;
 	DEFINE_SIGNAL_ADDERS(FramePresented, AddFramePresentedListener)
 

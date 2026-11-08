@@ -70,6 +70,7 @@ enum class VisualNudgeMagnitude {
 /// functionality as possible is implemented here to avoid having four copies
 /// of each method for no good reason (and four times as many error messages)
 class VisualToolBase {
+	friend class GuiTestWxBoundary;
 	void OnCommit(int type, AssDialogue const* changed);
 	void OnSeek(int new_frame);
 	void UpdateScriptResolution();
@@ -252,6 +253,7 @@ public:
 
 	// Stuff called by VideoDisplay
 	virtual void OnMouseEvent(wxMouseEvent &event)=0;
+	virtual bool IgnoresMouseBoundaryEvents() const noexcept { return false; }
 	/// Return true when the tool consumed a keyboard event.
 	virtual bool OnKeyDown(wxKeyEvent &) { return false; }
 	/// Apply a keyboard nudge. Return true when the tool applied the change.
@@ -345,6 +347,7 @@ public:
 	/// @brief Handler for all mouse events
 	/// @param event Shockingly enough, the mouse event
 	void OnMouseEvent(wxMouseEvent &event) override;
+	bool IgnoresMouseBoundaryEvents() const noexcept override;
 
 	/// @brief Constructor
 	/// @param parent The VideoDisplay to use for coordinate conversion

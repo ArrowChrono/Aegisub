@@ -1304,6 +1304,7 @@ add_executable(Aegisub WIN32
     src/hotkey_data_view_model.cpp
     src/image_position_picker.cpp
     src/main.cpp
+    src/gui_test_wx_boundary.cpp
     src/menu.cpp
     src/pen.cpp
     src/perf_trace.cpp

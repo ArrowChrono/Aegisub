@@ -29,6 +29,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include "gui_test_wx_boundary.h"
 
 namespace {
 
@@ -150,6 +151,7 @@ extern "C" int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, wxCm
 
 	auto const args = CurrentProcessArgs();
 	auto const launch_plan = ParseAppLaunchPlan(args);
+	EnableWxBoundaryTestAssertions(launch_plan);
 	observe_phase("startup.entry.capture_process_args");
 	if (launch_plan.RequestedPlainProcess()) {
 		observe_phase("startup.entry.headless_command_check");

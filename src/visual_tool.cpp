@@ -453,8 +453,15 @@ VisualTool<FeatureType>::VisualTool(VideoDisplay *parent, agi::Context *context)
 }
 
 template<class FeatureType>
+bool VisualTool<FeatureType>::IgnoresMouseBoundaryEvents() const noexcept {
+	return IsInteracting() && parent->HasCapture();
+}
+
+template<class FeatureType>
 void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
 	bool const interaction_was_active = holding || dragging;
+	if ((event.Entering() || event.Leaving()) && IgnoresMouseBoundaryEvents())
+		return;
 	bool release_mouse = false;
 	bool left_click = event.LeftDown();
 	bool left_double = event.LeftDClick();
@@ -626,7 +633,9 @@ void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
 	if (interaction_started)
 		BeginInteractionPacing(static_cast<int>(sel_features.size()));
 	if (release_mouse) {
-		parent->ReleaseMouse();
+		if (parent->HasCapture()) {
+			parent->ReleaseMouse();
+		}
 		parent->SetFocus();
 	}
 

@@ -38,6 +38,8 @@
 #include "include/aegisub/hotkey.h"
 
 #include "auto4_base.h"
+#include "ass_dialogue.h"
+#include "ass_file.h"
 #include "app_runtime.h"
 #include "automation_command_executor.h"
 #include "automation_scenario.h"
@@ -50,13 +52,19 @@
 #include "format.h"
 #include "frame_main.h"
 #include "gui_wx_runtime_entry_host.h"
+#include "gui_test_wx_boundary.h"
 #include "include/aegisub/context.h"
 #include "include/aegisub/context_ui.h"
 #include "options.h"
 #include "perf_trace.h"
 #include "project.h"
 #include "subs_controller.h"
+#include "selection_controller.h"
+#include "subtitle_grid_folding.h"
+#include "video_controller.h"
 #include "utils.h"
+#include "video_display.h"
+#include "visual_guide_overlay.h"
 #include <libaegisub/dispatch.h>
 #include <libaegisub/cajun/writer.h>
 #include <libaegisub/format_path.h>
@@ -101,6 +109,10 @@ void AegisubApp::OnAssertFailure(const wxChar *file, int line, const wxChar *fun
 		return value ? from_wx(wxString(value)) : std::string();
 	};
 	LOG_A("wx/assert") << narrow(file) << ":" << line << ":" << narrow(func) << "() " << narrow(cond) << ": " << narrow(msg);
+#ifdef __WXMSW__
+	if (RecordWxBoundaryTestAssertion(file, line, func, cond, msg))
+		return;
+#endif
 	wxApp::OnAssertFailure(file, line, func, cond, msg);
 }
 
@@ -337,7 +349,7 @@ void AegisubApp::StartGuiTest() {
 		return;
 
 	auto const artifacts = automation_profile->ArtifactsDirectory();
-	auto save_json = [&](std::string const& name, json::Object object) {
+	auto save_json = [artifacts](std::string const& name, const json::Object& object) {
 		agi::fs::path temporary_path;
 		try {
 			auto final_path = artifacts / agi::fs::PathFromString(name);
@@ -372,14 +384,132 @@ void AegisubApp::StartGuiTest() {
 	ready["process_id"] = static_cast<int64_t>(wxGetProcessId());
 	ready["window_title"] = from_wx(frames.front()->GetTitle());
 	ready["artifacts"] = agi::fs::PathToGenericString(artifacts);
-	if (!save_json("ready.json", std::move(ready))) {
+	if (!save_json("ready.json", ready)) {
 		gui_test_exit_code = 2;
 		ScheduleGuiTestClose();
 		return;
 	}
 
-	if (launch_plan->gui_test_host)
+	if (launch_plan->gui_test_host) {
+		auto *frame = frames.front();
+		auto document_state = [frame] {
+			auto const core = frame->context->GetCore();
+			auto const& selected = core.selectionController->GetSelectedSet();
+			auto const *active = core.selectionController->GetActiveLine();
+			auto& folding = core.ass->Folding();
+			json::Object state;
+			state["document_revision"] = core.subsController->GetDocumentRevision();
+			state["document_generation"] = static_cast<int64_t>(core.subsController->GetDocumentGeneration());
+			state["modified"] = core.subsController->IsModified();
+			state["undo_empty"] = core.subsController->IsUndoStackEmpty();
+			state["redo_empty"] = core.subsController->IsRedoStackEmpty();
+			state["undo_description"] = core.subsController->GetUndoDescription();
+			state["redo_description"] = core.subsController->GetRedoDescription();
+			state["active_id"] = static_cast<int64_t>(active ? active->Id : -1);
+			state["video_frame"] = static_cast<int64_t>(core.videoController->GetFrameN());
+			json::Array selected_ids, rows, groups;
+			for (auto const *line : selected)
+				selected_ids.emplace_back(static_cast<int64_t>(line->Id));
+			int source_row = 0;
+			for (auto const& line : core.ass->Events) {
+				json::Object row;
+				row["source_id"] = static_cast<int64_t>(line.Id);
+				row["source_row"] = static_cast<int64_t>(source_row);
+				row["display_row"] = static_cast<int64_t>(folding.SourceToDisplay(source_row));
+				row["selected"] = std::ranges::any_of(selected, [&line](auto const *item) { return item == &line; });
+				row["text"] = line.Text.get();
+				row["event"] = line.GetEntryData();
+				rows.emplace_back(std::move(row));
+				++source_row;
+			}
+			for (auto const& group : folding.Groups()) {
+				json::Object row;
+				row["id"] = static_cast<int64_t>(group.id);
+				row["start"] = static_cast<int64_t>(group.start);
+				row["end"] = static_cast<int64_t>(group.end);
+				row["collapsed"] = folding.IsCollapsed(group);
+				groups.emplace_back(std::move(row));
+			}
+			state["selected_ids"] = std::move(selected_ids);
+			state["rows"] = std::move(rows);
+			state["fold_groups"] = std::move(groups);
+			state["display_rows"] = static_cast<int64_t>(folding.DisplayRows().size());
+			if (auto *display = frame->context->GetUI().videoDisplay) {
+				state["native_capture"] = display->HasCapture();
+				state["visual_interacting"] = display->IsVisualToolInteracting();
+				auto const viewport = display->GetVisualGuideViewport();
+				json::Object allocation;
+				allocation["x"] = viewport.canvas_x;
+				allocation["y"] = viewport.canvas_y;
+				allocation["width"] = viewport.canvas_width;
+				allocation["height"] = viewport.canvas_height;
+				allocation["script_width"] = viewport.script_width;
+				allocation["script_height"] = viewport.script_height;
+				state["viewport"] = std::move(allocation);
+				state["presentation_snapshot_available"] = static_cast<bool>(display->GetToolPresentationSnapshot());
+			}
+			return state;
+		};
+#ifdef __WXMSW__
+		InstallWxBoundaryTestHost(*frame, *frame->context, artifacts, [this, save_json](std::string const& name, const json::Object& object) {
+			if (!save_json(name, object)) {
+				gui_test_exit_code = 2;
+				ScheduleGuiTestClose();
+			}
+		});
+#else
+		frame->Bind(wxEVT_MENU, [document_state, save_json, sequence = 0](wxCommandEvent&) mutable {
+			auto state = document_state();
+			state["sequence"] = static_cast<int64_t>(++sequence);
+			save_json("visual-state-" + std::to_string(sequence) + ".json", state); }, 0x7FFD);
+#endif
+		frame->Bind(wxEVT_MENU, [frame, artifacts, document_state, save_json, sequence = 0](wxCommandEvent&) mutable {
+			auto const name = "viewport-" + std::to_string(++sequence);
+			json::Object result;
+			result["sequence"] = static_cast<int64_t>(sequence);
+			result["capture_scope"] = "normal viewport before swap";
+			result["captured"] = false;
+			result["document"] = document_state();
+			auto *display = frame->context->GetUI().videoDisplay;
+			if (!display) {
+				result["error"] = "main window has no video canvas";
+				save_json(name + ".json", result);
+				return;
+			}
+			auto const origin = frame->ScreenToClient(display->ClientToScreen(wxPoint(0, 0)));
+			auto const size = display->GetClientSize();
+			auto const dip_size = display->ToDIP(size);
+			result["canvas_client_units"] = "wx client coordinates; physical pixels on MSW";
+			result["canvas_client_x"] = static_cast<int64_t>(origin.x);
+			result["canvas_client_y"] = static_cast<int64_t>(origin.y);
+			result["canvas_client_width"] = static_cast<int64_t>(size.x);
+			result["canvas_client_height"] = static_cast<int64_t>(size.y);
+			result["canvas_dip_width"] = static_cast<int64_t>(dip_size.x);
+			result["canvas_dip_height"] = static_cast<int64_t>(dip_size.y);
+			result["dpi_scale"] = display->GetDPIScaleFactor();
+			auto capture = display->CaptureRenderedViewport();
+			result["frame"] = static_cast<int64_t>(capture.frame);
+			result["backing_scale"] = static_cast<int64_t>(capture.backing_scale);
+			result["current"] = capture.current;
+			result["swapped"] = capture.swapped;
+			result["physical_width"] = static_cast<int64_t>(capture.image.IsOk() ? capture.image.GetWidth() : 0);
+			result["physical_height"] = static_cast<int64_t>(capture.image.IsOk() ? capture.image.GetHeight() : 0);
+			if (capture.error.empty() && !capture.current)
+				capture.error = "captured frame is not the current provider delivery";
+			if (capture.error.empty()) {
+				auto const image_name = name + ".png";
+				if (capture.image.SaveFile(to_wx(agi::fs::PathToString(artifacts / agi::fs::PathFromString(image_name))), wxBITMAP_TYPE_PNG)) {
+					result["captured"] = true;
+					result["image"] = image_name;
+				}
+				else
+					capture.error = "could not save captured viewport PNG";
+			}
+			if (!capture.error.empty())
+				result["error"] = capture.error;
+			save_json(name + ".json", result); }, 0x7FFE);
 		return;
+	}
 
 	if (!gui_test_scenario) {
 		json::Object failure;
@@ -392,7 +522,7 @@ void AegisubApp::StartGuiTest() {
 			: gui_test_scenario_error;
 		failure["error_kind"] = "schema";
 		failure["phase"] = "scenario";
-		save_json("result.json", std::move(failure));
+		save_json("result.json", failure);
 		gui_test_exit_code = 64;
 		ScheduleGuiTestClose();
 		return;
@@ -480,7 +610,7 @@ void AegisubApp::StartGuiTest() {
 		std::move(execution),
 		automation_profile->Root(),
 		artifacts);
-	if (!save_json("result.json", std::move(result))) {
+	if (!save_json("result.json", result)) {
 		gui_test_exit_code = 2;
 		ScheduleGuiTestClose();
 		return;

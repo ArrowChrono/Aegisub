@@ -1,0 +1,20 @@
+[Script Info]
+Title: Shared visual transform native contract
+ScriptType: v4.00+
+PlayResX: 640
+PlayResY: 480
+LayoutResX: 640
+LayoutResY: 480
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,28,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,7,10,10,10,1
+Style: Transform,Arial,24,&H00B0FFFF,&H000000FF,&H00000000,&H00000000,0,-1,0,0,120,80,0,17,1,1,0,5,12,13,14,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:02.00,Default,SourceA,12,23,34,,{\pos(250,200)\org(220,180)\frx15\fry25\frz30\fax0.2\fay-0.1\fscx135\fscy75\bord2}旋转 café\Nالعربية
+Dialogue: 1,0:00:00.00,0:00:02.00,Transform,SourceB,31,42,53,,{\pos(420,280)\clip(10,15,610,455)\i1}hidden selected 日本語
+Dialogue: 2,0:00:03.00,0:00:04.00,Default,SourceC,17,19,21,,{\move(100,360,140,380,0,1000)\frx-10\fry12\frz7\fscx50\fscy150}hidden selected future
+Dialogue: 0,0:00:03.00,0:00:04.00,Default,Sentinel,0,0,0,,{\pos(500,400)\fscx65}unselected future sentinel
