@@ -644,7 +644,13 @@ static int RunGeometryContract(DriverOptions options, PrivateDesktop isolation)
         void SaveFrameDialog(string destination)
         {
             var dialog = Dialog("Save PNG snapshot");
-            var edit = EnumerateChildWindows(dialog).Single(target => NativeClassName(target) == "Edit" && IsWindowVisible(target) && WindowText(target).EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+            nint edit = 0;
+            WaitUntil(() =>
+            {
+                isolation.VerifyWindow(dialog, process);
+                edit = EnumerateChildWindows(dialog).SingleOrDefault(target => NativeClassName(target) == "Edit" && IsWindowVisible(target) && IsWindowEnabled(target) && WindowText(target).EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+                return edit != 0;
+            }, "Owned frame filename edit did not become ready");
             isolation.VerifyWindow(edit, process);
             var value = new StringBuilder(destination);
             if (SendMessageStringTimeout(edit, 0x000C, 0, value, SendMessageTimeoutFlags.AbortIfHung | SendMessageTimeoutFlags.Block, 1000, out var result) == 0 || result == 0)
