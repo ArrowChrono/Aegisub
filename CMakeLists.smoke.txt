@@ -460,30 +460,6 @@ if(WIN32)
             PROPERTIES LABELS "smoke;audio;diagnostics" RUN_SERIAL TRUE TIMEOUT 30)
     endif()
 
-    if(WITH_SKIA_VIDEO_TOOLS)
-        add_executable(skia-video-compositor-smoke EXCLUDE_FROM_ALL
-            tests/smoke/skia_video_compositor_smoke.cpp
-            src/skia/skia_gl_contract.cpp
-            src/skia/skia_video_compositor_contract.cpp
-            src/skia/skia_gl_device.cpp
-            src/skia/skia_video_compositor.cpp
-            src/skia/skia_video_overlay_gl.cpp
-            src/skia_runtime/skia_surface_provider.cpp
-            src/skia_runtime/skia_text_layout_cache.cpp
-            src/video_overlay_draw_context_skia.cpp
-        )
-        target_compile_definitions(skia-video-compositor-smoke PRIVATE
-            AEGISUB_WITH_SKIA_GPU_GL=1
-            AEGISUB_WITH_SKIA_VIDEO_TOOLS=1
-            CMAKE_BUILD
-            NOMINMAX
-            WIN32_LEAN_AND_MEAN
-        )
-        target_compile_features(skia-video-compositor-smoke PRIVATE cxx_std_20)
-        target_include_directories(skia-video-compositor-smoke PRIVATE src)
-        target_link_libraries(skia-video-compositor-smoke PRIVATE unofficial::skia::skia OpenGL::GL ${wxWidgets_LIBRARIES})
-    endif()
-
     if(WITH_SKIA_AUDIO_DISPLAY)
         add_executable(skia-audio-display-smoke EXCLUDE_FROM_ALL
             tests/smoke/skia_audio_display_smoke.cpp

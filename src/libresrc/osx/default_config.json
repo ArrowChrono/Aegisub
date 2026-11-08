@@ -740,9 +740,6 @@
 		"Renderer" : {
 			"Backend" : "opengl"
 		},
-		"Skia Tools" : {
-			"Enabled" : false
-		},
 		"Secondary Subtitles" : {
 			"Auto Load From Video" : false,
 			"Dummy" : {

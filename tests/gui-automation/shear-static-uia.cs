@@ -262,7 +262,7 @@ sealed class Scenario
                            {"string":"visual_tool_nudge_alt_large"}, {"string":"duplicate -> split"} ] },
               "Subtitle": { "Provider": "libass" },
               "Video": { "Open Audio": false, "Scale with DPI": false, "Default Zoom": 7,
-                         "Renderer": { "Backend": "opengl" }, "Skia Tools": { "Enabled": false } },
+                         "Renderer": { "Backend": "opengl" } },
               "Tool": { "Visual": { "Autohide": false } } }
             """)!;
         File.WriteAllText(Path.Combine(profile, "user", "config.json"), config.ToJsonString(Json));
@@ -359,7 +359,6 @@ sealed class Scenario
         var host = Path.Combine(artifacts, "host-" + ++launch);
         Directory.CreateDirectory(host);
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
-        start.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
         foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", host, "--open", fixture, "--open", video })
             start.ArgumentList.Add(arg);
         app = isolation.Start(start, "host-" + launch);

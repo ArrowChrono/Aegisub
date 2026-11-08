@@ -69,7 +69,6 @@ static int Run(DriverOptions options)
         startInfo.Environment.Remove("AEGISUB_PERF_TRACE");
         if (options.Trace == "on")
             startInfo.Environment["AEGISUB_PERF_TRACE"] = "video,visual-tool-drag-benchmark";
-        startInfo.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
         AddArgument(startInfo, "--gui-test");
         AddArgument(startInfo, "host");
         AddArgument(startInfo, "--profile-dir");
@@ -488,7 +487,6 @@ static int RunGeometryContract(DriverOptions options, PrivateDesktop isolation)
     try
     {
         var start = new ProcessStartInfo(options.Executable) { UseShellExecute = false, WorkingDirectory = Environment.CurrentDirectory, WindowStyle = ProcessWindowStyle.Minimized };
-        start.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
         foreach (var argument in new[] { "--gui-test", "host", "--profile-dir", profilePath, "--artifacts", host, "--open", fixturePath, "--open", options.Video })
             AddArgument(start, argument);
         process = isolation.Start(start, "actual-host");
@@ -1124,7 +1122,6 @@ static int RunGeometryContract(DriverOptions options, PrivateDesktop isolation)
             var expectedHost = Path.Combine(options.Artifacts, "expected-host");
             Directory.CreateDirectory(expectedHost);
             var expectedStart = new ProcessStartInfo(options.Executable) { UseShellExecute = false, WorkingDirectory = Environment.CurrentDirectory, WindowStyle = ProcessWindowStyle.Minimized };
-            expectedStart.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
             foreach (var argument in new[] { "--gui-test", "host", "--profile-dir", profilePath, "--artifacts", expectedHost, "--open", expectedAss, "--open", options.Video })
                 AddArgument(expectedStart, argument);
             process = isolation.Start(expectedStart, "expected-host");
@@ -1395,7 +1392,6 @@ static int RunInputContract(DriverOptions options)
             UseShellExecute = false,
             WindowStyle = ProcessWindowStyle.Minimized,
         };
-        startInfo.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
         startInfo.Environment["AEGISUB_PERF_TRACE"] = "video,visual-tool-input-contract";
         foreach (var value in new[] { "--gui-test", "host", "--profile-dir", profilePath,
             "--artifacts", hostArtifactsPath, "--open", fixturePath, "--open", options.Video })
@@ -1799,7 +1795,6 @@ static void WriteProfileConfig(string profilePath, string subtitleProvider)
             ["Open Audio"] = false,
             ["Scale with DPI"] = false,
             ["Renderer"] = new Dictionary<string, object> { ["Backend"] = "opengl" },
-            ["Skia Tools"] = new Dictionary<string, object> { ["Enabled"] = false },
         },
     };
     var json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });

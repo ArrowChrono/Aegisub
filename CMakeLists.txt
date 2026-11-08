@@ -492,7 +492,6 @@ if(WITH_AVISYNTH)
 endif()
 option(WITH_CSRI "Enable CSRI support" ON)
 option(WITH_DRAWING_SKIA "Enable Skia-backed Lua drawing path operations" OFF)
-option(WITH_SKIA_VIDEO_TOOLS "Build the opt-in Skia video tools overlay" OFF)
 option(WITH_SKIA_AUDIO_DISPLAY "Build the opt-in full Skia audio display" OFF)
 option(WITH_SKIA_SUBTITLE_GRID "Build the opt-in Skia CPU subtitle grid renderer" OFF)
 option(WITH_SKIA_SOFTWARE_VIDEO "Build the Skia software video presenter (not implemented)" OFF)
@@ -506,7 +505,7 @@ foreach(_aegisub_unimplemented_skia_feature IN ITEMS
     endif()
 endforeach()
 
-if(WITH_SKIA_VIDEO_TOOLS OR WITH_SKIA_AUDIO_DISPLAY OR WITH_SKIA_SUBTITLE_GRID OR WITH_DRAWING_SKIA)
+if(WITH_SKIA_AUDIO_DISPLAY OR WITH_SKIA_SUBTITLE_GRID OR WITH_DRAWING_SKIA)
     # unofficial-skia resolves a few Windows system import libraries while its
     # package config is loaded. Seed those lookups before find_package so a
     # fresh configure does not silently omit them.
@@ -563,14 +562,14 @@ if(WITH_SKIA_SUBTITLE_GRID)
             "WITH_SKIA_SUBTITLE_GRID requires SkShaper on macOS/Linux, but the package target is unavailable."
         )
     endif()
-    if(NOT WITH_SKIA_VIDEO_TOOLS AND NOT WITH_SKIA_AUDIO_DISPLAY)
+    if(NOT WITH_SKIA_AUDIO_DISPLAY)
         get_target_property(_aegisub_grid_skia_compile_definitions
             unofficial::skia::skia INTERFACE_COMPILE_DEFINITIONS)
         if("${_aegisub_grid_skia_compile_definitions}" MATCHES "(^|;)SK_GL(;|$)")
             message(FATAL_ERROR
                 "A subtitle-grid-only build selected a GL-enabled Skia package. Create a fresh "
                 "build directory and configure with -DVCPKG_MANIFEST_FEATURES=skia-grid, or "
-                "enable the Audio/Video Skia feature which owns the GPU dependency."
+                "enable a Skia audio feature which owns the GPU dependency."
             )
         endif()
         unset(_aegisub_grid_skia_compile_definitions)
@@ -593,7 +592,7 @@ endif()
 if(WITH_CSRI)
     target_compile_definitions(aegisub_core_features INTERFACE WITH_CSRI)
 endif()
-if(WITH_SKIA_VIDEO_TOOLS OR WITH_SKIA_AUDIO_DISPLAY)
+if(WITH_SKIA_AUDIO_DISPLAY)
     find_package(OpenGL REQUIRED)
     if(NOT TARGET unofficial::skia::skia)
         message(FATAL_ERROR
@@ -1393,7 +1392,7 @@ add_dependencies(Aegisub aegisub_generated_resources)
 if(WIN32)
     target_sources(Aegisub PRIVATE src/watched_file_win.cpp)
 endif()
-if(WITH_SKIA_VIDEO_TOOLS OR WITH_SKIA_AUDIO_DISPLAY)
+if(WITH_SKIA_AUDIO_DISPLAY)
     target_sources(Aegisub PRIVATE
         src/skia/skia_gl_contract.cpp
         src/skia/skia_gl_device.cpp
@@ -1403,20 +1402,6 @@ if(WITH_SKIA_VIDEO_TOOLS OR WITH_SKIA_AUDIO_DISPLAY)
         AEGISUB_WITH_SKIA_GPU_GL=1
     )
     target_link_libraries(Aegisub PRIVATE unofficial::skia::skia OpenGL::GL)
-endif()
-if(WITH_SKIA_VIDEO_TOOLS)
-    target_sources(Aegisub PRIVATE
-        src/video_overlay_draw_context_skia.cpp
-        src/skia/skia_video_compositor_contract.cpp
-        src/skia/skia_video_compositor.cpp
-        src/skia/skia_video_overlay_command_buffer.cpp
-        src/skia/skia_video_overlay_gl.cpp
-        src/skia_runtime/skia_text_layout_cache.cpp
-    )
-    target_compile_definitions(Aegisub PRIVATE
-        AEGISUB_WITH_SKIA_VIDEO_COMPOSITOR=1
-        AEGISUB_WITH_SKIA_VIDEO_TOOLS=1
-    )
 endif()
 if(WITH_SKIA_AUDIO_DISPLAY)
     target_sources(Aegisub PRIVATE
@@ -2224,7 +2209,6 @@ message(STATUS "\n"
     "  LuaJIT Shared:         ${AEGISUB_LUAJIT_SHARED}\n"
     "  LuaSocket:             ${LUA_WITH_LUASOCKET}\n"
     "  Drawing Skia:          ${WITH_DRAWING_SKIA}\n"
-    "  Video tools Skia:      ${WITH_SKIA_VIDEO_TOOLS}\n"
     "  Audio display Skia:    ${WITH_SKIA_AUDIO_DISPLAY}\n"
     "  Subtitle grid Skia:    ${WITH_SKIA_SUBTITLE_GRID}\n"
     "  Software video Skia:   ${WITH_SKIA_SOFTWARE_VIDEO}\n"

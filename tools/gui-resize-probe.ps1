@@ -430,7 +430,7 @@ $config = @{
     App = @{ Auto = @{ 'Check For Updates' = $false; 'Load Linked Files' = 0; 'Save on Every Change' = $false } }
     Subtitle = @{ Provider = 'libass'; 'Show Original' = [bool]$ShowOriginal; 'Use STC' = !$PlainTextEditor; Grid = @{ Skia = @{ Enabled = $false } } }
     Audio = @{ Spectrum = ($Mode -eq 'Spectrum'); Display = @{ Skia = @{ Enabled = $false } }; Cache = @{ Type = 1 } }
-    Video = @{ 'Open Audio' = $false; 'Default Zoom' = 7; 'Scale with DPI' = $false; Renderer = @{ Backend = 'opengl' }; 'Skia Tools' = @{ Enabled = $false } }
+    Video = @{ 'Open Audio' = $false; 'Default Zoom' = 7; 'Scale with DPI' = $false; Renderer = @{ Backend = 'opengl' } }
 }
 if ($DetachedVideo) { $config.Video.Detached = @{ Enabled = $true } }
 $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $profile 'user/config.json') -Encoding utf8NoBOM
@@ -469,7 +469,7 @@ if ($Mode -eq 'Video') {
     [ResizeProbeDesktop]::WriteAudio($mediaPath)
     $arguments.AddRange([string[]]@('--open', $mediaPath))
 }
-$environmentNames = @('AEGISUB_PERF_TRACE', 'AEGISUB_ENABLE_VIDEO_SCENE_CACHE', 'AEGISUB_ENABLE_SKIA_AUDIO_DISPLAY', 'AEGISUB_ENABLE_SKIA_VIDEO_TOOLS', 'wx_msw_window_no_composited')
+$environmentNames = @('AEGISUB_PERF_TRACE', 'AEGISUB_ENABLE_VIDEO_SCENE_CACHE', 'AEGISUB_ENABLE_SKIA_AUDIO_DISPLAY', 'wx_msw_window_no_composited')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 $session = $null
@@ -491,7 +491,6 @@ try {
     $env:AEGISUB_PERF_TRACE = if ($WithoutTrace) { '' } else { 'video,audio,log' }
     $env:AEGISUB_ENABLE_VIDEO_SCENE_CACHE = if ($DisableSceneCache) { '0' } else { '1' }
     $env:AEGISUB_ENABLE_SKIA_AUDIO_DISPLAY = '0'
-    $env:AEGISUB_ENABLE_SKIA_VIDEO_TOOLS = '0'
     $env:wx_msw_window_no_composited = if ($DisableCompositingAtCreation) { '1' } else { '0' }
     $session = [ResizeProbeDesktop]::new($executablePath, $arguments.ToArray(), $repo)
     $readyPath = Join-Path $hostOutput 'ready.json'

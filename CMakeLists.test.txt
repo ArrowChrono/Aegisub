@@ -473,19 +473,10 @@ if(GTEST_FOUND)
             tests/tests/video_renderer_placebo_runtime.cpp
         )
     endif()
-    if(WITH_SKIA_VIDEO_TOOLS OR WITH_SKIA_AUDIO_DISPLAY)
+    if(WITH_SKIA_AUDIO_DISPLAY)
         target_sources(gtest-run PRIVATE
             tests/tests/skia_gl_contract.cpp
             src/skia/skia_gl_contract.cpp
-        )
-    endif()
-    if(WITH_SKIA_VIDEO_TOOLS)
-        target_sources(gtest-run PRIVATE
-            tests/tests/skia_video_compositor_contract.cpp
-            tests/tests/skia_video_overlay_command_buffer.cpp
-            tests/tests/visual_guide_overlay_skia.cpp
-            src/skia/skia_video_compositor_contract.cpp
-            src/skia/skia_video_overlay_command_buffer.cpp
         )
     endif()
     if(WITH_SKIA_AUDIO_DISPLAY)

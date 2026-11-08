@@ -56,9 +56,6 @@
 #include <wx/glcanvas.h>
 #include <wx/image.h>
 
-#ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
-#include <include/core/SkRefCnt.h>  // for sk_sp<SkSurface> member
-#endif
 
 // Prototypes
 class AssDialogue;
@@ -69,16 +66,6 @@ class OpenGLText;
 class OpenGLTextTextureDeleter;
 #ifdef _WIN32
 class OpenGLPresenterD3D11;
-#endif
-#ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
-class SkiaSurfaceProvider;
-class SkiaTextLayoutCache;
-class SkiaVideoCompositor;
-class SkiaVideoOverlayCommandBuffer;
-class SkSurface;
-struct SkiaGlContextToken;
-struct SkiaVideoFrameTarget;
-enum class SkiaVideoFailureInjection;
 #endif
 class VideoController;
 class VideoOverlayDrawContext;
@@ -254,53 +241,6 @@ class VideoDisplay final : public wxGLCanvas {
 	unsigned int scene_cache_framebuffer = 0;
 	unsigned int scene_cache_texture = 0;
 	video_subtitle_scene_cache::SubtitleSceneSnapshot displayed_subtitle_scene;
-#ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
-	bool use_skia_video_tools = false;
-	bool use_skia_video_compositor_probe = false;
-	SkiaVideoFailureInjection skia_video_failure_injection;
-	std::uint64_t gl_context_generation = 0;
-	std::uint64_t skia_present_generation = 0;
-	std::unique_ptr<SkiaVideoCompositor> skia_video_compositor;
-	std::unique_ptr<SkiaSurfaceProvider> skia_overlay_surface_provider;
-	std::unique_ptr<SkiaTextLayoutCache> skia_overlay_text_cache;
-	unsigned int skia_overlay_framebuffer = 0;
-	unsigned int skia_overlay_texture = 0;
-	unsigned int skia_overlay_stencil_renderbuffer = 0;
-	unsigned int skia_overlay_invert_framebuffer = 0;
-	unsigned int skia_overlay_invert_texture = 0;
-	unsigned int skia_overlay_invert_stencil_renderbuffer = 0;
-	std::unique_ptr<SkiaVideoOverlayCommandBuffer> skia_overlay_cached_commands;
-	bool skia_overlay_cache_valid = false;
-	std::uint64_t skia_overlay_cache_context_generation = 0;
-	int skia_overlay_cache_canvas_width = 0;
-	int skia_overlay_cache_canvas_height = 0;
-	int skia_overlay_cache_scale_factor = 0;
-	int skia_overlay_origin_x = 0;
-	int skia_overlay_origin_y = 0;
-	int skia_overlay_width = 0;
-	int skia_overlay_height = 0;
-	int skia_overlay_invert_origin_x = 0;
-	int skia_overlay_invert_origin_y = 0;
-	int skia_overlay_invert_width = 0;
-	int skia_overlay_invert_height = 0;
-	bool skia_overlay_backing_release_requested = false;
-	std::uint64_t skia_overlay_backing_context_generation = 0;
-	// Cached Ganesh surfaces wrapping the overlay FBOs. Re-acquired only when the
-	// backing FBO id / size / GL context generation changes (e.g. on a static
-	// overlay the same surface is reused across frames instead of re-wrapping
-	// the FBO every paint). Destroyed together with the GL backing in
-	// DestroySkiaOverlayBacking.
-	sk_sp<SkSurface> skia_overlay_surface;
-	sk_sp<SkSurface> skia_overlay_invert_surface;
-	std::uint64_t skia_overlay_surface_context_generation = 0;
-	unsigned int skia_overlay_surface_framebuffer = 0;
-	int skia_overlay_surface_width = 0;
-	int skia_overlay_surface_height = 0;
-	std::uint64_t skia_overlay_invert_surface_context_generation = 0;
-	unsigned int skia_overlay_invert_surface_framebuffer = 0;
-	int skia_overlay_invert_surface_width = 0;
-	int skia_overlay_invert_surface_height = 0;
-#endif
 
 	double GetVideoScaleFactor() const;
 	void InvalidateSceneCache();
@@ -318,15 +258,6 @@ class VideoDisplay final : public wxGLCanvas {
 	void DrawLegacyOverlayPass(wxSize const& client_size);
 	void DrawOverlayPass(wxSize const& client_size);
 	void DrawVisualGuides(VideoOverlayDrawContext &draw_context);
-#ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
-	bool TryDrawSkiaOverlayPass(wxSize const& client_size);
-	bool IsSkiaVideoRuntimeRequested() const noexcept;
-	SkiaVideoCompositor *EnsureSkiaVideoCompositor();
-	SkiaGlContextToken CurrentSkiaGlContextToken() const noexcept;
-	SkiaVideoFrameTarget BuildSkiaVideoFrameTarget(wxSize const& client_size);
-	void ProbeSkiaVideoCompositor(wxSize const& client_size);
-	void LogSkiaVideoFailureOnce();
-#endif
 	void ResetDisplayedSubtitleScene() noexcept;
 	void RefreshDisplayedSubtitleSceneSnapshot();
 	void OnSubtitlesCommit(int type, AssDialogue const* changed);
@@ -335,17 +266,6 @@ class VideoDisplay final : public wxGLCanvas {
 	/// @param horizontal_percent The percent of the video reserved horizontally
 	/// @param vertical_percent The percent of the video reserved vertically
 	void DrawOverscanMask(float horizontal_percent, float vertical_percent) const;
-#ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
-	void DrawOverscanMaskSkia(VideoOverlayDrawContext &draw_context, float horizontal_percent, float vertical_percent) const;
-	bool EnsureSkiaOverlayBacking(
-		int normal_width,
-		int normal_height,
-		int invert_width,
-		int invert_height,
-		bool need_invert,
-		int& allocated_targets);
-	void DestroySkiaOverlayBacking() noexcept;
-#endif
 
 	/// Upload the image for the current frame to the video card
 	void UploadFrameData(VideoRenderPacket const&, double);

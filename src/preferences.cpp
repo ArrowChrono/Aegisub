@@ -723,14 +723,6 @@ void BuildVisualToolsPage(OptionPage *p) {
 	binder->BindEvents(binder);
 
 	binder->AddCategory(_("Options"));
-#ifdef AEGISUB_WITH_SKIA_VIDEO_TOOLS
-	auto *skia_video_tools = binder->AddBool(
-		_("Use Skia video tools (restart required)"),
-		"Video/Skia Tools/Enabled");
-	skia_video_tools->SetHelpString(_(
-		"Use Skia for interactive video tool overlays. Video frame rendering and subtitles "
-		"continue to use their existing renderers. Restart Aegisub after changing this option."));
-#endif
 	binder->AddBool(_("Only show visual tools when mouse is over video"), "Tool/Visual/Autohide");
 	binder->AddInt(_("Coordinate font size"), "Tool/Visual/Coordinate Font Size", 6, 72);
 

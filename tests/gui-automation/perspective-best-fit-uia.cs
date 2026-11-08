@@ -145,7 +145,7 @@ sealed class Scenario
         WriteConfig(JsonNode.Parse("""
             { "App": { "Auto": { "Check For Updates": false, "Load Linked Files": 0 } },
               "Subtitle": { "Provider": "libass" },
-              "Video": { "Open Audio": false, "Scale with DPI": false, "Default Zoom": 7, "Renderer": { "Backend": "opengl" }, "Skia Tools": { "Enabled": false } },
+              "Video": { "Open Audio": false, "Scale with DPI": false, "Default Zoom": 7, "Renderer": { "Backend": "opengl" } },
               "Tool": { "Visual": { "Autohide": false, "Perspective": { "Fit Text": true, "Fax Frz Only": true, "Shape Tolerance": 100, "Decimal Places": 4 } } } }
             """)!);
         var menu = JsonNode.Parse(File.ReadAllText(Path.Combine("src", "libresrc", "default_menu.json")))!;
@@ -163,7 +163,6 @@ sealed class Scenario
         File.WriteAllText(fixture, source, new UTF8Encoding(false));
         var host = Path.Combine(artifacts, "host-" + ++launch); Directory.CreateDirectory(host);
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
-        start.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
         start.Environment["AEGISUB_AUDIO_TILE_DIAGNOSTICS"] = "1";
         foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", host, "--open", fixture, "--open", video }) start.ArgumentList.Add(arg);
         app = isolation.Start(start, "host-" + launch);

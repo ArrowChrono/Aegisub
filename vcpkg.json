@@ -93,7 +93,7 @@
       ]
     },
     "skia": {
-      "description": "Install full Skia for opt-in GUI rendering features such as video tools.",
+      "description": "Install full Skia for opt-in GPU audio rendering.",
       "dependencies": [
         "skia"
       ]

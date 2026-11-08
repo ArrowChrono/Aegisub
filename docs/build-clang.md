@@ -90,8 +90,7 @@ Additional configure options can be passed from PowerShell:
 - `Ninja`, `Release`, `x64-windows-clang-cl` for both target and host triplets.
 - Shared bundled LuaJIT, LuaSocket, AviSynth+, FFMS2, LsmasNative, SceneChange,
   libplacebo, FFTW3/PFFFT, Matroska parsing and Plugin Bridge enabled.
-- Skia drawing/audio/grid enabled, Skia visual tools disabled. This is not an
-  effort to maintain the deprecated visual tools.
+- Skia drawing, audio and grid enabled.
 - Release IPO/LTO disabled. CMake checks Release IPO even when configuring
   another build type; it must not become an accidental toolchain prerequisite.
 - `CLANG_TIDY` and `CMAKE_CXX_CLANG_TIDY` empty. This project automatically enables

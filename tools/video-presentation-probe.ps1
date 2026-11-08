@@ -42,7 +42,7 @@ if ($encoding.ExitCode -ne 0) { throw 'Fixture preparation failed.' }
     App = @{ Language = 'en'; Auto = @{ 'Check For Updates' = $false; 'Load Linked Files' = 0; 'Save on Every Change' = $false } }
     Subtitle = @{ Provider = 'libass'; Grid = @{ Skia = @{ Enabled = $false } } }
     Audio = @{ Provider = 'LsmasNative'; Spectrum = $true; Display = @{ Skia = @{ Enabled = [bool]$WithAudio } } }
-    Video = @{ Provider = 'LsmasNative'; 'Open Audio' = [bool]$WithAudio; 'Default Zoom' = 3; 'Scale with DPI' = $false; Renderer = @{ Backend = 'libplacebo' }; 'Skia Tools' = @{ Enabled = $false } }
+    Video = @{ Provider = 'LsmasNative'; 'Open Audio' = [bool]$WithAudio; 'Default Zoom' = 3; 'Scale with DPI' = $false; Renderer = @{ Backend = 'libplacebo' } }
 } | ConvertTo-Json -Depth 8 | Set-Content "$output/profile/user/config.json" -Encoding utf8NoBOM
 @'
 [Script Info]

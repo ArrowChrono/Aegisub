@@ -66,14 +66,13 @@ try
         App = new Dictionary<string, object> { ["Auto"] = new Dictionary<string, object> { ["Check For Updates"] = false, ["Load Linked Files"] = 0 } },
         Subtitle = new Dictionary<string, object> { ["Provider"] = provider },
         Video = new Dictionary<string, object> { ["Open Audio"] = false, ["Scale with DPI"] = false, ["Default Zoom"] = 7,
-            ["Renderer"] = new { Backend = "opengl" }, ["Skia Tools"] = new { Enabled = false } },
+            ["Renderer"] = new { Backend = "opengl" } },
     }));
     var host = Path.Combine(artifacts, "host");
     Directory.CreateDirectory(host);
     var start = new ProcessStartInfo(executable) { UseShellExecute = false, WindowStyle = ProcessWindowStyle.Minimized };
     foreach (var arg in new[] { "--gui-test", "host", "--profile-dir", profile, "--artifacts", host, "--open", fixture, "--open", video })
         start.ArgumentList.Add(arg);
-    start.Environment["AEGISUB_ENABLE_SKIA_VIDEO_TOOLS"] = "0";
     start.Environment.Remove("AEGISUB_PERF_TRACE");
     app = Process.Start(start) ?? throw new InvalidOperationException("Could not start Aegisub");
     AutomationProtocol.WaitForReadyArtifact(Path.Combine(host, "ready.json"), app, TimeSpan.FromSeconds(30));
