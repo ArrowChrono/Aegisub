@@ -889,6 +889,7 @@ set(AEGISUB_CORE_SOURCES
     src/visual_feature_overlay.cpp
     src/visual_tool_cross_shared.cpp
     src/visual_tool_drag_snapshot.cpp
+    src/visual_tool_shear_policy.cpp
     src/subtitle_editor_ops.cpp
     src/subtitle_grid_ops.cpp
     src/subtitle_grid_folding.cpp
