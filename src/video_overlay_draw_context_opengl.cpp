@@ -470,3 +470,14 @@ void OpenGLVideoOverlayDrawContext::DrawCircle(Vector2D center, float radius) { 
 void OpenGLVideoOverlayDrawContext::DrawTriangle(Vector2D p1, Vector2D p2, Vector2D p3) { gl.DrawTriangle(p1, p2, p3); }
 VideoOverlayTextExtent OpenGLVideoOverlayDrawContext::MeasureText(std::string const&, VideoOverlayTextStyle const&) { throw std::logic_error("This OpenGL overlay context has no text renderer"); }
 void OpenGLVideoOverlayDrawContext::DrawText(std::string const&, int, int, VideoOverlayTextStyle const&) { throw std::logic_error("This OpenGL overlay context has no text renderer"); }
+
+OpenGLTextVideoOverlayDrawContext::OpenGLTextVideoOverlayDrawContext(OpenGLWrapper& gl, VideoOverlayTextRenderer& text)
+	: OpenGLVideoOverlayDrawContext(gl), text_renderer(text) {}
+OpenGLTextVideoOverlayDrawContext::OpenGLTextVideoOverlayDrawContext(OpenGLWrapper& gl, OpenGLWindowOverlayPass& pass, VideoOverlayTextRenderer& text)
+	: OpenGLVideoOverlayDrawContext(gl, pass), text_renderer(text) {}
+VideoOverlayTextExtent OpenGLTextVideoOverlayDrawContext::MeasureText(std::string const& text, VideoOverlayTextStyle const& style) {
+	return text_renderer.MeasureText(text, style);
+}
+void OpenGLTextVideoOverlayDrawContext::DrawText(std::string const& text, int x, int y, VideoOverlayTextStyle const& style) {
+	text_renderer.DrawText(text, x, y, style);
+}

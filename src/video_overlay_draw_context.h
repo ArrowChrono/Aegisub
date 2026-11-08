@@ -38,6 +38,13 @@ struct VideoOverlayTextStyle {
 	bool outline = true;
 };
 
+class VideoOverlayTextRenderer {
+	public:
+	virtual ~VideoOverlayTextRenderer() = default;
+	virtual VideoOverlayTextExtent MeasureText(std::string const& text, VideoOverlayTextStyle const& style) = 0;
+	virtual void DrawText(std::string const& text, int x, int y, VideoOverlayTextStyle const& style) = 0;
+};
+
 struct VideoOverlayPerspectiveTransform {
 	Vector2D origin;
 	float angle_x, angle_y, angle_z;

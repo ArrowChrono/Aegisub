@@ -443,6 +443,27 @@ if(WITH_AVISYNTH)
 endif()
 
 if(WIN32)
+    find_package(OpenGL REQUIRED)
+    add_executable(video-overlay-text-smoke EXCLUDE_FROM_ALL
+        tests/smoke/video_overlay_text_smoke.cpp
+        src/video_overlay_text_win.cpp
+        src/video_overlay_draw_context_opengl.cpp
+        src/gl_wrap.cpp
+        src/vector2d.cpp
+        src/numeric_utils.cpp
+    )
+    target_compile_features(video-overlay-text-smoke PRIVATE cxx_std_20)
+    target_compile_definitions(video-overlay-text-smoke PRIVATE CMAKE_BUILD NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_include_directories(video-overlay-text-smoke PRIVATE src)
+    target_link_libraries(video-overlay-text-smoke PRIVATE libaegisub OpenGL::GL dwrite d2d1 windowscodecs ole32)
+    if(MSVC)
+        target_compile_options(video-overlay-text-smoke PRIVATE /utf-8)
+    endif()
+    if(BUILD_TESTING)
+        add_test(NAME video_overlay_text_native
+            COMMAND video-overlay-text-smoke --artifacts "${PROJECT_BINARY_DIR}/visual-text-artifacts")
+        set_tests_properties(video_overlay_text_native PROPERTIES LABELS "smoke;video;text" RUN_SERIAL TRUE TIMEOUT 60)
+    endif()
     add_executable(gl-text-diagnostics-smoke EXCLUDE_FROM_ALL
         tests/smoke/gl_text_diagnostics_smoke.cpp
         src/gl_text.cpp

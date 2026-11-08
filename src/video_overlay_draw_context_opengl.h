@@ -68,3 +68,13 @@ class OpenGLVideoOverlayDrawContext : public VideoOverlayDrawContext {
 	VideoOverlayTextExtent MeasureText(std::string const& text, VideoOverlayTextStyle const& style) override;
 	void DrawText(std::string const& text, int x, int y, VideoOverlayTextStyle const& style) override;
 };
+
+class OpenGLTextVideoOverlayDrawContext final : public OpenGLVideoOverlayDrawContext {
+	VideoOverlayTextRenderer& text_renderer;
+
+	public:
+	OpenGLTextVideoOverlayDrawContext(OpenGLWrapper& gl, VideoOverlayTextRenderer& text);
+	OpenGLTextVideoOverlayDrawContext(OpenGLWrapper& gl, OpenGLWindowOverlayPass& pass, VideoOverlayTextRenderer& text);
+	VideoOverlayTextExtent MeasureText(std::string const& text, VideoOverlayTextStyle const& style) override;
+	void DrawText(std::string const& text, int x, int y, VideoOverlayTextStyle const& style) override;
+};
