@@ -2,6 +2,7 @@
 
 #include "../../src/ass_dialogue.h"
 #include "../../src/ass_file.h"
+#include "../../src/ass_style.h"
 #include "../../src/async_video_provider.h"
 #include "../../src/async_video_trace.h"
 #include "../../src/export_fixstyle.h"
@@ -104,6 +105,7 @@ public:
 	SourceFrameGeometry native_geometry = MakeDefaultSourceFrameGeometry(2, 2);
 	std::vector<SourceFrameOutputMode> available_modes = { SourceFrameOutputMode::Bgra8 };
 	SourceFrameOutputMode output_mode = SourceFrameOutputMode::Bgra8;
+	int native_frame_calls = 0;
 	std::function<void(int, VideoFrame&)> fill_frame;
 	std::function<std::optional<scenechange::KeyframeRequest>()> prepare_scenechange_keyframes;
 	std::function<void(scenechange::KeyframeRequest const&)> generate_scenechange_keyframes;
@@ -171,6 +173,7 @@ public:
 	bool GetNativeFrame(int n, SourceFrame& frame, std::shared_ptr<void>& owner) override {
 		if (output_mode != SourceFrameOutputMode::Native)
 			return false;
+		++native_frame_calls;
 
 		int native_width = frame_width;
 		int native_height = frame_height;
@@ -377,10 +380,18 @@ public:
 class FakeOverlaySubtitlesProvider final : public SubtitlesProvider {
 public:
 	int load_calls = 0;
+	int render_overlay_calls = 0;
+	int draw_calls = 0;
+	bool fail_load = false;
+	bool fail_render = false;
+	bool cancel_next_render = false;
+	bool return_overlay = true;
 
 private:
 	void LoadSubtitles(const char *, size_t) override {
 		++load_calls;
+		if (fail_load)
+			throw agi::InternalError("synthetic subtitle load failure");
 	}
 
 public:
@@ -393,6 +404,15 @@ public:
 	}
 
 	bool RenderOverlay(SourceFrame const&, SubtitleOverlay& overlay, double) override {
+		++render_overlay_calls;
+		if (fail_render)
+			throw agi::InternalError("synthetic overlay render failure");
+		if (cancel_next_render) {
+			cancel_next_render = false;
+			throw agi::UserCancelException("synthetic overlay render cancellation");
+		}
+		if (!return_overlay)
+			return false;
 		overlay.premultiplied_alpha = true;
 		overlay.has_visible_content = true;
 		for (int y = 0; y < overlay.height; ++y)
@@ -405,8 +425,14 @@ public:
 		return true;
 	}
 
-	void DrawSubtitles(VideoFrame &, double) override {
-		FAIL() << "legacy subtitle path should not be used";
+	void DrawSubtitles(VideoFrame &frame, double) override {
+		if (return_overlay) {
+			FAIL() << "legacy subtitle path should not be used";
+		}
+		++draw_calls;
+		if (frame.data.size() < 2)
+			frame.data.resize(2);
+		frame.data[1] = static_cast<unsigned char>(10 + load_calls);
 	}
 };
 
@@ -493,10 +519,14 @@ public:
 
 class FakeDirtyRectOverlaySubtitlesProvider final : public SubtitlesProvider {
 	std::vector<SubtitleOverlayDirtyRect> dirty_rects;
+
+public:
+	int load_calls = 0;
 	int render_calls = 0;
 
 private:
 	void LoadSubtitles(const char *, size_t) override {
+		++load_calls;
 	}
 
 public:
@@ -1879,13 +1909,16 @@ TEST(async_video_provider, explicit_frame_request_strips_pending_visual_snapshot
 			  frames.front().delivery_version);
 }
 
-TEST(async_video_provider, visual_snapshots_release_without_frame_or_visible_change) {
+TEST(async_video_provider, no_change_updates_deliver_latest_metadata_without_rerendering) {
 	auto state = std::make_shared<VideoProviderState>();
-	EventRecorder recorder;
-	auto subtitles_provider = agi::make_unique<FakeSubtitlesProvider>();
+	std::vector<VideoRenderPacket> packets;
+	auto subtitles_provider = agi::make_unique<FakeCompatibilityOnlySubtitlesProvider>();
 	auto *subtitles_provider_ptr = subtitles_provider.get();
 	AsyncVideoProvider provider(
-		agi::make_unique<FakeVideoProvider>(state), std::move(subtitles_provider), recorder);
+		agi::make_unique<FakeVideoProvider>(state), std::move(subtitles_provider),
+		AsyncVideoProviderEventSink{.on_frame_ready = [&](VideoRenderPacket packet, double) {
+			packets.push_back(std::move(packet));
+		}});
 	auto subtitles = MakeSubtitleFile("unchanged");
 	auto no_frame_snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
 	std::weak_ptr<const VisualToolRenderSnapshot> no_frame_lifetime = no_frame_snapshot;
@@ -1894,21 +1927,441 @@ TEST(async_video_provider, visual_snapshots_release_without_frame_or_visible_cha
 	no_frame_snapshot.reset();
 	provider.CollectMemoryStats();
 	EXPECT_TRUE(no_frame_lifetime.expired());
-	EXPECT_TRUE(recorder.Snapshot().empty());
+	EXPECT_TRUE(packets.empty());
 	EXPECT_EQ(0, subtitles_provider_ptr->load_calls);
+	EXPECT_EQ(0, subtitles_provider_ptr->draw_calls);
 
 	provider.RequestFrame(1, 1000);
 	provider.CollectMemoryStats();
-	ASSERT_EQ(1u, recorder.Snapshot().size());
+	ASSERT_EQ(1u, packets.size());
 	ASSERT_EQ(1, subtitles_provider_ptr->load_calls);
+	ASSERT_EQ(1, subtitles_provider_ptr->draw_calls);
+	auto const initial_packet = packets.front();
+	ASSERT_TRUE(initial_packet.DisplayFrame());
+	ASSERT_GE(initial_packet.DisplayFrame()->data.size(), 2u);
+	EXPECT_EQ(11, initial_packet.DisplayFrame()->data[1]);
+	EXPECT_FALSE(initial_packet.visual_tool_snapshot);
+	EXPECT_FALSE(initial_packet.allow_source_frame_upload_reuse);
+	EXPECT_TRUE(provider.IsCurrent(initial_packet.delivery_version));
+	EXPECT_TRUE(provider.IsCurrent(initial_packet, 1));
+
 	auto no_change_snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
 	std::weak_ptr<const VisualToolRenderSnapshot> no_change_lifetime = no_change_snapshot;
-	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate, .visual_tool_snapshot = no_change_snapshot});
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {
+		.delivery_class = VideoRenderDeliveryClass::VisualSubtitleIntermediate,
+		.visual_interaction_id = 71,
+		.visual_tool_snapshot = no_change_snapshot});
 	no_change_snapshot.reset();
 	provider.CollectMemoryStats();
-	EXPECT_TRUE(no_change_lifetime.expired());
-	EXPECT_EQ(1u, recorder.Snapshot().size());
+	ASSERT_EQ(2u, packets.size());
+	ASSERT_TRUE(packets.back().DisplayFrame());
+	EXPECT_EQ((VideoRenderDeliveryVersion{.provider = initial_packet.delivery_version.provider,
+										  .content = initial_packet.delivery_version.content + 1,
+										  .request = initial_packet.delivery_version.request}),
+		packets.back().delivery_version);
+	EXPECT_EQ(VideoRenderDeliveryClass::VisualSubtitleIntermediate, packets.back().delivery_class);
+	EXPECT_EQ(71u, packets.back().visual_interaction_id);
+	EXPECT_EQ(no_change_lifetime.lock(), packets.back().visual_tool_snapshot);
+	EXPECT_FALSE(no_change_lifetime.expired());
+	EXPECT_EQ(1, packets.back().frame_number);
+	EXPECT_EQ(1000, packets.back().time);
+	EXPECT_EQ(initial_packet.DisplayFrame()->data, packets.back().DisplayFrame()->data);
+	EXPECT_FALSE(packets.back().allow_source_frame_upload_reuse);
+	EXPECT_FALSE(provider.IsCurrent(initial_packet.delivery_version));
+	EXPECT_FALSE(provider.IsCurrent(initial_packet, 1));
+	EXPECT_TRUE(provider.IsCurrent(packets.back().delivery_version));
+	EXPECT_TRUE(provider.IsCurrent(packets.back(), 1));
 	EXPECT_EQ(1, subtitles_provider_ptr->load_calls);
+	EXPECT_EQ(1, subtitles_provider_ptr->draw_calls);
+	auto const snapshot_version = packets.back().delivery_version;
+	packets.clear();
+	EXPECT_TRUE(no_change_lifetime.expired());
+
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {
+		.delivery_class = VideoRenderDeliveryClass::EveryFrame,
+		.visual_interaction_id = 72,
+		.visual_tool_snapshot = nullptr});
+	provider.CollectMemoryStats();
+	ASSERT_EQ(1u, packets.size());
+	EXPECT_EQ((VideoRenderDeliveryVersion{.provider = snapshot_version.provider,
+										  .content = snapshot_version.content + 1,
+										  .request = snapshot_version.request}),
+		packets.back().delivery_version);
+	EXPECT_EQ(VideoRenderDeliveryClass::EveryFrame, packets.back().delivery_class);
+	EXPECT_EQ(72u, packets.back().visual_interaction_id);
+	EXPECT_FALSE(packets.back().visual_tool_snapshot);
+	EXPECT_FALSE(packets.back().allow_source_frame_upload_reuse);
+	EXPECT_FALSE(provider.IsCurrent(snapshot_version));
+	EXPECT_TRUE(provider.IsCurrent(packets.back().delivery_version));
+	EXPECT_TRUE(provider.IsCurrent(packets.back(), 1));
+	EXPECT_EQ(1, subtitles_provider_ptr->load_calls);
+	EXPECT_EQ(1, subtitles_provider_ptr->draw_calls);
+	auto const unchanged_packet = packets.back();
+
+	subtitles.Events.front().Text = "changed";
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+	provider.CollectMemoryStats();
+	ASSERT_EQ(2u, packets.size());
+	EXPECT_EQ(2, subtitles_provider_ptr->load_calls);
+	EXPECT_EQ(2, subtitles_provider_ptr->draw_calls);
+	ASSERT_TRUE(packets.back().DisplayFrame());
+	ASSERT_GE(packets.back().DisplayFrame()->data.size(), 2u);
+	EXPECT_EQ(12, packets.back().DisplayFrame()->data[1]);
+	EXPECT_EQ(11, initial_packet.DisplayFrame()->data[1]);
+	EXPECT_FALSE(provider.IsCurrent(unchanged_packet.delivery_version));
+	EXPECT_FALSE(provider.IsCurrent(unchanged_packet, 1));
+	EXPECT_TRUE(provider.IsCurrent(packets.back().delivery_version));
+	EXPECT_TRUE(provider.IsCurrent(packets.back(), 1));
+	std::scoped_lock lock(state->mutex);
+	EXPECT_EQ((std::vector<int>{1}), state->requested_frames);
+}
+
+TEST(async_video_provider, no_change_overlay_delivery_forces_full_upload_without_mutating_prior_packet) {
+	auto state = std::make_shared<VideoProviderState>();
+	std::vector<VideoRenderPacket> packets;
+	auto subtitles_provider = agi::make_unique<FakeDirtyRectOverlaySubtitlesProvider>();
+	auto *subs = subtitles_provider.get();
+	AsyncVideoProvider provider(
+		agi::make_unique<FakeVideoProvider>(state), std::move(subtitles_provider),
+		AsyncVideoProviderEventSink{.on_frame_ready = [&](VideoRenderPacket packet, double) {
+			packets.push_back(std::move(packet));
+		}});
+	auto subtitles = MakeSubtitleFile("unchanged");
+	provider.LoadSubtitles(&subtitles);
+	provider.RequestFrame(1, 1000);
+	provider.CollectMemoryStats();
+	ASSERT_EQ(1u, packets.size());
+	auto const initial_packet = packets.front();
+	ASSERT_TRUE(initial_packet.subtitle_overlay_storage);
+	ASSERT_TRUE(initial_packet.has_subtitle_overlay);
+	ASSERT_EQ(1u, initial_packet.subtitle_overlay_storage->dirty_rects.size());
+	ASSERT_EQ(1, initial_packet.subtitle_overlay.dirty_rect_count);
+	ASSERT_NE(nullptr, initial_packet.subtitle_overlay.dirty_rects);
+	EXPECT_FALSE(initial_packet.subtitle_overlay.force_full_upload);
+	auto const initial_pixels = initial_packet.subtitle_overlay_storage->pixels;
+	auto const *initial_dirty_rects = initial_packet.subtitle_overlay.dirty_rects;
+
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+	provider.CollectMemoryStats();
+	ASSERT_EQ(2u, packets.size());
+	auto const& updated = packets.back();
+	ASSERT_TRUE(updated.subtitle_overlay_storage);
+	ASSERT_TRUE(updated.has_subtitle_overlay);
+	EXPECT_TRUE(updated.subtitle_overlay.IsValid());
+	EXPECT_TRUE(updated.subtitle_overlay.force_full_upload);
+	EXPECT_EQ(initial_pixels, updated.subtitle_overlay_storage->pixels);
+	EXPECT_EQ(initial_pixels, initial_packet.subtitle_overlay_storage->pixels);
+	ASSERT_EQ(1u, initial_packet.subtitle_overlay_storage->dirty_rects.size());
+	ASSERT_EQ(initial_dirty_rects, initial_packet.subtitle_overlay_storage->dirty_rects.data());
+	EXPECT_EQ(1, initial_packet.subtitle_overlay.dirty_rects[0].x);
+	EXPECT_EQ(0, initial_packet.subtitle_overlay.dirty_rects[0].y);
+	EXPECT_EQ(1, initial_packet.subtitle_overlay.dirty_rects[0].width);
+	EXPECT_EQ(1, initial_packet.subtitle_overlay.dirty_rects[0].height);
+	EXPECT_EQ(1, subs->load_calls);
+	EXPECT_EQ(1, subs->render_calls);
+	std::scoped_lock lock(state->mutex);
+	EXPECT_EQ((std::vector<int>{1}), state->requested_frames);
+}
+
+TEST(async_video_provider, no_change_native_delivery_retains_source_owner) {
+	auto state = std::make_shared<VideoProviderState>();
+	std::vector<VideoRenderPacket> packets;
+	auto video_provider = agi::make_unique<FakeVideoProvider>(state);
+	auto *video = video_provider.get();
+	video->available_modes = {SourceFrameOutputMode::Native, SourceFrameOutputMode::Bgra8};
+	auto subtitles_provider = agi::make_unique<FakeOverlaySubtitlesProvider>();
+	auto *subs = subtitles_provider.get();
+	AsyncVideoProvider provider(std::move(video_provider), std::move(subtitles_provider),
+		AsyncVideoProviderEventSink{.on_frame_ready = [&](VideoRenderPacket packet, double) {
+			packets.push_back(std::move(packet));
+		}});
+	ASSERT_TRUE(provider.SetPreferredSourceModes({SourceFrameOutputMode::Native, SourceFrameOutputMode::Bgra8}));
+	auto subtitles = MakeSubtitleFile("unchanged");
+	provider.LoadSubtitles(&subtitles);
+	provider.RequestFrame(1, 1000);
+	provider.CollectMemoryStats();
+	ASSERT_EQ(1u, packets.size());
+	ASSERT_TRUE(packets.front().source_frame_owner);
+	ASSERT_TRUE(packets.front().source_frame.IsValid());
+	std::weak_ptr<void> source_lifetime = packets.front().source_frame_owner;
+	auto const *source_pixels = packets.front().source_frame.planes[0].data;
+	packets.clear();
+
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+	provider.CollectMemoryStats();
+	ASSERT_EQ(1u, packets.size());
+	auto const& updated = packets.back();
+	EXPECT_EQ(SourceFrameOutputMode::Native, updated.source_frame.output_mode);
+	EXPECT_FALSE(updated.source_frame_storage);
+	ASSERT_TRUE(updated.source_frame_owner);
+	EXPECT_EQ(source_lifetime.lock(), updated.source_frame_owner);
+	EXPECT_EQ(source_pixels, updated.source_frame.planes[0].data);
+	ASSERT_TRUE(updated.source_frame.IsValid());
+	EXPECT_EQ(1, updated.source_frame.planes[0].data[0]);
+	ASSERT_TRUE(updated.subtitle_overlay_storage);
+	ASSERT_TRUE(updated.subtitle_overlay.IsValid());
+	EXPECT_EQ(128, updated.subtitle_overlay.planes[0].data[3]);
+	EXPECT_EQ(1, video->native_frame_calls);
+	EXPECT_EQ(1, subs->load_calls);
+	EXPECT_EQ(1, subs->render_overlay_calls);
+	std::scoped_lock lock(state->mutex);
+	EXPECT_TRUE(state->requested_frames.empty());
+}
+
+TEST(async_video_provider, no_change_composited_delivery_retains_frame_owners) {
+	auto state = std::make_shared<VideoProviderState>();
+	std::vector<VideoRenderPacket> packets;
+	auto subtitles_provider = agi::make_unique<FakeOverlaySubtitlesProvider>();
+	auto *subs = subtitles_provider.get();
+	subs->return_overlay = false;
+	AsyncVideoProvider provider(
+		agi::make_unique<FakeVideoProvider>(state), std::move(subtitles_provider),
+		AsyncVideoProviderEventSink{.on_frame_ready = [&](VideoRenderPacket packet, double) {
+			packets.push_back(std::move(packet));
+		}});
+	auto subtitles = MakeSubtitleFile("unchanged");
+	provider.LoadSubtitles(&subtitles);
+	provider.RequestFrame(1, 1000);
+	provider.CollectMemoryStats();
+	ASSERT_EQ(1u, packets.size());
+	auto const initial_packet = packets.front();
+	ASSERT_TRUE(initial_packet.HasDistinctCompositedFrame());
+	ASSERT_TRUE(initial_packet.source_frame_owner);
+	ASSERT_TRUE(initial_packet.composited_frame_storage);
+
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+	provider.CollectMemoryStats();
+	ASSERT_EQ(2u, packets.size());
+	auto const& updated = packets.back();
+	ASSERT_TRUE(updated.HasDistinctCompositedFrame());
+	EXPECT_EQ(initial_packet.source_frame_owner, updated.source_frame_owner);
+	EXPECT_EQ(initial_packet.source_frame_storage, updated.source_frame_storage);
+	EXPECT_EQ(initial_packet.composited_frame_storage, updated.composited_frame_storage);
+	EXPECT_EQ(updated.composited_frame_storage, updated.DisplayFrame());
+	EXPECT_EQ(initial_packet.allow_source_frame_upload_reuse, updated.allow_source_frame_upload_reuse);
+	EXPECT_EQ(initial_packet.DisplayFrame()->data, updated.DisplayFrame()->data);
+	ASSERT_GE(updated.DisplayFrame()->data.size(), 2u);
+	EXPECT_EQ(11, updated.DisplayFrame()->data[1]);
+	EXPECT_FALSE(updated.has_subtitle_overlay);
+	EXPECT_EQ(1, subs->load_calls);
+	EXPECT_EQ(1, subs->render_overlay_calls);
+	EXPECT_EQ(1, subs->draw_calls);
+	std::scoped_lock lock(state->mutex);
+	EXPECT_EQ((std::vector<int>{1}), state->requested_frames);
+}
+
+TEST(async_video_provider, no_change_after_failed_full_load_cannot_reuse_old_pixels) {
+	for (bool fail_load : {true, false}) {
+		SCOPED_TRACE(fail_load ? "load failure" : "raster failure");
+		auto state = std::make_shared<VideoProviderState>();
+		std::vector<VideoRenderPacket> packets;
+		std::vector<std::string> errors;
+		auto subtitles_provider = agi::make_unique<FakeOverlaySubtitlesProvider>();
+		auto *subs = subtitles_provider.get();
+		AsyncVideoProvider provider(
+			agi::make_unique<FakeVideoProvider>(state), std::move(subtitles_provider),
+			AsyncVideoProviderEventSink{
+				.on_frame_ready = [&](VideoRenderPacket packet, double) { packets.push_back(std::move(packet)); },
+				.on_subtitles_error = [&](std::string const& error) { errors.push_back(error); }});
+		auto subtitles = MakeSubtitleFile("unchanged");
+		subtitles.Styles.push_back(*new AssStyle);
+		provider.LoadSubtitles(&subtitles);
+		provider.RequestFrame(1, 1000);
+		provider.CollectMemoryStats();
+		ASSERT_EQ(1u, packets.size());
+		auto const initial_packet = packets.front();
+
+		subtitles.Styles.front().fontsize += 12.;
+		subs->fail_load = fail_load;
+		subs->fail_render = !fail_load;
+		provider.LoadSubtitles(&subtitles);
+		provider.CollectMemoryStats();
+		ASSERT_EQ(1u, packets.size());
+		ASSERT_EQ(1u, errors.size());
+		EXPECT_EQ(2, subs->load_calls);
+		EXPECT_FALSE(provider.IsCurrent(initial_packet.delivery_version));
+		EXPECT_FALSE(provider.IsCurrent(initial_packet, 1));
+
+		provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+		provider.CollectMemoryStats();
+		EXPECT_EQ(1u, packets.size());
+		ASSERT_EQ(2u, errors.size());
+		EXPECT_NE(std::string::npos, errors.back().find(fail_load ? "synthetic subtitle load failure" : "synthetic overlay render failure"));
+		EXPECT_EQ(3, subs->load_calls);
+		EXPECT_EQ(fail_load ? 1 : 3, subs->render_overlay_calls);
+
+		subs->fail_load = false;
+		subs->fail_render = false;
+		provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+		provider.CollectMemoryStats();
+		ASSERT_EQ(2u, packets.size());
+		EXPECT_EQ(2u, errors.size());
+		EXPECT_EQ(4, subs->load_calls);
+		EXPECT_EQ(fail_load ? 2 : 4, subs->render_overlay_calls);
+		EXPECT_TRUE(packets.back().has_subtitle_overlay);
+		EXPECT_TRUE(provider.IsCurrent(packets.back().delivery_version));
+		EXPECT_TRUE(provider.IsCurrent(packets.back(), 1));
+	}
+}
+
+TEST(async_video_provider, no_change_after_cancelled_raster_retries_before_caching_pixels) {
+	auto state = std::make_shared<VideoProviderState>();
+	std::vector<VideoRenderPacket> packets;
+	std::vector<std::string> errors;
+	auto subtitles_provider = agi::make_unique<FakeOverlaySubtitlesProvider>();
+	auto *subs = subtitles_provider.get();
+	AsyncVideoProvider provider(
+		agi::make_unique<FakeVideoProvider>(state), std::move(subtitles_provider),
+		AsyncVideoProviderEventSink{
+			.on_frame_ready = [&](VideoRenderPacket packet, double) { packets.push_back(std::move(packet)); },
+			.on_subtitles_error = [&](std::string const& error) { errors.push_back(error); }});
+	auto subtitles = MakeSubtitleFile("unchanged");
+	provider.LoadSubtitles(&subtitles);
+	provider.RequestFrame(1, 1000);
+	provider.CollectMemoryStats();
+	ASSERT_EQ(1u, packets.size());
+	ASSERT_TRUE(packets.front().has_subtitle_overlay);
+
+	auto snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
+	std::weak_ptr<const VisualToolRenderSnapshot> snapshot_lifetime = snapshot;
+	subs->cancel_next_render = true;
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {
+		.delivery_class = VideoRenderDeliveryClass::VisualSubtitleFinal,
+		.visual_interaction_id = 71,
+		.force_current_frame_render = true,
+		.visual_tool_snapshot = snapshot});
+	snapshot.reset();
+	provider.CollectMemoryStats();
+	ASSERT_EQ(2u, packets.size());
+	EXPECT_FALSE(packets.back().has_subtitle_overlay);
+	ASSERT_TRUE(packets.back().visual_tool_snapshot);
+	EXPECT_EQ(snapshot_lifetime.lock(), packets.back().visual_tool_snapshot);
+	EXPECT_TRUE(errors.empty());
+	EXPECT_EQ(2, subs->render_overlay_calls);
+	auto const cancelled_version = packets.back().delivery_version;
+	packets.clear();
+	EXPECT_TRUE(snapshot_lifetime.expired());
+
+	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+	provider.CollectMemoryStats();
+	ASSERT_EQ(1u, packets.size());
+	EXPECT_EQ(3, subs->load_calls);
+	EXPECT_EQ(3, subs->render_overlay_calls);
+	ASSERT_TRUE(packets.back().has_subtitle_overlay);
+	ASSERT_TRUE(packets.back().subtitle_overlay.IsValid());
+	EXPECT_EQ(128, packets.back().subtitle_overlay.planes[0].data[3]);
+	EXPECT_FALSE(packets.back().visual_tool_snapshot);
+	EXPECT_FALSE(provider.IsCurrent(cancelled_version));
+	EXPECT_TRUE(provider.IsCurrent(packets.back().delivery_version));
+	EXPECT_TRUE(provider.IsCurrent(packets.back(), 1));
+	EXPECT_TRUE(errors.empty());
+}
+
+TEST(async_video_provider, no_change_cache_rejects_synchronous_render_contexts) {
+	for (int path = 0; path != 4; ++path) {
+		SCOPED_TRACE((std::array<char const*, 4>{"packet", "raw packet", "forced BGRA", "raw forced BGRA"})[path]);
+		auto state = std::make_shared<VideoProviderState>();
+		std::vector<VideoRenderPacket> packets;
+		auto video_provider = agi::make_unique<FakeVideoProvider>(state);
+		video_provider->available_modes = {SourceFrameOutputMode::Native, SourceFrameOutputMode::Bgra8};
+		auto subtitles_provider = agi::make_unique<FakeOverlaySubtitlesProvider>();
+		auto *subs = subtitles_provider.get();
+		AsyncVideoProvider provider(std::move(video_provider), std::move(subtitles_provider),
+			AsyncVideoProviderEventSink{.on_frame_ready = [&](VideoRenderPacket packet, double) {
+				packets.push_back(std::move(packet));
+			}});
+		ASSERT_TRUE(provider.SetPreferredSourceModes({SourceFrameOutputMode::Native, SourceFrameOutputMode::Bgra8}));
+		auto subtitles = MakeSubtitleFile("unchanged");
+		provider.LoadSubtitles(&subtitles);
+		provider.RequestFrame(1, 1000);
+		provider.CollectMemoryStats();
+		ASSERT_EQ(1u, packets.size());
+
+		if (path < 2) {
+			auto packet = provider.GetRenderPacket(1, 2000, path == 1);
+			ASSERT_TRUE(packet.source_frame.IsValid());
+		}
+		else {
+			auto frame = provider.GetFrameBgra(7, 2000, path == 3);
+			ASSERT_TRUE(frame);
+		}
+		auto const render_calls = subs->render_overlay_calls;
+		auto const load_calls = subs->load_calls;
+		provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+		provider.CollectMemoryStats();
+		ASSERT_EQ(2u, packets.size());
+		auto const& updated = packets.back();
+		EXPECT_EQ(1, updated.frame_number);
+		EXPECT_EQ(path < 2 ? 2000 : 1000, updated.time);
+		EXPECT_EQ(SourceFrameOutputMode::Native, updated.source_frame.output_mode);
+		ASSERT_TRUE(updated.source_frame.IsValid());
+		ASSERT_TRUE(updated.source_frame_owner);
+		EXPECT_EQ(1, updated.source_frame.planes[0].data[0]);
+		ASSERT_TRUE(updated.has_subtitle_overlay);
+		ASSERT_TRUE(updated.subtitle_overlay.IsValid());
+		EXPECT_EQ(128, updated.subtitle_overlay.planes[0].data[3]);
+		EXPECT_EQ(render_calls + 1, subs->render_overlay_calls);
+		EXPECT_EQ(load_calls + 1, subs->load_calls);
+		EXPECT_TRUE(provider.IsCurrent(updated.delivery_version));
+		EXPECT_TRUE(provider.IsCurrent(updated, 1));
+	}
+}
+
+TEST(async_video_provider, no_change_cache_rejects_changed_render_context) {
+	for (int change = 0; change != 7; ++change) {
+		SCOPED_TRACE((std::array<char const*, 7>{"frame", "time", "request", "color", "timecodes", "mode", "provider"})[change]);
+		auto state = std::make_shared<VideoProviderState>();
+		std::vector<VideoRenderPacket> packets;
+		auto video_provider = agi::make_unique<FakeVideoProvider>(state);
+		video_provider->available_modes = {SourceFrameOutputMode::Native, SourceFrameOutputMode::Bgra8};
+		auto subtitles_provider = agi::make_unique<FakeOverlaySubtitlesProvider>();
+		auto *subs = subtitles_provider.get();
+		AsyncVideoProvider provider(std::move(video_provider), std::move(subtitles_provider),
+			AsyncVideoProviderEventSink{.on_frame_ready = [&](VideoRenderPacket packet, double) {
+				packets.push_back(std::move(packet));
+			}});
+		auto subtitles = MakeSubtitleFile("unchanged");
+		provider.LoadSubtitles(&subtitles);
+		provider.RequestFrame(1, 1000);
+		provider.CollectMemoryStats();
+		ASSERT_EQ(1u, packets.size());
+		auto const initial_packet = packets.front();
+
+		switch (change) {
+			case 0: provider.SetCurrentFrameContext(2, 2000); break;
+			case 1: provider.SetCurrentFrameContext(1, 2000); break;
+			case 2: provider.CancelPendingFrameRequests(); break;
+			case 3: provider.SetColorSpace("TV.601"); break;
+			case 4: provider.SetSubtitlesTimecodes(agi::vfr::Framerate(30.0)); break;
+			case 5:
+				ASSERT_TRUE(provider.SetPreferredSourceModes({SourceFrameOutputMode::Native, SourceFrameOutputMode::Bgra8}));
+				break;
+			case 6: {
+				auto replacement = agi::make_unique<FakeOverlaySubtitlesProvider>();
+				subs = replacement.get();
+				provider.ReplaceSubtitlesProvider(std::move(replacement));
+				break;
+			}
+		}
+		provider.CollectMemoryStats();
+		auto const packet_count = packets.size();
+		auto const render_calls = subs->render_overlay_calls;
+		auto const load_calls = subs->load_calls;
+		provider.UpdateSubtitles(&subtitles, &subtitles.Events.front());
+		provider.CollectMemoryStats();
+		ASSERT_EQ(packet_count + 1, packets.size());
+		auto const& updated = packets.back();
+		EXPECT_EQ(change == 0 ? 2 : 1, updated.frame_number);
+		EXPECT_EQ(change < 2 ? 2000 : 1000, updated.time);
+		EXPECT_EQ(change == 5 ? SourceFrameOutputMode::Native : SourceFrameOutputMode::Bgra8, updated.source_frame.output_mode);
+		EXPECT_EQ(change == 3 ? "TV.601" : "BT.709", updated.source_frame.color.matrix);
+		EXPECT_EQ(render_calls + 1, subs->render_overlay_calls);
+		EXPECT_EQ(load_calls + 1, subs->load_calls);
+		EXPECT_FALSE(provider.IsCurrent(initial_packet.delivery_version));
+		EXPECT_FALSE(provider.IsCurrent(initial_packet, 1));
+		EXPECT_TRUE(provider.IsCurrent(updated.delivery_version));
+		EXPECT_TRUE(provider.IsCurrent(updated, change == 0 ? 2 : 1));
+	}
 }
 
 TEST(async_video_provider, visual_snapshot_releases_after_subtitle_render_error) {
@@ -3959,19 +4412,27 @@ TEST(async_video_provider, dropped_compatibility_render_does_not_mark_visible_li
 TEST(async_video_provider, visual_subtitle_final_update_keeps_incremental_packet_metadata) {
 	auto state = std::make_shared<VideoProviderState>();
 	EventRecorder recorder;
+	auto subtitles_provider = agi::make_unique<FakeCompatibilityOnlySubtitlesProvider>();
+	auto *subs = subtitles_provider.get();
 	AsyncVideoProvider provider(
 		agi::make_unique<FakeVideoProvider>(state),
-		agi::make_unique<FakeSubtitlesProvider>(),
+		std::move(subtitles_provider),
 		recorder);
 
 	auto subtitles = MakeSubtitleFile("before");
 	provider.LoadSubtitles(&subtitles);
 	provider.RequestFrame(0, 0);
 	ASSERT_TRUE(recorder.WaitForCount(1));
+	provider.CollectMemoryStats();
+	EXPECT_EQ(1, subs->load_calls);
+	EXPECT_EQ(1, subs->draw_calls);
 
 	auto snapshot = std::make_shared<FakeVisualToolRenderSnapshot>();
 	provider.UpdateSubtitles(&subtitles, &subtitles.Events.front(), {.delivery_class = VideoRenderDeliveryClass::VisualSubtitleFinal, .visual_interaction_id = 42, .force_current_frame_render = true, .visual_tool_snapshot = snapshot});
 	ASSERT_TRUE(recorder.WaitForCount(2));
+	provider.CollectMemoryStats();
+	EXPECT_EQ(2, subs->load_calls);
+	EXPECT_EQ(2, subs->draw_calls);
 
 	auto frames = recorder.Snapshot();
 	ASSERT_EQ(2u, frames.size());
@@ -3980,6 +4441,8 @@ TEST(async_video_provider, visual_subtitle_final_update_keeps_incremental_packet
 	EXPECT_EQ(42u, frames.back().visual_interaction_id);
 	EXPECT_EQ(snapshot, frames.back().visual_tool_snapshot);
 	EXPECT_FALSE(frames.front().visual_tool_snapshot);
+	std::scoped_lock lock(state->mutex);
+	EXPECT_EQ((std::vector<int>{0}), state->requested_frames);
 }
 
 TEST(async_video_provider, dropped_packet_advances_overlay_continuity_generation_on_next_delivered_event) {

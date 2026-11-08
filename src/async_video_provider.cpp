@@ -599,6 +599,7 @@ std::shared_ptr<VideoFrame> BakePacketForCpuReadback(VideoRenderPacket const& pa
 }
 
 void AsyncVideoProvider::ResetCachedSourceFrame() noexcept {
+	cached_render_payload.reset();
 	cached_source_frame_number = -1;
 	cached_source_mode = SourceFrameOutputMode::Bgra8;
 	cached_source_force_bgra = false;
@@ -658,12 +659,14 @@ void AsyncVideoProvider::TrimReusablePools() {
 	TrimReusableBufferPool(subtitle_overlay_buffers);
 }
 
-VideoRenderPacket AsyncVideoProvider::ProcRenderPacket(int frame_number, double time, bool raw) {
+AsyncVideoProvider::RenderResult AsyncVideoProvider::ProcRenderPacket(int frame_number, double time, bool raw) {
 	return ProcRenderPacket(frame_number, time, raw, false);
 }
 
-VideoRenderPacket AsyncVideoProvider::ProcRenderPacket(int frame_number, double time, bool raw, bool force_bgra_frame) {
-	VideoRenderPacket packet;
+AsyncVideoProvider::RenderResult AsyncVideoProvider::ProcRenderPacket(int frame_number, double time, bool raw, bool force_bgra_frame) {
+	cached_render_payload.reset();
+	RenderResult result;
+	auto& packet = result.packet;
 	packet.frame_number = frame_number;
 	auto const render_mode = subs_provider ? subs_provider->GetRenderMode() : SubtitleRenderMode::CompatibilityFrameOnly;
 
@@ -748,7 +751,7 @@ VideoRenderPacket AsyncVideoProvider::ProcRenderPacket(int frame_number, double 
 
 	if (raw || !subs_provider || !subs) {
 		packet.composited_frame_storage = frame;
-		return packet;
+		return result;
 	}
 
 	try {
@@ -846,7 +849,7 @@ VideoRenderPacket AsyncVideoProvider::ProcRenderPacket(int frame_number, double 
 			throw AsyncVideoProviderSubtitlesError("Subtitle provider reported an unknown render mode.");
 		}
 	}
-	catch (agi::UserCancelException const&) { }
+	catch (agi::UserCancelException const&) { result.complete = false; }
 	catch (AsyncVideoProviderSubtitlesError const&) { throw; }
 	catch (agi::Exception const& err) {
 		throw AsyncVideoProviderSubtitlesError(err.GetMessage());
@@ -861,7 +864,7 @@ VideoRenderPacket AsyncVideoProvider::ProcRenderPacket(int frame_number, double 
 		throw AsyncVideoProviderSubtitlesError("Unknown subtitle renderer error.");
 	}
 
-	return packet;
+	return result;
 }
 
 static std::unique_ptr<SubtitlesProvider> get_subs_provider(
@@ -1419,10 +1422,10 @@ bool AsyncVideoProvider::ProcessPending() {
 		aegisub::async_video_trace::ObservePipelineEvent(event);
 	};
 
-	if (work.has_color_space)
-		source_provider->SetColorSpace(work.color_space);
-	if (work.has_color_space)
+	if (work.has_color_space) {
 		ResetCachedSourceFrame();
+		source_provider->SetColorSpace(work.color_space);
+	}
 
 	if (work.has_current_frame_context) {
 		frame_number = work.current_frame_number;
@@ -1433,6 +1436,7 @@ bool AsyncVideoProvider::ProcessPending() {
 		AdvanceOverlayUploadContinuity();
 
 	if (work.subs) {
+		cached_render_payload.reset();
 		subs = std::move(work.subs);
 		subs_lines_by_row.clear();
 		for (auto& line : subs->Events)
@@ -1469,8 +1473,41 @@ bool AsyncVideoProvider::ProcessPending() {
 		}
 	}
 
-	if (work.check_updated && !work.force_current_frame_render && !NeedUpdate(visible_lines)) {
-		observe_work("worker_skip_no_change");
+	// Mouse-drag subtitle edits can outpace expensive compatibility renderers.
+	// If newer work arrived before entering the renderer, skip this stale pass
+	// instead of spending a long CSRI render only to drop the packet afterwards.
+	if (!IsCurrent(work.delivery_version)) {
+		observe_work("worker_skip_stale");
+		AdvanceOverlayUploadContinuity();
+		return true;
+	}
+
+	if (work.check_updated && !work.force_current_frame_render && !NeedUpdate(visible_lines)
+		&& cached_render_payload
+		&& cached_render_payload->delivery_version.provider == work.delivery_version.provider
+		&& cached_render_payload->delivery_version.request == work.delivery_version.request
+		&& cached_render_payload->frame_number == frame_number
+		&& cached_render_payload->time == time) {
+		observe_work("worker_reuse_begin");
+		auto const reuse_begin = std::chrono::steady_clock::now();
+		auto packet = *cached_render_payload;
+		packet.delivery_version = work.delivery_version;
+		packet.delivery_class = work.delivery_class;
+		packet.visual_interaction_id = work.visual_interaction_id;
+		packet.visual_tool_snapshot = std::move(work.subtitle_update_options.visual_tool_snapshot);
+		if (packet.has_subtitle_overlay) {
+			packet.subtitle_overlay.continuity_generation = overlay_continuity_generation;
+			packet.subtitle_overlay.force_full_upload = true;
+		}
+		auto const reuse_duration_ms =
+			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - reuse_begin).count();
+		bool should_deliver = IsCurrent(work.delivery_version);
+		observe_work(should_deliver ? "worker_reuse_deliver" : "worker_reuse_drop", reuse_duration_ms);
+		aegisub::async_video_trace::ObserveFrameResult(frame_number, time, should_deliver, false);
+		if (should_deliver)
+			DeliverFrameReady(std::move(packet), time);
+		else
+			AdvanceOverlayUploadContinuity();
 		return true;
 	}
 
@@ -1482,19 +1519,10 @@ bool AsyncVideoProvider::ProcessPending() {
 		last_rendered = frame_number;
 	};
 
-	// Mouse-drag subtitle edits can outpace expensive compatibility renderers.
-	// If newer work arrived before entering the renderer, skip this stale pass
-	// instead of spending a long CSRI render only to drop the packet afterwards.
-	if (!IsCurrent(work.delivery_version)) {
-		observe_work("worker_skip_stale");
-		AdvanceOverlayUploadContinuity();
-		return true;
-	}
-
 	try {
 		observe_work("worker_render_begin");
 		auto const render_begin = std::chrono::steady_clock::now();
-		auto packet = ProcRenderPacket(frame_number, time, false, false);
+		auto result = ProcRenderPacket(frame_number, time, false, false);
 		auto const render_duration_ms =
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - render_begin).count();
 		bool should_deliver = IsCurrent(work.delivery_version);
@@ -1503,9 +1531,13 @@ bool AsyncVideoProvider::ProcessPending() {
 		aegisub::async_video_trace::ObserveFrameResult(frame_number, time, should_deliver, false);
 		if (should_deliver) {
 			remember_rendered_lines();
+			auto& packet = result.packet;
 			packet.delivery_version = work.delivery_version;
 			packet.delivery_class = work.delivery_class;
 			packet.visual_interaction_id = work.visual_interaction_id;
+			if (result.complete
+				&& (packet.source_frame.output_mode != SourceFrameOutputMode::Native || packet.source_frame_owner))
+				cached_render_payload = packet;
 			packet.visual_tool_snapshot = std::move(work.subtitle_update_options.visual_tool_snapshot);
 			DeliverFrameReady(std::move(packet), time);
 		}
@@ -1545,7 +1577,7 @@ std::shared_ptr<VideoFrame> AsyncVideoProvider::GetFrameBgra(int frame, double t
 	worker->Sync([&] {
 		WorkerSyncTracker sync_tracker(*this);
 		while (ProcessPending()) { }
-		ret = BakePacketForCpuReadback(ProcRenderPacket(frame, time, raw, true));
+		ret = BakePacketForCpuReadback(ProcRenderPacket(frame, time, raw, true).packet);
 	});
 	return ret;
 }
@@ -2031,6 +2063,7 @@ bool AsyncVideoProvider::ReconfigureSourceOutputMode() {
 
 	auto applied = selected;
 	bool mode_changed;
+	ResetCachedSourceFrame();
 	{
 		std::scoped_lock lock(pending_mutex);
 		if (!source_provider->SetOutputMode(applied)) {
@@ -2067,7 +2100,6 @@ bool AsyncVideoProvider::ReconfigureSourceOutputMode() {
 
 	last_rendered = -1;
 	last_lines.clear();
-	ResetCachedSourceFrame();
 	AdvanceOverlayUploadContinuity();
 	TrimReusablePools();
 	return true;
@@ -2088,7 +2120,7 @@ VideoRenderPacket AsyncVideoProvider::GetRenderPacket(int frame, double time, bo
 				.request = request_version.load(std::memory_order_relaxed)};
 		}
 		while (ProcessPending()) { }
-		ret = ProcRenderPacket(frame, time, raw);
+		ret = ProcRenderPacket(frame, time, raw).packet;
 		ret.delivery_version = version;
 		auto const render_duration_ms =
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - render_begin).count();
@@ -2115,6 +2147,7 @@ void AsyncVideoProvider::SetSubtitlesTimecodes(agi::vfr::Framerate timecodes) {
 	worker->Sync([&] {
 		WorkerSyncTracker sync_tracker(*this);
 		while (ProcessPending()) { }
+		ResetCachedSourceFrame();
 		{
 			std::scoped_lock lock(pending_mutex);
 			++content_version;
@@ -2123,7 +2156,6 @@ void AsyncVideoProvider::SetSubtitlesTimecodes(agi::vfr::Framerate timecodes) {
 		single_frame = NEW_SUBS_FILE;
 		last_rendered = -1;
 		last_lines.clear();
-		ResetCachedSourceFrame();
 		AdvanceOverlayUploadContinuity();
 	});
 }
@@ -2146,6 +2178,7 @@ void AsyncVideoProvider::ReplaceSubtitlesProvider(std::unique_ptr<SubtitlesProvi
 	worker->Sync([&] {
 		WorkerSyncTracker sync_tracker(*this);
 		while (ProcessPending()) { }
+		ResetCachedSourceFrame();
 		std::unique_ptr<SubtitlesProvider> old_provider;
 		{
 			std::scoped_lock lock(pending_mutex);
@@ -2164,7 +2197,6 @@ void AsyncVideoProvider::ReplaceSubtitlesProvider(std::unique_ptr<SubtitlesProvi
 		single_frame = NEW_SUBS_FILE;
 		last_rendered = -1;
 		last_lines.clear();
-		ResetCachedSourceFrame();
 		if (!mode_changed) {
 			AdvanceOverlayUploadContinuity();
 			TrimReusablePools();

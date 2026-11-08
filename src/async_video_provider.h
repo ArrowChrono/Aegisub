@@ -175,6 +175,7 @@ class AsyncVideoProvider {
 	int last_rendered = -1;
 	/// Last rendered subtitles on that frame
 	std::vector<AssDialogueBase> last_lines;
+	std::optional<VideoRenderPacket> cached_render_payload;
 	/// Cached source frame for subtitle-only rerenders of the current frame
 	int cached_source_frame_number = -1;
 	SourceFrameOutputMode cached_source_mode = SourceFrameOutputMode::Bgra8;
@@ -186,8 +187,12 @@ class AsyncVideoProvider {
 	/// lines have actually changed
 	bool NeedUpdate(std::vector<AssDialogueBase const*> const& visible_lines);
 
-	VideoRenderPacket ProcRenderPacket(int frame, double time, bool raw = false);
-	VideoRenderPacket ProcRenderPacket(int frame, double time, bool raw, bool force_bgra_frame);
+	struct RenderResult {
+		VideoRenderPacket packet;
+		bool complete = true;
+	};
+	RenderResult ProcRenderPacket(int frame, double time, bool raw = false);
+	RenderResult ProcRenderPacket(int frame, double time, bool raw, bool force_bgra_frame);
 	void ResetCachedSourceFrame() noexcept;
 	bool CanReuseCachedSourceFrame(int frame, bool raw, bool force_bgra_frame) const noexcept;
 	void ReuseCachedSourceFrame(VideoRenderPacket& packet, std::shared_ptr<VideoFrame>& frame) const;
