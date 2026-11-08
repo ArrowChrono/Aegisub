@@ -709,6 +709,7 @@ if(GTEST_FOUND)
         message(STATUS
             "gtest-run reuses ${_aegisub_test_production_source_count} Aegisub production objects")
     endif()
+    target_link_libraries(gtest-run PRIVATE ass::headers)
     target_link_libraries(gtest-run PRIVATE aegisub_core aegisub_features libaegisub luajit CLI11::CLI11 "GTest::GTest" "Iconv::Iconv" pugixml::pugixml "ZLIB::ZLIB" "Boost::locale" ${wxWidgets_LIBRARIES})
     target_include_directories(gtest-run PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/src/libresrc")
     target_include_directories(gtest-run PRIVATE "${PROJECT_SOURCE_DIR}/vendor" "${PROJECT_SOURCE_DIR}/vendor/lsmasnative")
