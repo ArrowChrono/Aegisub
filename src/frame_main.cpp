@@ -597,12 +597,12 @@ void FrameMain::InitContents() {
 	editAreaSizer->Add(subtitleCommandToolbar, 0, wxEXPAND | wxLEFT | wxRIGHT, 2);
 	editAreaSizer->Show(subtitleCommandToolbar,
 		OPT_GET("Subtitle/Edit Box/Command Buttons/Enabled")->GetBool(), true);
+	EditBox->Reparent(editAreaPanel);
 	editAreaPanel->SetSizer(editAreaSizer);
 	ui_activation.AddConnection(OPT_SUB("Subtitle/Edit Box/Command Buttons/Enabled",
 		&FrameMain::OnSubtitleCommandToolbarVisibleChanged, this));
 
 	ui.subsGrid->Reparent(editGridSplitter);
-	EditBox->Reparent(editAreaPanel);
 
 	editAreaPanel->Layout();
 	int minHeight = editAreaPanel->GetBestSize().GetHeight();
