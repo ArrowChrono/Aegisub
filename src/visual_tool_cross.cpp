@@ -20,6 +20,8 @@
 
 #include "visual_tool_cross.h"
 
+#include "ass_dialogue.h"
+#include "ass_file.h"
 #include "gl_text.h"
 #include "include/aegisub/context.h"
 #include "include/aegisub/context_ui.h"
@@ -27,12 +29,13 @@
 #include "video_display.h"
 #include "video_overlay_draw_context.h"
 #include "video_overlay_draw_context_legacy_gl.h"
-
-#include <libaegisub/color.h>
-#include <libaegisub/format.h>
-#include <libaegisub/make_unique.h>
+#include "visual_ass_edit.h"
+#include "visual_tool_cross_shared.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <utility>
+#include <vector>
 
 VisualToolCross::VisualToolCross(VideoDisplay *parent, agi::Context *context)
 	: VisualTool<VisualDraggableFeature>(parent, context), gl_text(parent->CreateTextRenderer()), coordinate_font_size_opt(OPT_GET("Tool/Visual/Coordinate Font Size")) {
@@ -44,25 +47,24 @@ VisualToolCross::VisualToolCross(VideoDisplay *parent, agi::Context *context)
 VisualToolCross::~VisualToolCross() = default;
 
 void VisualToolCross::OnDoubleClick() {
-	Vector2D d = ToScriptCoords(mouse_pos) - GetLinePosition(active_line);
-
+	using namespace aegisub::visual_edit;
+	Viewport const viewport{.video_position = video_pos, .video_size = video_res, .script_size = script_res, .canvas_size = canvas_size};
+	if (!aegisub::visual_cross::IsValidGeometry(mouse_pos, viewport))
+		return;
 	auto core = c->GetCore();
+	auto const active = ReadLine(*active_line, core.ass->GetStyle(active_line->Style), script_res);
+	Vector2D const delta = ToScriptCoords(mouse_pos) - active.position;
+	std::vector<std::pair<AssDialogue *, std::vector<OverrideEdit>>> plans;
 	for (auto line : core.selectionController->GetSelectedSet()) {
-		Vector2D p1, p2;
-		int t1, t2;
-		if (GetLineMove(line, p1, p2, t1, t2)) {
-			if (t1 > 0 || t2 > 0)
-				SetOverride(line, "\\move", agi::format("(%s,%s,%d,%d)", Text(p1 + d), Text(p2 + d), t1, t2));
-			else
-				SetOverride(line, "\\move", agi::format("(%s,%s)", Text(p1 + d), Text(p2 + d)));
-		}
-		else
-			SetOverride(line, "\\pos", "(" + Text(GetLinePosition(line) + d) + ")");
-
-		if (Vector2D org = GetLineOrigin(line))
-			SetOverride(line, "\\org", "(" + Text(org + d) + ")");
+		auto const source = line == active_line ? active : ReadLine(*line, core.ass->GetStyle(line->Style), script_res);
+		auto plan = aegisub::visual_cross::PlanTranslation(source, delta, video_res.X() > script_res.X());
+		if (!plan)
+			return;
+		plans.emplace_back(line, std::move(*plan));
 	}
-
+	for (auto const& [line, plan] : plans)
+		for (auto const& edit : plan)
+			SetOverride(line, edit.tag, edit.value);
 	Commit(_("positioning"));
 }
 
@@ -77,48 +79,8 @@ void VisualToolCross::DrawOverlay(VideoOverlayDrawContext &context) {
 
 void VisualToolCross::DrawWithContext(VideoOverlayDrawContext &context) {
 	if (!mouse_pos) return;
-
-	// Draw cross
-	context.SetInvert();
-	context.SetLineColour(agi::Color{255, 255, 255}, 1.0f, 1);
-	float lines[] = {
-		0.f, mouse_pos.Y(),
-		canvas_size.X(), mouse_pos.Y(),
-		mouse_pos.X(), 0.f,
-		mouse_pos.X(), canvas_size.Y()
-	};
-	context.DrawLines(2, lines, 4);
-	context.ClearInvert();
-
-	std::string mouse_text = Text(ToScriptCoords(shift_down ? 2 * video_pos + video_res - mouse_pos : mouse_pos));
-
-	int font_size = coordinate_font_size_opt->GetInt();
-	font_size = std::min(72, std::max(6, font_size));
-	VideoOverlayTextStyle text_style;
-	text_style.face = "Verdana";
-	text_style.size = font_size;
-	text_style.bold = true;
-	text_style.colour = {255, 255, 255};
-	auto const extent = context.MeasureText(mouse_text, text_style);
-	int const tw = extent.GetWidth();
-	int const th = extent.GetHeight();
-
-	// Place the text in the corner of the cross closest to the center of the video
-	int dx = mouse_pos.X();
-	int dy = mouse_pos.Y();
-	if (dx > canvas_size.X() / 2)
-		dx -= tw + 4;
-	else
-		dx += 4;
-
-	if (dy < canvas_size.Y() / 2)
-		dy += 3;
-	else
-		dy -= th + 3;
-
-	context.DrawText(mouse_text, dx, dy, text_style);
-}
-
-std::string VisualToolCross::Text(Vector2D v) {
-	return video_res.X() > script_res.X() ? v.Str() : v.DStr();
+	auto const font_size = static_cast<int>(std::clamp<std::int64_t>(coordinate_font_size_opt->GetInt(), 6, 72));
+	aegisub::visual_cross::DrawOverlay(context, mouse_pos,
+									   {.video_position = video_pos, .video_size = video_res, .script_size = script_res, .canvas_size = canvas_size},
+									   shift_down, font_size);
 }

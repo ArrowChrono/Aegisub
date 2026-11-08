@@ -1557,3 +1557,413 @@ TEST(visual_edit_controller, opposite_nudges_restore_exact_burst_baseline) {
 	EXPECT_TRUE(origin.DraftChanges().empty());
 	EXPECT_EQ(line.text, origin.IncrementalChanges()[0].text);
 }
+
+namespace {
+class CrossOverlayRecorder final : public VideoOverlayDrawContext {
+	public:
+	VideoOverlayTextExtent extent{37, 19};
+	std::vector<std::string> operations;
+	std::vector<float> vertices;
+	size_t dimensions = 0;
+	size_t vertex_count = 0;
+	agi::Color line_colour;
+	float line_alpha = 0;
+	int line_width = 0;
+	std::string measured_text;
+	VideoOverlayTextStyle measured_style;
+	std::string drawn_text;
+	VideoOverlayTextStyle drawn_style;
+	int text_x = 0;
+	int text_y = 0;
+	void SetLineColour(agi::Color const& colour, float alpha, int width) override {
+		line_colour = colour;
+		line_alpha = alpha;
+		line_width = width;
+	}
+	void SetFillColour(agi::Color const&, float) override {}
+	void SetInvert() override { operations.emplace_back("invert"); }
+	void ClearInvert() override { operations.emplace_back("clear"); }
+	void DrawLine(Vector2D, Vector2D) override { operations.emplace_back("line"); }
+	void DrawLines(size_t dim, float const *lines, size_t n) override {
+		operations.emplace_back("lines");
+		dimensions = dim;
+		vertex_count = n;
+		vertices.assign(lines, lines + dim * n);
+	}
+	void DrawLineStrip(Vector2D const *, size_t) override {}
+	void DrawRectangle(Vector2D, Vector2D) override {}
+	void DrawPolygon(Vector2D const *, size_t) override {}
+	void DrawMultiPolygon(std::vector<float> const&, std::vector<int> const&, std::vector<int> const&, Vector2D, Vector2D, bool) override {}
+	void DrawCircle(Vector2D, float) override {}
+	void DrawTriangle(Vector2D, Vector2D, Vector2D) override {}
+	VideoOverlayTextExtent MeasureText(std::string const& text, VideoOverlayTextStyle const& style) override {
+		operations.emplace_back("measure");
+		measured_text = text;
+		measured_style = style;
+		return extent;
+	}
+	void DrawText(std::string const& text, int x, int y, VideoOverlayTextStyle const& style) override {
+		operations.emplace_back("text");
+		drawn_text = text;
+		drawn_style = style;
+		text_x = x;
+		text_y = y;
+	}
+};
+
+Viewport CrossCanvas() {
+	return {.video_position = {40, 30}, .video_size = {800, 600}, .script_size = {400, 300}, .canvas_size = {1000, 800}};
+}
+}
+
+TEST(visual_edit_controller, cross_hover_draws_full_canvas_invert_batch_and_measured_label_without_lines) {
+	Controller controller(Mode::Cross);
+	controller.Reset({}, {}, {}, {}, CrossCanvas());
+	controller.Pointer(Input(PointerPhase::Enter, {140.5f, 90.5f}));
+	auto context = std::make_shared<VisualToolRenderContext>();
+	auto snapshot = controller.CaptureSnapshot(context, {});
+	ASSERT_TRUE(snapshot);
+	EXPECT_EQ(context, snapshot->context);
+	EXPECT_FALSE(snapshot->HitTest({140.5f, 90.5f}));
+
+	CrossOverlayRecorder draw;
+	snapshot->Draw(draw);
+	EXPECT_EQ((std::vector<std::string>{"invert", "lines", "clear", "measure", "text"}), draw.operations);
+	EXPECT_EQ(2u, draw.dimensions);
+	EXPECT_EQ(4u, draw.vertex_count);
+	EXPECT_EQ((std::vector<float>{0, 90.5f, 1000, 90.5f, 140.5f, 0, 140.5f, 800}), draw.vertices);
+	EXPECT_EQ(agi::Color(255, 255, 255), draw.line_colour);
+	EXPECT_EQ(1, draw.line_width);
+	EXPECT_FLOAT_EQ(1, draw.line_alpha);
+	EXPECT_EQ("50.25,30.25", draw.measured_text);
+	EXPECT_EQ(draw.measured_text, draw.drawn_text);
+	EXPECT_EQ("Verdana", draw.measured_style.face);
+	EXPECT_EQ("Verdana", draw.drawn_style.face);
+	EXPECT_EQ(12, draw.drawn_style.size);
+	EXPECT_TRUE(draw.drawn_style.bold);
+	EXPECT_FALSE(draw.drawn_style.italic);
+	EXPECT_TRUE(draw.drawn_style.outline);
+	EXPECT_EQ(agi::Color(255, 255, 255), draw.drawn_style.colour);
+	EXPECT_EQ(144, draw.text_x);
+	EXPECT_EQ(93, draw.text_y);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+}
+
+TEST(visual_edit_controller, cross_label_uses_independent_extent_quadrants_shift_and_font_size_clamps) {
+	struct Case {
+		Vector2D pointer;
+		bool shift;
+		int requested_font;
+		int font;
+		VideoOverlayTextExtent extent;
+		char const *text;
+		int x;
+		int y;
+	};
+	Case cases[] = {
+		{.pointer = {140.5f, 90.5f}, .shift = false, .requested_font = 5, .font = 6, .extent = {71, 23}, .text = "50.25,30.25", .x = 144, .y = 93},
+		{.pointer = {740.5f, 90.5f}, .shift = false, .requested_font = 73, .font = 72, .extent = {71, 23}, .text = "350.25,30.25", .x = 665, .y = 93},
+		{.pointer = {140.5f, 690.5f}, .shift = false, .requested_font = 17, .font = 17, .extent = {71, 23}, .text = "50.25,330.25", .x = 144, .y = 664},
+		{.pointer = {740.5f, 690.5f}, .shift = true, .requested_font = 6, .font = 6, .extent = {11, 7}, .text = "49.75,-30.25", .x = 725, .y = 680},
+		{.pointer = {500, 400}, .shift = false, .requested_font = 72, .font = 72, .extent = {71, 23}, .text = "230,185", .x = 504, .y = 374},
+		{.pointer = {20.5f, 10.5f}, .shift = false, .requested_font = 12, .font = 12, .extent = {71, 23}, .text = "-9.75,-9.75", .x = 24, .y = 13}};
+	for (size_t i = 0; i < std::size(cases); ++i) {
+		SCOPED_TRACE(i);
+		auto const& item = cases[i];
+		Controller controller(Mode::Cross);
+		controller.Reset({}, {}, {}, {}, CrossCanvas());
+		controller.Pointer(Input(PointerPhase::Move, item.pointer, false, false, false, item.shift));
+		auto snapshot = controller.CaptureSnapshot({}, {.coordinate_font_size = item.requested_font});
+		ASSERT_TRUE(snapshot);
+		CrossOverlayRecorder draw;
+		draw.extent = item.extent;
+		snapshot->Draw(draw);
+		EXPECT_EQ(item.text, draw.drawn_text);
+		EXPECT_EQ(item.text, draw.measured_text);
+		EXPECT_EQ(item.x, draw.text_x);
+		EXPECT_EQ(item.y, draw.text_y);
+		EXPECT_EQ(item.font, draw.drawn_style.size);
+		EXPECT_EQ(item.font, draw.measured_style.size);
+		EXPECT_EQ(item.pointer.Y(), draw.vertices.at(1));
+		EXPECT_EQ(item.pointer.X(), draw.vertices.at(4));
+	}
+}
+
+TEST(visual_edit_controller, cross_label_precision_changes_only_above_script_width_and_truncates_negative_coordinates) {
+	for (float video_width : {399.f, 400.f, 800.f}) {
+		SCOPED_TRACE(video_width);
+		auto viewport = CrossCanvas();
+		viewport.video_size = {video_width, 600.f};
+		Controller controller(Mode::Cross);
+		controller.Reset({}, {}, {}, {}, viewport);
+		controller.Pointer(Input(PointerPhase::Enter, {20.5f, 10.5f}));
+		auto snapshot = controller.CaptureSnapshot({}, {});
+		ASSERT_TRUE(snapshot);
+		CrossOverlayRecorder draw;
+		snapshot->Draw(draw);
+		EXPECT_EQ(video_width > 400 ? "-9.75,-9.75" : "-19,-9", draw.drawn_text);
+	}
+}
+
+TEST(visual_edit_controller, cross_retained_snapshot_owns_pointer_viewport_style_and_context_after_reset_and_destroy) {
+	std::shared_ptr<VisualToolRenderSnapshot const> retained;
+	auto context = std::make_shared<VisualToolRenderContext>();
+	{
+		Controller controller(Mode::Cross);
+		controller.Reset({}, {}, {}, {}, CrossCanvas());
+		controller.Pointer(Input(PointerPhase::Enter, {740.5f, 690.5f}));
+		retained = controller.CaptureSnapshot(context, {.coordinate_font_size = 17});
+		controller.Pointer(Input(PointerPhase::Move, {20, 10}, false, false, false, true));
+		controller.Reset({}, {}, {}, {}, {.video_position = {0, 0}, .video_size = {100, 100}, .script_size = {100, 100}, .canvas_size = {200, 200}});
+	}
+	ASSERT_TRUE(retained);
+	EXPECT_EQ(context, retained->context);
+	CrossOverlayRecorder draw;
+	retained->Draw(draw);
+	EXPECT_EQ("350.25,330.25", draw.drawn_text);
+	EXPECT_EQ(17, draw.drawn_style.size);
+	EXPECT_EQ((std::vector<float>{0, 690.5f, 1000, 690.5f, 740.5f, 0, 740.5f, 800}), draw.vertices);
+	EXPECT_EQ(699, draw.text_x);
+	EXPECT_EQ(668, draw.text_y);
+}
+
+TEST(visual_edit_controller, cross_press_drag_release_never_capture_or_select_and_leave_clears_until_reentry) {
+	auto first = MakeLine(1, 0, R"({\pos(50,60)}First)", {50, 60});
+	auto selected = MakeLine(2, 1, R"({\pos(100,120)}Selected)", {100, 120});
+	Controller controller(Mode::Cross);
+	controller.Reset({first, selected}, {2}, 1, {}, CrossCanvas());
+	for (auto phase : {PointerPhase::Enter, PointerPhase::Press, PointerPhase::Move, PointerPhase::Release}) {
+		SCOPED_TRACE(static_cast<int>(phase));
+		auto result = controller.Pointer(Input(phase, {140, 150}, phase != PointerPhase::Release));
+		EXPECT_EQ(CaptureAction::None, result.capture);
+		EXPECT_FALSE(result.interaction_began);
+		EXPECT_FALSE(result.interaction_ended);
+		EXPECT_FALSE(result.selection_changed);
+		EXPECT_FALSE(result.geometry_changed);
+		EXPECT_FALSE(controller.IsInteracting());
+		EXPECT_EQ((std::set<int>{2}), controller.SelectedLines());
+		EXPECT_EQ(std::optional<int>(1), controller.ActiveLine());
+		EXPECT_TRUE(controller.DraftChanges().empty());
+		EXPECT_TRUE(controller.IncrementalChanges().empty());
+		ASSERT_TRUE(controller.CaptureSnapshot({}, {}));
+	}
+	controller.Pointer(Input(PointerPhase::Leave, {140, 150}));
+	auto absent = controller.CaptureSnapshot({}, {});
+	if (absent) {
+		CrossOverlayRecorder draw;
+		absent->Draw(draw);
+		EXPECT_TRUE(draw.operations.empty());
+	}
+	controller.Pointer(Input(PointerPhase::Enter, {200, 210}));
+	auto reentered = controller.CaptureSnapshot({}, {});
+	ASSERT_TRUE(reentered);
+	CrossOverlayRecorder draw;
+	reentered->Draw(draw);
+	EXPECT_EQ("80,90", draw.drawn_text);
+}
+
+TEST(visual_edit_controller, cross_double_click_without_press_uses_unselected_move_start_and_translates_hidden_selection) {
+	auto active = MakeLine(1, 0, R"({\move(20,30,220,230,0,1000)}Active)", {20, 30});
+	active.move = Move{.start = {20, 30}, .end = {220, 230}, .start_ms = 0, .end_ms = 1000};
+	auto hidden = MakeLine(2, 4, R"({\move(100,120,140,160,0,90)\org(90,100)\iclip(1,2,30,40)}Hidden{\i1}tail)", {100, 120});
+	hidden.move = Move{.start = {100, 120}, .end = {140, 160}, .start_ms = 0, .end_ms = 90};
+	hidden.origin = Vector2D(90, 100);
+	hidden.first_frame = 80;
+	auto untimed = MakeLine(3, 5, R"({\move(200,220,240,260,-5,0)\clip(1,2,30,40)}Untimed)", {200, 220});
+	untimed.move = Move{.start = {200, 220}, .end = {240, 260}, .start_ms = -5, .end_ms = 0};
+	auto positioned = MakeLine(4, 6, R"({\pos(300,320)\b1}Position)", {300, 320});
+	auto start_timed = MakeLine(5, 7, R"({\move(400,420,440,460,10,0)}StartTimed)", {400, 420});
+	start_timed.move = Move{.start = {400, 420}, .end = {440, 460}, .start_ms = 10, .end_ms = 0};
+	Controller controller(Mode::Cross);
+	controller.Reset({active, hidden, untimed, positioned, start_timed}, {2, 3, 4, 5}, 1, {.number = 12, .time_ms = 500}, CrossCanvas());
+	auto result = controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170}, false, false, false, true));
+	EXPECT_TRUE(result.geometry_changed);
+	EXPECT_EQ(CaptureAction::None, result.capture);
+	EXPECT_FALSE(result.interaction_began);
+	EXPECT_FALSE(result.interaction_ended);
+	EXPECT_FALSE(result.selection_changed);
+	EXPECT_FALSE(controller.IsInteracting());
+	EXPECT_EQ((std::set<int>{2, 3, 4, 5}), controller.SelectedLines());
+	EXPECT_EQ(std::optional<int>(1), controller.ActiveLine());
+	ASSERT_EQ(4u, controller.DraftChanges().size());
+	EXPECT_EQ(hidden.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(2, controller.DraftChanges()[0].id);
+	EXPECT_EQ(R"({\iclip(1,2,30,40)\move(130,160,170,200,0,90)\org(120,140)}Hidden{\i1}tail)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\clip(1,2,30,40)\move(230,260,270,300)}Untimed)", controller.DraftChanges()[1].text);
+	EXPECT_EQ(R"({\b1\pos(330,360)}Position)", controller.DraftChanges()[2].text);
+	EXPECT_EQ(R"({\move(430,460,470,500,10,0)}StartTimed)", controller.DraftChanges()[3].text);
+}
+
+TEST(visual_edit_controller, cross_double_click_serializes_fractional_and_negative_integer_coordinates_using_zoom_policy) {
+	for (float scale : {1.f, 2.f}) {
+		SCOPED_TRACE(scale);
+		auto line = MakeLine(1, 0, R"({\pos(20,30)\org(10,10)\clip(0,0,40,40)}Text)", {20, 30});
+		line.origin = Vector2D(10, 10);
+		Controller controller(Mode::Cross);
+		controller.Reset({line}, {1}, 1, {}, {.video_position = {0, 0}, .video_size = {640 * scale, 480 * scale}, .script_size = {640, 480}, .canvas_size = {1280, 960}});
+		auto result = controller.Pointer(Input(PointerPhase::DoubleClick, {-1.5f * scale, -3.5f * scale}));
+		EXPECT_TRUE(result.geometry_changed);
+		ASSERT_EQ(1u, controller.DraftChanges().size());
+		EXPECT_EQ(scale == 1 ? R"({\clip(0,0,40,40)\pos(-1,-3)\org(-11,-23)}Text)" : R"({\clip(0,0,40,40)\pos(-1.5,-3.5)\org(-11.5,-23.5)}Text)", controller.DraftChanges()[0].text);
+	}
+}
+
+TEST(visual_edit_controller, cross_override_planner_rejects_whole_batch_without_mutating_next_translation_anchor) {
+	auto first = MakeLine(1, 0, R"({\pos(20,30)}First)", {20, 30});
+	auto hidden = MakeLine(2, 4, R"({\move(100,120,140,160,10,90)\org(90,100)}Hidden)", {100, 120});
+	hidden.move = Move{.start = {100, 120}, .end = {140, 160}, .start_ms = 10, .end_ms = 90};
+	hidden.origin = Vector2D(90, 100);
+	hidden.first_frame = 80;
+	Controller controller(Mode::Cross);
+	controller.Reset({first, hidden}, {1, 2}, 1, {}, CrossCanvas());
+	bool accept = false;
+	int calls = 0;
+	OverridePlanner planner = [&](std::span<OverrideEdit const> edits) -> std::optional<std::vector<VisualTextEdit>> {
+		++calls;
+		EXPECT_EQ(3u, edits.size());
+		for (auto const& edit : edits) {
+			EXPECT_EQ(OverrideIntent::Translation, edit.intent);
+			EXPECT_EQ(Vector2D(30, 40), edit.translation);
+		}
+		if (edits.size() == 3) {
+			EXPECT_EQ(1, edits[0].id);
+			EXPECT_EQ("\\pos", edits[0].tag);
+			EXPECT_EQ("(50,70)", edits[0].value);
+			EXPECT_EQ(2, edits[1].id);
+			EXPECT_EQ("\\move", edits[1].tag);
+			EXPECT_EQ("(130,160,170,200,10,90)", edits[1].value);
+			EXPECT_EQ("\\org", edits[2].tag);
+			EXPECT_EQ("(120,140)", edits[2].value);
+		}
+		if (!accept) return std::nullopt;
+		return std::vector<VisualTextEdit>{
+			{.id = 1, .row = 0, .original_text = first.text, .text = R"({\pos(50,70)}First)"},
+			{.id = 2, .row = 4, .original_text = hidden.text, .text = R"({\move(130,160,170,200,10,90)\org(120,140)}Hidden)"}};
+	};
+	auto rejected = controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170}), nullptr, false, planner);
+	EXPECT_FALSE(rejected.geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+	accept = true;
+	EXPECT_TRUE(controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170}), nullptr, false, planner).geometry_changed);
+	EXPECT_EQ(2, calls);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(first.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(R"({\pos(50,70)}First)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\move(130,160,170,200,10,90)\org(120,140)}Hidden)", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, cross_invalid_pointer_preserves_last_snapshot_and_existing_draft) {
+	auto line = MakeLine(1, 0, R"({\pos(20,30)}Text)", {20, 30});
+	Controller controller(Mode::Cross);
+	controller.Reset({line}, {1}, 1, {}, CrossCanvas());
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170})).geometry_changed);
+	for (auto point : {Vector2D(std::numeric_limits<float>::quiet_NaN(), 70.f), Vector2D(50.f, std::numeric_limits<float>::infinity()), Vector2D(std::numeric_limits<float>::max(), 70.f)}) {
+		for (auto phase : {PointerPhase::Move, PointerPhase::DoubleClick}) {
+			SCOPED_TRACE(static_cast<int>(phase));
+			Result result;
+			EXPECT_NO_THROW(result = controller.Pointer(Input(phase, point)));
+			EXPECT_FALSE(result.geometry_changed);
+			EXPECT_EQ(CaptureAction::None, result.capture);
+			EXPECT_TRUE(controller.IncrementalChanges().empty());
+			ASSERT_EQ(1u, controller.DraftChanges().size());
+			EXPECT_EQ(R"({\pos(50,70)}Text)", controller.DraftChanges()[0].text);
+			auto snapshot = controller.CaptureSnapshot({}, {});
+			ASSERT_TRUE(snapshot);
+			CrossOverlayRecorder draw;
+			snapshot->Draw(draw);
+			EXPECT_EQ("50,70", draw.drawn_text);
+		}
+	}
+}
+
+TEST(visual_edit_controller, cross_invalid_viewport_or_late_selected_target_rejects_before_any_source_is_changed) {
+	auto first = MakeLine(1, 0, R"({\pos(20,30)}First)", {20, 30});
+	auto second = MakeLine(2, 4, R"({\pos(100,120)\org(90,100)}Second)", {100, 120});
+	second.origin = Vector2D(90, 100);
+	std::vector<Viewport> invalid_viewports;
+	for (int i = 0; i < 5; ++i) {
+		auto viewport = CrossCanvas();
+		if (i == 0) viewport.video_size = {0, 600};
+		if (i == 1) viewport.script_size = {400, 0};
+		if (i == 2) viewport.video_position = {std::numeric_limits<float>::infinity(), 30.f};
+		if (i == 3) viewport.video_size = {800.f, std::numeric_limits<float>::quiet_NaN()};
+		if (i == 4) viewport.canvas_size = {0, 800};
+		invalid_viewports.push_back(viewport);
+	}
+	for (auto const& invalid : invalid_viewports) {
+		Controller controller(Mode::Cross);
+		controller.Reset({first, second}, {1, 2}, 1, {}, invalid);
+		EXPECT_FALSE(controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170})).geometry_changed);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+		EXPECT_TRUE(controller.IncrementalChanges().empty());
+		controller.SetViewport(CrossCanvas());
+		EXPECT_TRUE(controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170})).geometry_changed);
+		ASSERT_EQ(2u, controller.DraftChanges().size());
+		EXPECT_EQ(R"({\pos(50,70)}First)", controller.DraftChanges()[0].text);
+		EXPECT_EQ(R"({\pos(130,160)\org(120,140)}Second)", controller.DraftChanges()[1].text);
+	}
+	auto invalid_target = second;
+	invalid_target.origin = Vector2D(std::numeric_limits<float>::infinity(), 100.f);
+	Controller controller(Mode::Cross);
+	controller.Reset({first, invalid_target}, {1, 2}, 1, {}, CrossCanvas());
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170})).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	controller.UpdateLines(std::span<Line const>(&second, 1));
+	EXPECT_TRUE(controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170})).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(first.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(R"({\pos(50,70)}First)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\pos(130,160)\org(120,140)}Second)", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, cross_exact_noop_has_no_draft_while_implicit_and_noncanonical_position_are_serialized) {
+	struct Case {
+		char const *source;
+		char const *expected;
+		bool changed;
+	};
+	Case cases[] = {
+		{.source = R"({\b1\pos(20,30)}Text)", .expected = R"({\b1\pos(20,30)}Text)", .changed = false},
+		{.source = R"({\b1}Text)", .expected = R"({\b1\pos(20,30)}Text)", .changed = true},
+		{.source = R"({\pos(020.00,030.0)\b1}Text)", .expected = R"({\b1\pos(20,30)}Text)", .changed = true}};
+	for (size_t i = 0; i < std::size(cases); ++i) {
+		SCOPED_TRACE(i);
+		auto const& item = cases[i];
+		auto line = MakeLine(1, 0, item.source, {20, 30});
+		Controller controller(Mode::Cross);
+		controller.Reset({line}, {1}, 1, {}, CrossCanvas());
+		auto result = controller.Pointer(Input(PointerPhase::DoubleClick, {80, 90}));
+		EXPECT_EQ(item.changed, result.geometry_changed);
+		EXPECT_EQ(item.changed ? 1u : 0u, controller.DraftChanges().size());
+		if (item.changed) {
+			EXPECT_EQ(item.source, controller.DraftChanges()[0].original_text);
+			EXPECT_EQ(item.expected, controller.DraftChanges()[0].text);
+		}
+		else
+			EXPECT_TRUE(controller.IncrementalChanges().empty());
+	}
+}
+
+TEST(visual_edit_controller, cross_no_active_off_frame_and_empty_selection_still_label_without_editing) {
+	for (int partition = 0; partition < 3; ++partition) {
+		SCOPED_TRACE(partition);
+		auto line = MakeLine(1, 0, R"({\pos(20,30)}Text)", {20, 30});
+		if (partition == 1) line.first_frame = 80;
+		Controller controller(Mode::Cross);
+		controller.Reset({line}, partition == 2 ? std::set<int>{} : std::set<int>{1}, partition == 0 ? std::nullopt : std::optional<int>{1}, {}, CrossCanvas());
+		auto result = controller.Pointer(Input(PointerPhase::DoubleClick, {140, 170}));
+		EXPECT_FALSE(result.geometry_changed);
+		EXPECT_FALSE(result.selection_changed);
+		EXPECT_EQ(CaptureAction::None, result.capture);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+		EXPECT_TRUE(controller.IncrementalChanges().empty());
+		auto snapshot = controller.CaptureSnapshot({}, {});
+		ASSERT_TRUE(snapshot);
+		CrossOverlayRecorder draw;
+		snapshot->Draw(draw);
+		EXPECT_EQ("50,70", draw.drawn_text);
+	}
+}

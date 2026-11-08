@@ -42,7 +42,6 @@ class VisualToolCross final : public VisualTool<VisualDraggableFeature> {
 	bool SupportsOverlayContext() const override { return true; }
 	void DrawOverlay(VideoOverlayDrawContext &context) override;
 	void DrawWithContext(VideoOverlayDrawContext &context);
-	std::string Text(Vector2D v);
 public:
 	VisualToolCross(VideoDisplay *parent, agi::Context *context);
 	~VisualToolCross();

@@ -20,6 +20,7 @@
 #include "visual_ass_edit.h"
 #include "visual_feature.h"
 #include "visual_frame_visibility_index.h"
+#include "visual_tool_cross_shared.h"
 #include "visual_tool_drag_snapshot.h"
 #include "visual_tool_transform_policy.h"
 #include "visual_tool_scale_policy.h"
@@ -45,6 +46,20 @@ constexpr int NoLine = std::numeric_limits<int>::min();
 Key MakeKey(VisualToolFeatureKey const& key) {
 	return {key.line_id.value_or(NoLine), key.type, key.line_id ? 0 : key.index};
 }
+
+class CrossSnapshot final : public VisualToolRenderSnapshot {
+	public:
+	Vector2D pointer;
+	Viewport viewport;
+	bool shift = false;
+	int font_size = 12;
+
+	using VisualToolRenderSnapshot::VisualToolRenderSnapshot;
+
+	void Draw(VideoOverlayDrawContext& target) const override {
+		visual_cross::DrawOverlay(target, pointer, viewport, shift, font_size);
+	}
+};
 
 class ClipSnapshot final : public VisualToolRenderSnapshot {
 	public:
@@ -205,6 +220,8 @@ struct Controller::Impl {
 	std::optional<int> active;
 	std::optional<Key> hovered;
 	std::optional<Key> primary;
+	std::optional<Vector2D> cross_pointer;
+	bool cross_shift = false;
 	Frame frame;
 	Viewport viewport;
 	Vector2D drag_start;
@@ -729,6 +746,43 @@ struct Controller::Impl {
 		bool began = dragging || holding;
 		return {.capture = began ? CaptureAction::Capture : CaptureAction::None, .interaction_began = began, .geometry_changed = true};
 	}
+	void CrossDoubleClick(Vector2D position, Result& result, OverridePlanner const& planner) {
+		if (!ActiveVisible() || selected.empty())
+			return;
+		auto const delta = ToScript(position) - GetLine(*active).position;
+		std::vector<OverrideEdit> writes;
+		writes.reserve(selected.size() * 2);
+		for (int id : selected) {
+			auto plan = visual_cross::PlanTranslation(GetLine(id), delta, viewport.video_size.X() > viewport.script_size.X());
+			if (!plan)
+				return;
+			for (auto& edit : *plan)
+				writes.push_back(std::move(edit));
+		}
+		if (planner) {
+			CapturePlannedSources();
+			if (!ApplyPlannedOverrides(writes, planner))
+				return;
+		}
+		else {
+			std::map<int, Line> candidates;
+			for (auto const& write : writes) {
+				auto& candidate = candidates.try_emplace(write.id, GetLine(write.id)).first->second;
+				candidate.text = SetOverride(candidate.text, write.tag, write.value);
+			}
+			for (auto& [id, candidate] : candidates)
+				RefreshGeometryFromText(candidate, viewport.script_size);
+			for (auto& [id, candidate] : candidates) {
+				auto& current = GetLine(id);
+				if (current.text != candidate.text) {
+					dirty.insert(id);
+					current = std::move(candidate);
+				}
+			}
+		}
+		result.geometry_changed = !dirty.empty();
+	}
+
 	void DoubleClick(Vector2D position, Result& result, OverridePlanner const& planner) {
 		if (mode != Mode::Drag || !ActiveVisible())
 			return;
@@ -898,6 +952,20 @@ Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot c
 	auto& s = *impl;
 	s.BeginOperation();
 	Result result;
+	if (s.mode == Mode::Cross) {
+		if (input.phase == PointerPhase::Leave) {
+			s.cross_pointer.reset();
+			return result;
+		}
+		if (!visual_cross::IsValidGeometry(input.position, s.viewport))
+			return result;
+		s.cross_pointer = input.position;
+		s.cross_shift = input.shift;
+		if (input.phase == PointerPhase::DoubleClick)
+			s.CrossDoubleClick(input.position, result, planner);
+		s.EndOperation();
+		return result;
+	}
 	if (s.IsTransform()) {
 		result = s.TransformPointer(input, displayed_snapshot, defer_begin);
 		s.EndOperation();
@@ -1119,6 +1187,16 @@ std::span<const VisualTextEdit> Controller::DraftChanges() const noexcept { retu
 
 std::shared_ptr<const VisualToolRenderSnapshot> Controller::CaptureSnapshot(std::shared_ptr<const VisualToolRenderContext> const& context, Style const& style) const {
 	auto const& s = *impl;
+	if (s.mode == Mode::Cross) {
+		if (!s.cross_pointer || !visual_cross::IsValidGeometry(*s.cross_pointer, s.viewport))
+			return {};
+		auto snapshot = std::make_shared<CrossSnapshot>(context);
+		snapshot->pointer = *s.cross_pointer;
+		snapshot->viewport = s.viewport;
+		snapshot->shift = s.cross_shift;
+		snapshot->font_size = style.coordinate_font_size;
+		return snapshot;
+	}
 	auto fill = [&](Impl::Feature const& feature) {
 		return s.hovered == feature.key ? style.highlight_secondary : s.picked.contains(feature.key) ? style.line_primary
 																									 : style.highlight_primary;

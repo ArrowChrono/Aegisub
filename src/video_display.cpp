@@ -1618,6 +1618,7 @@ void VideoDisplay::DrawLegacyOverlayPass(wxSize const& client_size) {
 			pass.Finish();
 		}
 		else {
+			perf_trace::VideoUiDurationScope trace("video_display.tool_live.draw");
 			if (tool->SupportsOverlayContext()) {
 				if (!visualGuideText)
 					visualGuideText = CreateTextRenderer();

@@ -20,7 +20,8 @@ enum class Mode : std::uint8_t { Drag,
 								 RectClip,
 								 RotateZ,
 								 RotateXY,
-								 Scale };
+								 Scale,
+								 Cross };
 enum class PointerPhase : std::uint8_t { Enter,
 										 Move,
 										 Leave,
@@ -70,6 +71,7 @@ struct Viewport {
 	Vector2D video_size;
 	Vector2D script_size;
 	Vector2D layout_size{0, 0};
+	Vector2D canvas_size{0, 0};
 };
 
 struct Frame {
@@ -115,6 +117,7 @@ struct Style {
 	unsigned long line_primary = 0;
 	unsigned long line_secondary = 0;
 	float shaded_alpha = 0;
+	int coordinate_font_size = 12;
 };
 
 class Controller final {
