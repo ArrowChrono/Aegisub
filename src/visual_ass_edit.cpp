@@ -20,6 +20,7 @@
 #include "ass_dialogue.h"
 #include "ass_file.h"
 #include "ass_style.h"
+#include "visual_tool_shear_policy.h"
 
 #include <libaegisub/vfr.h>
 
@@ -56,6 +57,7 @@ Line ReadLine(AssDialogue const& dialogue, AssStyle const *style, Vector2D scrip
 	line.text = dialogue.Text.get();
 	line.start_ms = dialogue.Start;
 	auto blocks = dialogue.ParseTags();
+	line.static_shear = visual_shear::IsStatic(blocks);
 	line.position = Point(Find(blocks, "\\pos"), 0, 1);
 	if (!line.position)
 		line.position = Point(Find(blocks, "\\move"), 0, 1);

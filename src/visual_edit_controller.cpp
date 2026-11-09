@@ -61,6 +61,28 @@ class CrossSnapshot final : public VisualToolRenderSnapshot {
 	}
 };
 
+class ShearSnapshot final : public VisualToolRenderSnapshot {
+	public:
+	visual_shear::OverlayState state;
+	bool editable = false;
+
+	using VisualToolRenderSnapshot::VisualToolRenderSnapshot;
+
+	[[nodiscard]] std::optional<VisualToolFeatureKey> HitTest(Vector2D const& point) const override {
+		if (!editable)
+			return {};
+		if (auto axis = visual_shear::HitTest(state.geometry, point)) {
+			bool const x = *axis == visual_shear::Axis::X;
+			return VisualToolFeatureKey{.type = x ? DRAG_BIG_SQUARE : DRAG_BIG_CIRCLE, .index = x ? 0u : 1u};
+		}
+		return {};
+	}
+
+	void Draw(VideoOverlayDrawContext& target) const override {
+		visual_shear::DrawOverlay(target, state);
+	}
+};
+
 class ClipSnapshot final : public VisualToolRenderSnapshot {
 	public:
 	std::array<Vector2D, 4> points;
@@ -243,6 +265,7 @@ struct Controller::Impl {
 	std::vector<VisualTextEdit> cumulative;
 	std::map<int, Line> planned_sources;
 	mutable visual_transform::RotateXYOverlayGeometryCache xy_geometry;
+	visual_shear::Axis shear_axis = visual_shear::Axis::X;
 
 	explicit Impl(Mode mode) : mode(mode) {}
 
@@ -254,6 +277,33 @@ struct Controller::Impl {
 	[[nodiscard]] Vector2D ToScript(Vector2D point) const { return (point - viewport.video_position) * viewport.script_size / viewport.video_size; }
 	[[nodiscard]] bool ActiveVisible() const {
 		return active && visibility.Visible().count(const_cast<Line *>(&GetLine(*active))) != 0;
+	}
+
+	[[nodiscard]] bool StaticShearSelection() const {
+		return std::ranges::all_of(selected, [&](int id) { return GetLine(id).static_shear; });
+	}
+
+	[[nodiscard]] std::optional<visual_shear::Geometry> ShearGeometry() const {
+		if (!ActiveVisible() || !std::isfinite(viewport.script_size.X()) || !std::isfinite(viewport.script_size.Y()) ||
+			viewport.script_size.X() <= 0 || viewport.script_size.Y() <= 0)
+			return {};
+		auto const& line = GetLine(*active);
+		auto geometry = visual_shear::MakeGeometry(ToCanvas(line.position), viewport.video_position, viewport.video_size, {line.fax, line.fay});
+		if (!geometry)
+			return {};
+		auto representable = [](float value, int offset) {
+			double const anchor = std::trunc(static_cast<double>(value));
+			return std::isfinite(anchor) && anchor >= std::numeric_limits<int>::min() &&
+				   anchor <= std::numeric_limits<int>::max() &&
+				   anchor + offset >= std::numeric_limits<int>::min() &&
+				   anchor + offset <= std::numeric_limits<int>::max();
+		};
+		if (!representable(geometry->center.X(), -120) || !representable(geometry->center.X(), 110) ||
+			!representable(geometry->center.Y(), -126) || !representable(geometry->center.Y(), 24) ||
+			!representable(viewport.video_position.X(), 8) || !representable(viewport.video_position.Y(), 8) ||
+			!representable(viewport.video_position.Y() + viewport.video_size.Y(), -24))
+			return {};
+		return geometry;
 	}
 
 	void ReindexFeatures() {
@@ -385,6 +435,18 @@ struct Controller::Impl {
 					auto value = agi::format("%.4g", candidate.rotation_y);
 					write("\\fry", value);
 					candidate.rotation_y = std::stof(value);
+				}
+			}
+			else if (mode == Mode::Shear) {
+				if (candidate.fax != source.fax) {
+					auto value = visual_shear::FormatValue(candidate.fax);
+					write("\\fax", value);
+					candidate.fax = std::stof(value);
+				}
+				if (candidate.fay != source.fay) {
+					auto value = visual_shear::FormatValue(candidate.fay);
+					write("\\fay", value);
+					candidate.fay = std::stof(value);
 				}
 			}
 			else if (candidate.scale != source.scale) {
@@ -601,6 +663,75 @@ struct Controller::Impl {
 
 	[[nodiscard]] bool IsTransform() const { return mode == Mode::RotateZ || mode == Mode::RotateXY || mode == Mode::Scale; }
 
+	Result ShearPointer(PointerInput const& input, VisualToolRenderSnapshot const *displayed, bool defer_begin) {
+		Result result;
+		if (input.phase == PointerPhase::Leave) {
+			if (!dragging) {
+				result.geometry_changed = hovered.has_value();
+				hovered.reset();
+			}
+			return result;
+		}
+		bool const finite = std::isfinite(input.position.X()) && std::isfinite(input.position.Y());
+		if (!dragging) {
+			if (!finite)
+				return result;
+			auto const geometry = ShearGeometry();
+			std::optional<Key> hit;
+			if (geometry && StaticShearSelection()) {
+				if (displayed) {
+					auto key = displayed->HitTest(input.position);
+					if (key && !key->line_id &&
+						((key->index == 0 && key->type == DRAG_BIG_SQUARE) ||
+						 (key->index == 1 && key->type == DRAG_BIG_CIRCLE)))
+						hit = MakeKey(*key);
+				}
+				else if (auto axis = visual_shear::HitTest(*geometry, input.position)) {
+					bool const x = *axis == visual_shear::Axis::X;
+					hit = Key{NoLine, x ? DRAG_BIG_SQUARE : DRAG_BIG_CIRCLE, x ? 0u : 1u};
+				}
+			}
+			result.geometry_changed = hovered != hit;
+			hovered = hit;
+			if (input.phase != PointerPhase::Press || !hit || selected.empty())
+				return result;
+			drag_start = input.position;
+			prepared_feature = hit;
+			shear_axis = std::get<2>(*hit) == 0 ? visual_shear::Axis::X : visual_shear::Axis::Y;
+			prepared = true;
+			if (!defer_begin)
+				return BeginPress();
+			return result;
+		}
+		if (input.phase != PointerPhase::Move && input.phase != PointerPhase::Release)
+			return result;
+		if (finite) {
+			float const delta = visual_shear::DragDelta(shear_axis, input.position - drag_start);
+			std::vector<Line> changes;
+			changes.reserve(selected.size());
+			bool valid = true;
+			for (int id : selected) {
+				auto candidate = planned_sources.at(id);
+				auto& value = shear_axis == visual_shear::Axis::X ? candidate.fax : candidate.fay;
+				auto adjusted = visual_shear::FormatAdjustedValue(value, delta);
+				if (!adjusted) {
+					valid = false;
+					break;
+				}
+				value += delta;
+				changes.push_back(std::move(candidate));
+			}
+			if (valid)
+				result = ApplyCommand(std::move(changes));
+		}
+		if (!input.left_down) {
+			dragging = false;
+			result.capture = CaptureAction::Release;
+			result.interaction_ended = true;
+		}
+		return result;
+	}
+
 	Result TransformPointer(PointerInput const& input, VisualToolRenderSnapshot const *displayed, bool defer_begin) {
 		Result result;
 		if (input.phase == PointerPhase::Leave)
@@ -718,6 +849,12 @@ struct Controller::Impl {
 		if (!prepared)
 			return {};
 		prepared = false;
+		if (mode == Mode::Shear) {
+			CapturePlannedSources();
+			dragging = true;
+			picked = {*prepared_feature};
+			return {.capture = CaptureAction::Capture, .interaction_began = true, .geometry_changed = true};
+		}
 		if (IsTransform()) {
 			CapturePlannedSources();
 			dragging = (mode == Mode::RotateZ || mode == Mode::RotateXY) && prepared_feature.has_value();
@@ -971,6 +1108,10 @@ Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot c
 		s.EndOperation();
 		return result;
 	}
+	if (s.mode == Mode::Shear) {
+		result = s.ShearPointer(input, displayed_snapshot, defer_begin);
+		return result;
+	}
 	if (input.phase == PointerPhase::Leave) {
 		if (!s.dragging)
 			s.hovered.reset();
@@ -1076,7 +1217,9 @@ Result Controller::ToggleMovePosition() {
 }
 
 bool Controller::CanNudge() const {
-	return impl->IsTransform() && impl->ActiveVisible() && !impl->selected.empty() && !IsInteracting() && !impl->prepared;
+	bool const supported = impl->IsTransform() ||
+						   (impl->mode == Mode::Shear && impl->StaticShearSelection() && impl->ShearGeometry().has_value());
+	return supported && impl->ActiveVisible() && !impl->selected.empty() && !IsInteracting() && !impl->prepared;
 }
 
 Result Controller::Nudge(Vector2D direction, float step, float origin_step) {
@@ -1118,6 +1261,14 @@ Result Controller::Nudge(Vector2D direction, float step, float origin_step) {
 				candidate.rotation_x = *angle;
 			}
 		}
+		else if (s.mode == Mode::Shear) {
+			auto const axis = visual_shear::NudgeAxis(direction);
+			auto& value = axis == visual_shear::Axis::X ? candidate.fax : candidate.fay;
+			auto const delta = visual_shear::NudgeDelta(axis, direction, step);
+			if (!visual_shear::FormatAdjustedValue(value, delta))
+				return {};
+			value += delta;
+		}
 		else {
 			auto scale = visual_tool_scale_policy::Nudge(active.scale, direction, step);
 			if (!scale)
@@ -1143,6 +1294,24 @@ Result Controller::NormalizeScale(visual_tool_scale_policy::Axis axis) {
 	for (int id : s.selected) {
 		auto candidate = s.GetLine(id);
 		candidate.scale = *visual_tool_scale_policy::NormalizeTo100(candidate.scale, axis);
+		changes.push_back(std::move(candidate));
+	}
+	return s.ApplyCommand(std::move(changes));
+}
+
+bool Controller::CanResetShear(visual_shear::Axis axis) const {
+	return (axis == visual_shear::Axis::X || axis == visual_shear::Axis::Y) && impl->mode == Mode::Shear && CanNudge();
+}
+
+Result Controller::ResetShear(visual_shear::Axis axis) {
+	if (!CanResetShear(axis))
+		return {};
+	auto& s = *impl;
+	std::vector<Line> changes;
+	changes.reserve(s.selected.size());
+	for (int id : s.selected) {
+		auto candidate = s.GetLine(id);
+		(axis == visual_shear::Axis::X ? candidate.fax : candidate.fay) = 0;
 		changes.push_back(std::move(candidate));
 	}
 	return s.ApplyCommand(std::move(changes));
@@ -1212,6 +1381,31 @@ std::shared_ptr<const VisualToolRenderSnapshot> Controller::CaptureSnapshot(std:
 	}
 	if (!s.ActiveVisible())
 		return {};
+	if (s.mode == Mode::Shear) {
+		auto geometry = s.ShearGeometry();
+		if (!geometry)
+			return {};
+		auto snapshot = std::make_shared<ShearSnapshot>(context);
+		auto const& line = s.GetLine(*s.active);
+		snapshot->editable = s.StaticShearSelection();
+		auto& state = snapshot->state;
+		state.geometry = *geometry;
+		state.coefficients = {line.fax, line.fay};
+		state.video_position = s.viewport.video_position;
+		state.video_size = s.viewport.video_size;
+		state.primary_colour = VideoOverlayColourFromRgb(style.line_primary);
+		state.secondary_colour = VideoOverlayColourFromRgb(style.line_secondary);
+		for (size_t i = 0; i < state.handle_fill_colours.size(); ++i) {
+			Key const key{NoLine, i == 0 ? DRAG_BIG_SQUARE : DRAG_BIG_CIRCLE, i};
+			state.handle_fill_colours[i] = VideoOverlayColourFromRgb(s.hovered == key ? style.highlight_secondary : s.picked.contains(key) ? style.line_primary
+																																		   : style.highlight_primary);
+		}
+		state.font_size = style.coordinate_font_size;
+		state.hint = style.shear_hint;
+		if (!snapshot->editable)
+			state.diagnostic = style.shear_diagnostic;
+		return snapshot;
+	}
 	if (s.IsTransform()) {
 		if (s.mode == Mode::RotateXY && !HasValidXYGeometry(s.GetLine(*s.active), s.viewport))
 			return {};

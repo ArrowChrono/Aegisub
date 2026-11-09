@@ -2,6 +2,7 @@
 
 #include "visual_feature.h"
 #include "visual_tool.h"
+#include "visual_tool_shear_shared.h"
 
 #include <map>
 #include <memory>
@@ -9,10 +10,7 @@
 
 class OpenGLText;
 
-enum class VisualShearAxis {
-	X,
-	Y,
-};
+using VisualShearAxis = aegisub::visual_shear::Axis;
 
 class VisualToolShear final : public VisualTool<VisualDraggableFeature> {
 	std::unique_ptr<OpenGLText> text;

@@ -4,6 +4,7 @@
 #include "visual_text_edit.h"
 #include "visual_tool_render_snapshot.h"
 #include "visual_tool_scale_policy.h"
+#include "visual_tool_shear_shared.h"
 
 #include <cstdint>
 #include <functional>
@@ -21,7 +22,8 @@ enum class Mode : std::uint8_t { Drag,
 								 RotateZ,
 								 RotateXY,
 								 Scale,
-								 Cross };
+								 Cross,
+								 Shear };
 enum class PointerPhase : std::uint8_t { Enter,
 										 Move,
 										 Leave,
@@ -62,6 +64,7 @@ struct Line {
 	float rotation_z = 0;
 	float fax = 0;
 	float fay = 0;
+	bool static_shear = true;
 	int position_to_move_start_ms = 0;
 	int position_to_move_end_ms = 0;
 };
@@ -118,6 +121,8 @@ struct Style {
 	unsigned long line_secondary = 0;
 	float shaded_alpha = 0;
 	int coordinate_font_size = 12;
+	std::string shear_hint;
+	std::string shear_diagnostic;
 };
 
 class Controller final {
@@ -144,6 +149,8 @@ class Controller final {
 	Result Nudge(Vector2D direction, float step, float origin_step);
 	[[nodiscard]] bool CanNormalizeScale(visual_tool_scale_policy::Axis axis) const;
 	Result NormalizeScale(visual_tool_scale_policy::Axis axis);
+	[[nodiscard]] bool CanResetShear(visual_shear::Axis axis) const;
+	Result ResetShear(visual_shear::Axis axis);
 	Result FinishInteraction();
 	void AcceptChanges();
 

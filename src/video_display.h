@@ -41,6 +41,7 @@
 #include "video_subtitle_scene_cache.h"
 #include "video_tool_release_feedback.h"
 #include "visual_tool_presentation.h"
+#include "visual_tool_shear_shared.h"
 
 #include "vector2d.h"
 
@@ -73,7 +74,7 @@ struct VisualGuideViewport;
 class VisualToolBase;
 class UiDeadlineTimer;
 enum class VisualScaleAxis;
-enum class VisualShearAxis;
+using VisualShearAxis = aegisub::visual_shear::Axis;
 enum class VisualNudgeMagnitude;
 class wxComboBox;
 class wxTextCtrl;

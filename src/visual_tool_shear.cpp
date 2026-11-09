@@ -4,7 +4,6 @@
 #include "compat.h"
 #include "gl_text.h"
 #include "include/aegisub/context.h"
-#include "numeric_utils.h"
 #include "options.h"
 #include "selection_controller.h"
 #include "video_display.h"
@@ -12,19 +11,6 @@
 #include "visual_tool_shear_policy.h"
 
 #include <libaegisub/scope_exit.h>
-
-#include <algorithm>
-
-namespace {
-constexpr float kLever = 80.f;
-constexpr float kRailOffset = 100.f;
-constexpr float kMargin = 160.f;
-
-char const *Tag(VisualShearAxis axis) {
-	return axis == VisualShearAxis::X ? "\\fax" : "\\fay";
-}
-
-}
 
 VisualToolShear::VisualToolShear(VideoDisplay *parent, agi::Context *context)
 	: VisualTool<VisualDraggableFeature>(parent, context), text(parent->CreateTextRenderer()) {
@@ -54,10 +40,9 @@ std::string VisualToolShear::ValidateSelection() const {
 
 void VisualToolShear::UpdateHandles() {
 	if (!fax_handle || !fay_handle) return;
-	Vector2D const minimum = video_pos + Vector2D(10, 10);
-	Vector2D const maximum = video_pos + video_res - Vector2D(10, 10);
-	fax_handle->pos = (center + Vector2D(shear.X() * kLever, -kRailOffset)).Max(minimum).Min(maximum);
-	fay_handle->pos = (center + Vector2D(kRailOffset, shear.Y() * kLever)).Max(minimum).Min(maximum);
+	auto const geometry = aegisub::visual_shear::CalculateGeometry(center, video_pos, video_res, shear);
+	fax_handle->pos = geometry.handles[0];
+	fay_handle->pos = geometry.handles[1];
 }
 
 void VisualToolShear::DoRefresh() {
@@ -71,8 +56,8 @@ void VisualToolShear::DoRefresh() {
 	float fax, fay;
 	GetLineShear(active_line, fax, fay);
 	shear = Vector2D(fax, fay);
-	Vector2D const margin(std::min(kMargin, video_res.X() / 2), std::min(kMargin, video_res.Y() / 2));
-	center = FromScriptCoords(GetLinePosition(active_line)).Max(video_pos + margin).Min(video_pos + video_res - margin);
+	auto const geometry = aegisub::visual_shear::CalculateGeometry(FromScriptCoords(GetLinePosition(active_line)), video_pos, video_res, shear);
+	center = geometry.center;
 	if (!fax_handle) {
 		fax_handle = new VisualDraggableFeature;
 		fax_handle->type = DRAG_BIG_SQUARE;
@@ -81,7 +66,8 @@ void VisualToolShear::DoRefresh() {
 		fay_handle->type = DRAG_BIG_CIRCLE;
 		features.push_back(*fay_handle);
 	}
-	UpdateHandles();
+	fax_handle->pos = geometry.handles[0];
+	fay_handle->pos = geometry.handles[1];
 }
 
 bool VisualToolShear::InitializeDrag(VisualDraggableFeature *feature) {
@@ -100,9 +86,9 @@ bool VisualToolShear::InitializeDrag(VisualDraggableFeature *feature) {
 
 void VisualToolShear::UpdateDrag(VisualDraggableFeature *) {
 	Vector2D const delta = mouse_pos - drag_start;
-	float const change = (drag_axis == VisualShearAxis::X ? delta.X() : delta.Y()) / kLever;
+	float const change = aegisub::visual_shear::DragDelta(drag_axis, delta);
 	for (auto const& [line, value] : initial_values)
-		SetOverride(line, Tag(drag_axis), float_to_string(value + change));
+		SetOverride(line, aegisub::visual_shear::Tag(drag_axis), aegisub::visual_shear::FormatValue(value + change));
 	float fax, fay;
 	GetLineShear(active_line, fax, fay);
 	shear = Vector2D(fax, fay);
@@ -111,14 +97,14 @@ void VisualToolShear::UpdateDrag(VisualDraggableFeature *) {
 
 bool VisualToolShear::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) {
 	if (IsInteracting() || !active_line || !ValidateSelection().empty()) return false;
-	VisualShearAxis const axis = direction.X() != 0 ? VisualShearAxis::X : VisualShearAxis::Y;
+	VisualShearAxis const axis = aegisub::visual_shear::NudgeAxis(direction);
 	auto const step = static_cast<float>(GetNudgeStep(
 		"Tool/Visual/Nudge/Shear Step", "Tool/Visual/Nudge/Shear Step Large", magnitude));
-	float const change = (axis == VisualShearAxis::X ? direction.X() : direction.Y()) * step;
+	float const change = aegisub::visual_shear::NudgeDelta(axis, direction, step);
 	for (auto *line : c->GetCore().selectionController->GetSelectedSet()) {
 		float fax, fay;
 		GetLineShear(line, fax, fay);
-		SetOverride(line, Tag(axis), float_to_string((axis == VisualShearAxis::X ? fax : fay) + change));
+		SetOverride(line, aegisub::visual_shear::Tag(axis), aegisub::visual_shear::FormatValue((axis == VisualShearAxis::X ? fax : fay) + change));
 	}
 	DoRefresh();
 	CommitNudge(_("shearing"));
@@ -133,7 +119,7 @@ bool VisualToolShear::Reset(VisualShearAxis axis) {
 	if (!CanReset(axis)) return false;
 	command_session.ResetCommitId();
 	auto reset_commit_id = agi::make_scope_exit([this] { command_session.ResetCommitId(); });
-	SetSelectedOverride(Tag(axis), "0");
+	SetSelectedOverride(aegisub::visual_shear::Tag(axis), "0");
 	CommitAndRefresh(_("shear reset"));
 	return true;
 }
@@ -141,20 +127,24 @@ bool VisualToolShear::Reset(VisualShearAxis axis) {
 void VisualToolShear::Draw() {
 	if (!active_line) return;
 	LegacyVideoOverlayDrawContext context(gl, *text);
-	VideoOverlayTextStyle style;
-	style.size = static_cast<int>(OPT_GET("Tool/Visual/Coordinate Font Size")->GetInt());
-	style.colour = line_color_primary_opt->GetColor();
-	if (!diagnostic.empty()) {
-		context.DrawText(diagnostic, static_cast<int>(video_pos.X()) + 8, static_cast<int>(video_pos.Y()) + 8, style);
-		return;
+	aegisub::visual_shear::OverlayState state;
+	state.coefficients = shear;
+	state.video_position = video_pos;
+	state.video_size = video_res;
+	state.primary_colour = line_color_primary_opt->GetColor();
+	state.secondary_colour = line_color_secondary_opt->GetColor();
+	state.font_size = static_cast<int>(OPT_GET("Tool/Visual/Coordinate Font Size")->GetInt());
+	state.diagnostic = diagnostic;
+	if (diagnostic.empty()) {
+		state.geometry = {.center = center, .handles = {fax_handle->pos, fay_handle->pos}};
+		std::array handles{fax_handle, fay_handle};
+		for (std::size_t i = 0; i < handles.size(); ++i) {
+			auto *feature = handles[i];
+			state.handle_fill_colours[i] = feature == active_feature     ? highlight_color_secondary_opt->GetColor()
+										   : sel_features.count(feature) ? line_color_primary_opt->GetColor()
+																		 : highlight_color_primary_opt->GetColor();
+		}
+		state.hint = from_wx(_("Arrows: shear   Alt: large step   Ctrl+Home: fax=0   Ctrl+End: fay=0"));
 	}
-	context.SetLineColour(line_color_secondary_opt->GetColor(), 0.7f, 1);
-	context.DrawLine(center + Vector2D(-120, -100), center + Vector2D(120, -100));
-	context.DrawLine(center + Vector2D(100, -120), center + Vector2D(100, 120));
-	context.DrawLine(center + Vector2D(0, -106), center + Vector2D(0, -94));
-	context.DrawLine(center + Vector2D(94, 0), center + Vector2D(106, 0));
-	DrawAllFeatures(context);
-	context.DrawText("fax " + float_to_string(shear.X()), static_cast<int>(center.X()) - 120, static_cast<int>(center.Y()) - 126, style);
-	context.DrawText("fay " + float_to_string(shear.Y()), static_cast<int>(center.X()) + 110, static_cast<int>(center.Y()) + 24, style);
-	context.DrawText(from_wx(_("Arrows: shear   Alt: large step   Ctrl+Home: fax=0   Ctrl+End: fay=0")), static_cast<int>(video_pos.X()) + 8, static_cast<int>(video_pos.Y() + video_res.Y()) - 24, style);
+	aegisub::visual_shear::DrawOverlay(context, state);
 }

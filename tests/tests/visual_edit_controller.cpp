@@ -6,9 +6,12 @@
 #include "../../src/visual_tool_transform_policy.h"
 #include "../../src/visual_tool_transform_overlay.h"
 #include "../../src/visual_tool_scale_policy.h"
+#include "../../src/visual_tool_shear_shared.h"
 #include "../../src/visual_ass_edit.h"
 #include "../../src/ass_dialogue.h"
 #include "../../src/ass_style.h"
+
+#include <libaegisub/vfr.h>
 
 #include <algorithm>
 #include <limits>
@@ -29,6 +32,14 @@ class TransformOverlayRecorder final : public VideoOverlayDrawContext {
 	std::vector<Paint> line_paints;
 	std::vector<std::pair<Paint, Paint>> polygon_paints;
 	std::vector<std::pair<Paint, Paint>> circle_paints;
+	std::vector<std::pair<Paint, Paint>> rectangle_paints;
+	struct Text {
+		std::string text;
+		int x;
+		int y;
+		VideoOverlayTextStyle style;
+	};
+	std::vector<Text> texts;
 	struct PerspectiveBatch {
 		std::vector<VideoOverlayPerspectiveVertex> grid, axes, arrows;
 		VideoOverlayPerspectiveTransform transform;
@@ -65,13 +76,15 @@ class TransformOverlayRecorder final : public VideoOverlayDrawContext {
 	}
 	void DrawLines(size_t, float const *, size_t) override {}
 	void DrawLineStrip(Vector2D const *, size_t) override {}
-	void DrawRectangle(Vector2D, Vector2D) override {}
+	void DrawRectangle(Vector2D, Vector2D) override { rectangle_paints.emplace_back(line_paint, fill_paint); }
 	void DrawPolygon(Vector2D const *, size_t) override { polygon_paints.emplace_back(line_paint, fill_paint); }
 	void DrawMultiPolygon(std::vector<float> const&, std::vector<int> const&, std::vector<int> const&, Vector2D, Vector2D, bool) override {}
 	void DrawCircle(Vector2D, float) override { circle_paints.emplace_back(line_paint, fill_paint); }
 	void DrawTriangle(Vector2D, Vector2D, Vector2D) override {}
 	VideoOverlayTextExtent MeasureText(std::string const&, VideoOverlayTextStyle const&) override { return {}; }
-	void DrawText(std::string const&, int, int, VideoOverlayTextStyle const&) override {}
+	void DrawText(std::string const& text, int x, int y, VideoOverlayTextStyle const& style) override {
+		texts.push_back({.text = text, .x = x, .y = y, .style = style});
+	}
 };
 
 bool SamePerspectiveBatches(TransformOverlayRecorder const& a, TransformOverlayRecorder const& b) {
@@ -1966,4 +1979,413 @@ TEST(visual_edit_controller, cross_no_active_off_frame_and_empty_selection_still
 		snapshot->Draw(draw);
 		EXPECT_EQ("50,70", draw.drawn_text);
 	}
+}
+
+namespace {
+Line ReadShearLine(int id, int row, std::string text, bool comment = false, int start_ms = 0) {
+	AssDialogue dialogue;
+	dialogue.Id = id;
+	dialogue.Row = row;
+	dialogue.Text = std::move(text);
+	dialogue.Comment = comment;
+	dialogue.Start = start_ms;
+	dialogue.End = start_ms + 4000;
+	return ReadLine(dialogue, nullptr, {640, 480}, agi::vfr::Framerate(25));
+}
+}
+
+TEST(visual_edit_controller, shear_read_line_carries_whole_source_admission_and_refreshes_on_rebinding) {
+	auto active = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Active)");
+	auto rejected = ReadShearLine(2, 5, R"({\fax0.125\t(0,500,\fay0.5)}Hidden)", true);
+	EXPECT_TRUE(active.static_shear);
+	EXPECT_FALSE(rejected.static_shear);
+	EXPECT_EQ(.25f, active.fax);
+	EXPECT_EQ(-.5f, active.fay);
+	Controller controller(Mode::Shear);
+	controller.Reset({active, rejected}, {1, 2}, 1, {}, Canvas());
+	EXPECT_FALSE(controller.CanNudge());
+	EXPECT_FALSE(controller.CanResetShear(aegisub::visual_shear::Axis::X));
+	EXPECT_FALSE(controller.Nudge({1, 0}, .1f, 1).geometry_changed);
+	EXPECT_FALSE(controller.ResetShear(aegisub::visual_shear::Axis::Y).geometry_changed);
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Press, {340, 140}, true)).interaction_began);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+
+	Style style;
+	style.shear_hint = "localized hint";
+	style.shear_diagnostic = "localized unsupported selection";
+	auto snapshot = controller.CaptureSnapshot({}, style);
+	ASSERT_TRUE(snapshot);
+	TransformOverlayRecorder draw;
+	snapshot->Draw(draw);
+	ASSERT_EQ(1u, draw.texts.size());
+	EXPECT_EQ(style.shear_diagnostic, draw.texts.front().text);
+	EXPECT_TRUE(draw.lines.empty());
+	EXPECT_FALSE(snapshot->HitTest({340, 140}));
+
+	auto replacement = ReadShearLine(2, 5, R"({\fax0.125\fay0.5}Hidden)", true);
+	controller.UpdateLines(std::span<Line const>(&replacement, 1));
+	EXPECT_TRUE(controller.CanNudge());
+	EXPECT_TRUE(controller.CanResetShear(aegisub::visual_shear::Axis::Y));
+	EXPECT_TRUE(controller.Nudge({1, 0}, .125f, 1).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\pos(320,240)\fay-0.5\fax0.375}Active)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\fay0.5\fax0.25}Hidden)", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, shear_nudge_uses_each_selected_coefficient_including_hidden_and_comment_rows) {
+	auto active = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Active)");
+	auto hidden = ReadShearLine(2, 4, R"({\move(20,30,40,50,100,200)\fax-0.75\fay0.125\org(8,9)\clip(1,2,30,40)}Hidden{\i1}tail)", false, 8000);
+	auto comment = ReadShearLine(3, 8, R"({\fax1.25\fay-0.25\fscx150\frz12}Comment)", true);
+	Controller controller(Mode::Shear);
+	controller.Reset({active, hidden, comment}, {1, 2, 3}, 1, {}, Canvas());
+	ASSERT_TRUE(controller.CanNudge());
+	EXPECT_TRUE(controller.Nudge({1, 0}, .125f, 1).geometry_changed);
+	ASSERT_EQ(3u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\pos(320,240)\fay-0.5\fax0.375}Active)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\fay0.125\org(8,9)\clip(1,2,30,40)\fax-0.625}Hidden{\i1}tail)", controller.DraftChanges()[1].text);
+	EXPECT_EQ(R"({\fay-0.25\fscx150\frz12\fax1.375}Comment)", controller.DraftChanges()[2].text);
+	EXPECT_EQ(8, controller.DraftChanges()[2].row);
+	EXPECT_EQ(comment.text, controller.DraftChanges()[2].original_text);
+	auto const accepted = controller.DraftChanges()[1].text;
+	controller.AcceptChanges();
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.Nudge({0, -1}, .25f, 1).geometry_changed);
+	ASSERT_EQ(3u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\pos(320,240)\fax0.375\fay-0.75}Active)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\org(8,9)\clip(1,2,30,40)\fax-0.625\fay-0.125}Hidden{\i1}tail)", controller.DraftChanges()[1].text);
+	EXPECT_EQ(accepted, controller.DraftChanges()[1].original_text);
+	EXPECT_EQ(R"({\fscx150\frz12\fax1.375\fay-0.5}Comment)", controller.DraftChanges()[2].text);
+}
+
+TEST(visual_edit_controller, shear_unselected_active_is_anchor_only_and_does_not_join_admission_or_edits) {
+	auto active = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5\t(\fax1)}Active)");
+	auto selected = ReadShearLine(2, 7, R"({\fax-0.75\fay0.125}Selected)", true);
+	ASSERT_FALSE(active.static_shear);
+	Controller controller(Mode::Shear);
+	controller.Reset({active, selected}, {2}, 1, {}, Canvas());
+	ASSERT_TRUE(controller.CanNudge());
+	EXPECT_TRUE(controller.Nudge({1, 1}, .125f, 1).geometry_changed);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(2, controller.DraftChanges()[0].id);
+	EXPECT_EQ(R"({\fay0.125\fax-0.625}Selected)", controller.DraftChanges()[0].text);
+	EXPECT_EQ((std::set<int>{2}), controller.SelectedLines());
+	EXPECT_EQ(std::optional<int>(1), controller.ActiveLine());
+	controller.AcceptChanges();
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {340, 140}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Release, {380, 180}));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(2, controller.DraftChanges()[0].id);
+	EXPECT_EQ(R"({\fay0.125\fax-0.125}Selected)", controller.DraftChanges()[0].text);
+	auto snapshot = controller.CaptureSnapshot({}, {});
+	ASSERT_TRUE(snapshot);
+	TransformOverlayRecorder draw;
+	snapshot->Draw(draw);
+	ASSERT_GE(draw.texts.size(), 2u);
+	EXPECT_EQ("fax 0.25", draw.texts[0].text);
+	EXPECT_EQ("fay -0.5", draw.texts[1].text);
+}
+
+TEST(visual_edit_controller, shear_axis_drags_use_screen_displacement_and_ignore_modifiers) {
+	for (bool modified : {false, true}) {
+		SCOPED_TRACE(modified);
+		auto active = ReadShearLine(1, 0, R"({\pos(160,240)\fax0.25\fay-0.5\frz30}Active)");
+		auto hidden = ReadShearLine(2, 5, R"({\fax-0.75\fay0.125}Hidden)", true);
+		Controller controller(Mode::Shear);
+		controller.Reset({active, hidden}, {1, 2}, 1, {},
+						 {.video_position = {40, 30}, .video_size = {1280, 480}, .script_size = {640, 480}});
+		auto press = controller.Pointer(Input(PointerPhase::Press, {380, 170}, true, modified, modified, modified));
+		EXPECT_EQ(CaptureAction::Capture, press.capture);
+		ASSERT_TRUE(press.interaction_began);
+		EXPECT_FALSE(press.selection_changed);
+		controller.Pointer(Input(PointerPhase::Move, {400, 250}, true, modified, modified, modified));
+		ASSERT_EQ(2u, controller.DraftChanges().size());
+		EXPECT_EQ(R"({\pos(160,240)\fay-0.5\frz30\fax0.5}Active)", controller.DraftChanges()[0].text);
+		EXPECT_EQ(R"({\fay0.125\fax-0.5}Hidden)", controller.DraftChanges()[1].text);
+		auto release = controller.Pointer(Input(PointerPhase::Release, {400, 250}, false, modified, modified, modified));
+		EXPECT_EQ(CaptureAction::Release, release.capture);
+		EXPECT_TRUE(release.interaction_ended);
+		controller.AcceptChanges();
+		ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {460, 230}, true, modified, modified, modified)).interaction_began);
+		controller.Pointer(Input(PointerPhase::Release, {540, 210}, false, modified, modified, modified));
+		ASSERT_EQ(2u, controller.DraftChanges().size());
+		EXPECT_EQ(R"({\pos(160,240)\frz30\fax0.5\fay-0.75}Active)", controller.DraftChanges()[0].text);
+		EXPECT_EQ(R"({\fax-0.5\fay-0.125}Hidden)", controller.DraftChanges()[1].text);
+	}
+}
+
+TEST(visual_edit_controller, shear_background_and_double_click_preserve_selection_and_never_edit) {
+	auto active = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Active)");
+	auto selected = ReadShearLine(2, 6, R"({\pos(100,120)\fax-0.75}Selected)");
+	Controller controller(Mode::Shear);
+	controller.Reset({active, selected}, {1, 2}, 1, {}, Canvas());
+	for (auto phase : {PointerPhase::Press, PointerPhase::Move, PointerPhase::Release, PointerPhase::DoubleClick}) {
+		auto result = controller.Pointer(Input(phase, {50, 50}, phase == PointerPhase::Press || phase == PointerPhase::Move));
+		EXPECT_FALSE(result.interaction_began);
+		EXPECT_FALSE(result.selection_changed);
+		EXPECT_EQ(CaptureAction::None, result.capture);
+		EXPECT_FALSE(controller.IsInteracting());
+		EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+		EXPECT_TRUE(controller.DraftChanges().empty());
+	}
+	auto double_click = controller.Pointer(Input(PointerPhase::DoubleClick, {340, 140}));
+	EXPECT_FALSE(double_click.interaction_began);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+}
+
+TEST(visual_edit_controller, shear_reset_targets_only_requested_axis_and_preserves_noop_source) {
+	using Axis = aegisub::visual_shear::Axis;
+	auto active = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Active)");
+	auto first = ReadShearLine(2, 4, R"({\move(20,30,40,50,100,200)\fax-0.75\fay0.125\org(8,9)\iclip(1,2,30,40)}First)", false, 8000);
+	auto comment = ReadShearLine(3, 8, R"({\fax1.25\fay-0.25\fscy80\frx14}Comment)", true);
+	Controller controller(Mode::Shear);
+	controller.Reset({active, first, comment}, {2, 3}, 1, {}, Canvas());
+	ASSERT_TRUE(controller.CanResetShear(Axis::X));
+	EXPECT_TRUE(controller.ResetShear(Axis::X).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\fay0.125\org(8,9)\iclip(1,2,30,40)\fax0}First)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\fay-0.25\fscy80\frx14\fax0}Comment)", controller.DraftChanges()[1].text);
+	controller.AcceptChanges();
+	EXPECT_FALSE(controller.ResetShear(Axis::X).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.ResetShear(Axis::Y).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\move(20,30,40,50,100,200)\org(8,9)\iclip(1,2,30,40)\fax0\fay0}First)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\fscy80\frx14\fax0\fay0}Comment)", controller.DraftChanges()[1].text);
+
+	auto implicit = ReadShearLine(4, 1, R"({\pos(320,240)\b1}Implicit{\i1}tail)");
+	auto explicit_zero = ReadShearLine(5, 2, R"({\fax0.000\fay-0.000\b1}Exact)");
+	controller.Reset({implicit, explicit_zero}, {4, 5}, 4, {}, Canvas());
+	EXPECT_FALSE(controller.ResetShear(Axis::X).geometry_changed);
+	EXPECT_FALSE(controller.ResetShear(Axis::Y).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+}
+
+TEST(visual_edit_controller, shear_return_to_drag_and_nudge_origin_restores_exact_bytes) {
+	auto line = ReadShearLine(1, 0, R"({\pos(320,240)\fax00.2500\fay-00.5000\b1}Text{\i1}tail)");
+	Controller controller(Mode::Shear);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {340, 140}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {360, 170}, true));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	controller.Pointer(Input(PointerPhase::Release, {340, 140}));
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	ASSERT_EQ(1u, controller.IncrementalChanges().size());
+	EXPECT_EQ(line.text, controller.IncrementalChanges()[0].text);
+	controller.AcceptChanges();
+	ASSERT_TRUE(controller.Nudge({0, -1}, .125f, 1).geometry_changed);
+	ASSERT_TRUE(controller.Nudge({0, 1}, .125f, 1).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	ASSERT_EQ(1u, controller.IncrementalChanges().size());
+	EXPECT_EQ(line.text, controller.IncrementalChanges()[0].text);
+}
+
+TEST(visual_edit_controller, shear_late_overflow_and_invalid_drag_preserve_last_valid_batch) {
+	auto active = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Active)");
+	auto hidden = ReadShearLine(2, 5, R"({\fax3e38\fay0.125}Hidden)", true);
+	Controller controller(Mode::Shear);
+	controller.Reset({active, hidden}, {1, 2}, 1, {}, Canvas());
+	EXPECT_FALSE(controller.Nudge({1, 0}, 1e38f, 1).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	EXPECT_TRUE(controller.Nudge({0, 1}, .125f, 1).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	auto const first_preview = controller.DraftChanges()[0].text;
+	auto const second_preview = controller.DraftChanges()[1].text;
+	EXPECT_FALSE(controller.Nudge({1, 0}, 1e38f, 1).geometry_changed);
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(first_preview, controller.DraftChanges()[0].text);
+	EXPECT_EQ(second_preview, controller.DraftChanges()[1].text);
+	controller.AcceptChanges();
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {420, 210}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {450, 230}, true));
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	auto const valid_drag = controller.DraftChanges()[0].text;
+	float const nan = std::numeric_limits<float>::quiet_NaN();
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Move, {nan, 240.f}, true)).geometry_changed);
+	EXPECT_EQ(valid_drag, controller.DraftChanges()[0].text);
+	auto release = controller.Pointer(Input(PointerPhase::Release, {nan, 240.f}));
+	EXPECT_TRUE(release.interaction_ended);
+	EXPECT_EQ(CaptureAction::Release, release.capture);
+	EXPECT_FALSE(controller.IsInteracting());
+	EXPECT_EQ(valid_drag, controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, shear_commands_require_visible_active_selection_and_idle_supported_mode) {
+	using Axis = aegisub::visual_shear::Axis;
+	auto line = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Text)");
+	for (auto mode : {Mode::Drag, Mode::RectClip, Mode::RotateZ, Mode::RotateXY, Mode::Scale, Mode::Cross}) {
+		Controller other(mode);
+		other.Reset({line}, {1}, 1, {}, Canvas());
+		EXPECT_FALSE(other.CanResetShear(Axis::X));
+		EXPECT_FALSE(other.ResetShear(Axis::Y).geometry_changed);
+		EXPECT_TRUE(other.DraftChanges().empty());
+	}
+	Controller controller(Mode::Shear);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	controller.SetFrame({.number = 500});
+	EXPECT_FALSE(controller.CanNudge());
+	EXPECT_FALSE(controller.CanResetShear(Axis::X));
+	EXPECT_FALSE(controller.Nudge({1, 0}, .1f, 1).geometry_changed);
+	EXPECT_FALSE(controller.ResetShear(Axis::Y).geometry_changed);
+	controller.SetFrame({});
+	controller.SetSelection({}, 1);
+	EXPECT_FALSE(controller.CanNudge());
+	EXPECT_FALSE(controller.CanResetShear(Axis::X));
+	controller.SetSelection({1}, std::nullopt);
+	EXPECT_FALSE(controller.CanNudge());
+	EXPECT_FALSE(controller.CanResetShear(Axis::X));
+	controller.SetSelection({1}, 1);
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {340, 140}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {360, 140}, true));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	auto const preview = controller.DraftChanges()[0].text;
+	EXPECT_FALSE(controller.CanNudge());
+	EXPECT_FALSE(controller.CanResetShear(Axis::X));
+	EXPECT_FALSE(controller.Nudge({1, 0}, .1f, 1).geometry_changed);
+	EXPECT_FALSE(controller.ResetShear(Axis::Y).geometry_changed);
+	EXPECT_EQ(preview, controller.DraftChanges()[0].text);
+	EXPECT_TRUE(controller.IsInteracting());
+	controller.FinishInteraction();
+	EXPECT_TRUE(controller.CanNudge());
+	EXPECT_TRUE(controller.CanResetShear(Axis::Y));
+}
+
+TEST(visual_edit_controller, shear_drag_rejects_late_finite_overflow_before_any_selected_write) {
+	auto active = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Active)");
+	auto hidden = ReadShearLine(2, 5, R"({\fax3.4e38\fay0.125}Hidden)", true);
+	Controller controller(Mode::Shear);
+	controller.Reset({active, hidden}, {1, 2}, 1, {}, Canvas());
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {340, 140}, true)).interaction_began);
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Move, {std::numeric_limits<float>::max(), 140.f}, true)).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	EXPECT_TRUE(controller.IsInteracting());
+	controller.Pointer(Input(PointerPhase::Release, {360, 140}));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(active.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(R"({\pos(320,240)\fay-0.5\fax0.5}Active)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, shear_invalid_command_arguments_and_geometry_preserve_source) {
+	auto active = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Active)");
+	Controller controller(Mode::Shear);
+	controller.Reset({active}, {1}, 1, {}, Canvas());
+	float const nan = std::numeric_limits<float>::quiet_NaN();
+	float const inf = std::numeric_limits<float>::infinity();
+	EXPECT_FALSE(controller.Nudge({nan, 0.f}, .1f, 1).geometry_changed);
+	EXPECT_FALSE(controller.Nudge({0.f, inf}, .1f, 1).geometry_changed);
+	EXPECT_FALSE(controller.Nudge({1, 0}, nan, 1).geometry_changed);
+	EXPECT_FALSE(controller.Nudge({1, 0}, inf, 1).geometry_changed);
+	EXPECT_FALSE(controller.Nudge({1, 0}, 0, 1).geometry_changed);
+	EXPECT_FALSE(controller.Nudge({1, 0}, -.1f, 1).geometry_changed);
+	EXPECT_FALSE(controller.Nudge({0, 0}, .1f, 1).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	auto viewport = Canvas();
+	viewport.video_size = {0, 480};
+	controller.SetViewport(viewport);
+	EXPECT_FALSE(controller.CaptureSnapshot({}, {}));
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Press, {340, 140}, true)).interaction_began);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	controller.SetViewport(Canvas());
+	EXPECT_TRUE(controller.Nudge({1, 0}, .125f, 1).geometry_changed);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(active.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(R"({\pos(320,240)\fay-0.5\fax0.375}Active)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, shear_hover_uses_host_highlight_without_changing_selection_or_retained_style) {
+	auto line = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Text)");
+	Controller controller(Mode::Shear);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	Style style;
+	style.highlight_primary = 0x00332211;
+	style.highlight_secondary = 0x00665544;
+	style.line_primary = 0x00998877;
+	auto retained = controller.CaptureSnapshot({}, style);
+	ASSERT_TRUE(retained);
+	controller.Pointer(Input(PointerPhase::Move, {340, 140}));
+	auto hovered = controller.CaptureSnapshot({}, style);
+	ASSERT_TRUE(hovered);
+	TransformOverlayRecorder original;
+	TransformOverlayRecorder highlight;
+	retained->Draw(original);
+	hovered->Draw(highlight);
+	ASSERT_EQ(1u, original.rectangle_paints.size());
+	ASSERT_EQ(1u, highlight.rectangle_paints.size());
+	ASSERT_EQ(1u, highlight.circle_paints.size());
+	EXPECT_EQ(agi::Color(0x11, 0x22, 0x33), original.rectangle_paints[0].second.colour);
+	EXPECT_EQ(agi::Color(0x44, 0x55, 0x66), highlight.rectangle_paints[0].second.colour);
+	EXPECT_EQ(agi::Color(0x11, 0x22, 0x33), highlight.circle_paints[0].second.colour);
+	EXPECT_EQ((std::set<int>{1}), controller.SelectedLines());
+	EXPECT_TRUE(controller.DraftChanges().empty());
+}
+
+TEST(visual_edit_controller, shear_prepared_press_uses_only_presented_handles_and_blocks_commands) {
+	using Axis = aegisub::visual_shear::Axis;
+	auto line = ReadShearLine(1, 0, R"({\pos(320,240)\fax0.25\fay-0.5}Text)");
+	Controller controller(Mode::Shear);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	auto displayed = controller.CaptureSnapshot({}, {});
+	ASSERT_TRUE(displayed);
+	line.position = {480, 240};
+	line.text = R"({\pos(480,240)\fax0.25\fay-0.5}Text)";
+	controller.UpdateLines(std::span<Line const>(&line, 1));
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Press, {500, 140}, true), displayed.get()).interaction_began);
+	auto prepared = controller.Pointer(Input(PointerPhase::Press, {340, 140}, true), displayed.get(), true);
+	EXPECT_EQ(CaptureAction::None, prepared.capture);
+	EXPECT_FALSE(controller.IsInteracting());
+	EXPECT_FALSE(controller.CanNudge());
+	EXPECT_FALSE(controller.CanResetShear(Axis::X));
+	auto began = controller.BeginPreparedPress();
+	ASSERT_TRUE(began.interaction_began);
+	EXPECT_EQ(CaptureAction::Capture, began.capture);
+	controller.Pointer(Input(PointerPhase::Release, {360, 140}));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\pos(480,240)\fay-0.5\fax0.5}Text)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, shear_retained_snapshot_keeps_geometry_labels_style_and_context_after_owner_changes) {
+	auto context = std::make_shared<VisualToolRenderContext>();
+	std::shared_ptr<VisualToolRenderSnapshot const> retained;
+	Style style;
+	style.line_primary = 0x00332211;
+	style.line_secondary = 0x00665544;
+	style.highlight_primary = 0x00998877;
+	style.highlight_secondary = 0x00ccbbaa;
+	style.coordinate_font_size = 19;
+	style.shear_hint = "localized shear hint";
+	style.shear_diagnostic = "localized shear diagnostic";
+	{
+		auto line = ReadShearLine(1, 0, R"({\move(240,220,600,400,100,900)\fax0.25\fay-0.5\frz45\fscx150}Text)");
+		Controller controller(Mode::Shear);
+		controller.Reset({line}, {1}, 1, {.number = 12, .time_ms = 500}, Canvas());
+		retained = controller.CaptureSnapshot(context, style);
+		ASSERT_TRUE(retained);
+		EXPECT_EQ(context, retained->context);
+		EXPECT_TRUE(retained->HitTest({260, 120}));
+		EXPECT_FALSE(retained->HitTest({600, 400}));
+		controller.SetViewport({.video_position = {50, 30}, .video_size = {320, 240}, .script_size = {640, 480}});
+		controller.Reset({}, {}, std::nullopt, {}, Canvas());
+	}
+	style.shear_hint = "changed";
+	style.coordinate_font_size = 40;
+	TransformOverlayRecorder draw;
+	retained->Draw(draw);
+	ASSERT_EQ(3u, draw.texts.size());
+	EXPECT_EQ("fax 0.25", draw.texts[0].text);
+	EXPECT_EQ(120, draw.texts[0].x);
+	EXPECT_EQ(94, draw.texts[0].y);
+	EXPECT_EQ("fay -0.5", draw.texts[1].text);
+	EXPECT_EQ(350, draw.texts[1].x);
+	EXPECT_EQ(244, draw.texts[1].y);
+	EXPECT_EQ("localized shear hint", draw.texts[2].text);
+	EXPECT_EQ(8, draw.texts[2].x);
+	EXPECT_EQ(456, draw.texts[2].y);
+	EXPECT_EQ(19, draw.texts[0].style.size);
+	EXPECT_EQ(agi::Color(0x11, 0x22, 0x33), draw.texts[0].style.colour);
+	EXPECT_TRUE(draw.texts[0].style.face.empty());
+	EXPECT_FALSE(draw.texts[0].style.bold);
+	EXPECT_TRUE(draw.texts[0].style.outline);
+	EXPECT_EQ(context, retained->context);
 }

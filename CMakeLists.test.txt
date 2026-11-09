@@ -405,6 +405,7 @@ if(GTEST_FOUND)
         tests/tests/visual_tool_roi_press_policy.cpp
         tests/tests/visual_tool_scale_policy.cpp
         tests/tests/visual_tool_shear_policy.cpp
+        tests/tests/visual_tool_shear_shared.cpp
         tests/tests/navigation_preview_policy.cpp
         tests/tests/deadline_pacing_policy.cpp
         tests/tests/video_tool_release_feedback.cpp
