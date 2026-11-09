@@ -191,7 +191,7 @@ int SplineCurve::GetPoints(std::vector<float> &points) const {
 				(p2 - p1).Len() +
 				(p3 - p2).Len() +
 				(p4 - p3).Len());
-			int steps = len/8;
+			int steps = std::max(1, len / 8);
 
 			for (int i = 0; i <= steps; ++i) {
 				// Get t and t-1 (u)

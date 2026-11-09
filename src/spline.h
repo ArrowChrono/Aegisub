@@ -29,7 +29,10 @@
 
 #include "spline_curve.h"
 
+#include <bit>
+#include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -37,20 +40,34 @@
 class VisualToolBase;
 
 namespace spline_detail {
+struct ClosingSegment {
+	std::size_t first;
+	std::size_t last;
+};
+
+constexpr int32_t GetScaleFactor(int raw_scale) {
+	auto const shift = (static_cast<uint32_t>(raw_scale) - 1u) & 31u;
+	return std::bit_cast<int32_t>(uint32_t{1} << shift);
+}
+
 /// Returns curves.size() in curve_index when the implicit closing segment wins.
 inline bool FindClosestParametricPoint(
 	std::span<SplineCurve const> curves,
 	Vector2D reference,
 	std::size_t& curve_index,
 	float& t,
-	Vector2D& point) {
+	Vector2D& point,
+	std::optional<ClosingSegment> *closing = nullptr) {
 	curve_index = 0;
+	if (closing)
+		closing->reset();
 	if (curves.empty())
 		return false;
 
 	float closest = std::numeric_limits<float>::infinity();
 	bool found = false;
-	auto consider = [&](SplineCurve const& curve, std::size_t candidate_index) {
+	auto consider = [&](SplineCurve const& curve, std::size_t candidate_index,
+						std::optional<ClosingSegment> candidate_closing = std::nullopt) {
 		float const candidate_t = curve.GetClosestParam(reference);
 		Vector2D const candidate_point = curve.GetPoint(candidate_t);
 		float const distance = (candidate_point - reference).SquareLen();
@@ -59,6 +76,8 @@ inline bool FindClosestParametricPoint(
 			curve_index = candidate_index;
 			t = candidate_t;
 			point = candidate_point;
+			if (closing)
+				*closing = candidate_closing;
 			found = true;
 		}
 	};
@@ -66,8 +85,14 @@ inline bool FindClosestParametricPoint(
 	for (std::size_t index = 0; index < curves.size(); ++index)
 		consider(curves[index], index);
 
-	SplineCurve const closing_curve(curves.back().EndPoint(), curves.front().p1);
-	consider(closing_curve, curves.size());
+	std::size_t first = 0;
+	for (std::size_t next = 1; next <= curves.size(); ++next) {
+		if (next != curves.size() && curves[next].type != SplineCurve::POINT)
+			continue;
+		SplineCurve const closing_curve(curves[next - 1].EndPoint(), curves[first].p1);
+		consider(closing_curve, curves.size(), ClosingSegment{first, next - 1});
+		first = next;
+	}
 	return found;
 }
 }
@@ -114,7 +139,8 @@ public:
 	std::vector<float> GetPointList(iterator curve);
 
 	/// Get t value and curve of the point closest to reference
-	void GetClosestParametricPoint(Vector2D reference, iterator& curve, float &t, Vector2D &point);
+	void GetClosestParametricPoint(Vector2D reference, iterator& curve, float &t, Vector2D &point,
+		std::optional<spline_detail::ClosingSegment> *closing = nullptr);
 	/// Get closest point on the curve to reference
 	Vector2D GetClosestPoint(Vector2D reference);
 	Vector2D GetClosestControlPoint(Vector2D reference);

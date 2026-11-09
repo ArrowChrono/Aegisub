@@ -406,7 +406,7 @@ bool VisualToolVectorClip::InitializeDrag(Feature *feature) {
 	}
 	else {
 		auto next = std::next(curve);
-		if (next != spline.end()) {
+		if (next != spline.end() && next->type != SplineCurve::POINT) {
 			if (curve->type == SplineCurve::POINT) {
 				next->p1 = next->EndPoint();
 				next->type = SplineCurve::POINT;
@@ -462,7 +462,8 @@ bool VisualToolVectorClip::InitializeHold() {
 		Vector2D pt;
 		Spline::iterator curve;
 		float t;
-		spline.GetClosestParametricPoint(mouse_pos, curve, t, pt);
+		std::optional<spline_detail::ClosingSegment> closing;
+		spline.GetClosestParametricPoint(mouse_pos, curve, t, pt, &closing);
 
 		// Convert line <-> bicubic
 		if (mode == 3) {
@@ -486,9 +487,9 @@ bool VisualToolVectorClip::InitializeHold() {
 
 			// Split the curve
 			if (curve == spline.end()) {
-				SplineCurve ct(spline.back().EndPoint(), spline.front().p1);
-				ct.p2 = ct.p1 * (1 - t) + ct.p2 * t;
-				spline.push_back(ct);
+				auto const edge = closing.value();
+				spline.insert(spline.begin() + edge.last + 1,
+							  SplineCurve(spline[edge.last].EndPoint(), pt));
 			}
 			else {
 				std::pair<SplineCurve, SplineCurve> split = curve->Split(t);
@@ -572,9 +573,14 @@ void VisualToolVectorClip::UpdateHold() {
 
 		// Control points
 		if (spline.size() > 1) {
-			SplineCurve &c0 = spline.back();
+			SplineCurve const& c0 = spline[spline.size() - 2];
+			Vector2D tangent(0, 0);
+			if (c0.type == SplineCurve::LINE)
+				tangent = c0.p2 - c0.p1;
+			else if (c0.type == SplineCurve::BICUBIC)
+				tangent = c0.p4 - c0.p3;
 			float len = (curve.p4 - curve.p1).Len();
-			curve.p2 = (c0.type == SplineCurve::LINE ? c0.p2 - c0.p1 : c0.p4 - c0.p3).Unit() * (0.25f * len) + curve.p1;
+			curve.p2 = tangent.Unit() * (0.25f * len) + curve.p1;
 		}
 		else
 			curve.p2 = curve.p1 * 0.75 + curve.p4 * 0.25;

@@ -54,7 +54,7 @@ Vector2D Spline::FromScript(Vector2D vec) const {
 
 void Spline::SetScale(int new_scale) {
 	raw_scale = new_scale;
-	scale = 1 << (raw_scale - 1);
+	scale = spline_detail::GetScaleFactor(raw_scale);
 }
 
 std::string Spline::EncodeToAss() const {
@@ -227,9 +227,12 @@ std::vector<float> Spline::GetPointList(iterator curve) {
 	return points;
 }
 
-void Spline::GetClosestParametricPoint(Vector2D reference, iterator &curve, float &t, Vector2D &pt) {
+void Spline::GetClosestParametricPoint(Vector2D reference, iterator& curve, float& t, Vector2D& pt,
+									   std::optional<spline_detail::ClosingSegment> *closing) {
 	curve = end();
 	t = 0.f;
+	if (closing)
+		closing->reset();
 	if (empty()) return;
 
 	size_t idx = 0;
@@ -239,7 +242,8 @@ void Spline::GetClosestParametricPoint(Vector2D reference, iterator &curve, floa
 		reference,
 		idx,
 		t,
-		pt);
+		pt,
+		closing);
 	curve = idx == curve_count ? end() : begin() + idx;
 }
 
