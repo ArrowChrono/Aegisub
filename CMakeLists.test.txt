@@ -402,6 +402,7 @@ if(GTEST_FOUND)
         tests/tests/visual_tool_drag_snapshot.cpp
         tests/tests/visual_edit_controller.cpp
         tests/tests/visual_tool_presentation.cpp
+        tests/tests/visual_tool_motion_track_shared.cpp
         tests/tests/visual_tool_roi_press_policy.cpp
         tests/tests/visual_tool_scale_policy.cpp
         tests/tests/visual_tool_shear_policy.cpp

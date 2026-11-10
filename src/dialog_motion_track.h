@@ -9,6 +9,7 @@
 #include "motion_track/similarity_backend.h"
 #include "motion_track/planar_backend.h"
 #include "motion_track/types.h"
+#include "visual_tool_motion_track_shared.h"
 
 #include <wx/checkbox.h>
 #include <wx/dialog.h>
@@ -55,13 +56,8 @@ class DialogMotionTrack final : public wxDialog {
 	/// Ghost positions of the last built apply plan, for the overlay tool:
 	/// one polyline per target line, knots in storage pixels. Built by the
 	/// "Plan preview" checkbox; cleared on Analyze/Apply.
-	struct PlanPreviewPoint {
-		float x = 0.f;
-		float y = 0.f;
-	};
-	struct PlanPreviewData {
-		std::vector<std::vector<PlanPreviewPoint>> paths;
-	};
+	using PlanPreviewPoint = aegisub::visual_motion_track::PlanPreviewPoint;
+	using PlanPreviewData = aegisub::visual_motion_track::PlanPreviewData;
 	std::shared_ptr<const PlanPreviewData> plan_preview_;
 
 	wxSpinCtrl *roi_x = nullptr;

@@ -895,6 +895,7 @@ set(AEGISUB_CORE_SOURCES
     src/visual_tool_cross_shared.cpp
     src/visual_tool_drag_snapshot.cpp
     src/visual_tool_measure_shared.cpp
+    src/visual_tool_motion_track_shared.cpp
     src/visual_tool_shear_policy.cpp
     src/visual_tool_shear_shared.cpp
     src/visual_tool_vector_clip_shared.cpp

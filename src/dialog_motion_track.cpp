@@ -873,30 +873,8 @@ void DialogMotionTrack::OnPreviewToggle(wxCommandEvent&) {
 		if (BuildApplyInput(input, targets)) {
 			auto plan = BuildApplyPlan(*context->GetCore().ass, targets, input);
 			if (plan.has_mutations()) {
-				auto data = std::make_shared<PlanPreviewData>();
-				double const scale_x =
-					double(last_identity.width) / std::max(1, input.script_width);
-				double const scale_y =
-					double(last_identity.height) / std::max(1, input.script_height);
-				for (auto const& pl : plan.lines) {
-					std::vector<PlanPreviewPoint> path;
-					for (auto const& part : pl.parts) {
-						if (!part.covered)
-							continue;
-						path.push_back(PlanPreviewPoint{
-							float(part.x0 * scale_x), float(part.y0 * scale_y)});
-					}
-					// Trailing knot of the last covered part closes the path.
-					for (auto it = pl.parts.rbegin(); it != pl.parts.rend(); ++it)
-						if (it->covered) {
-							path.push_back(PlanPreviewPoint{
-								float(it->x1 * scale_x), float(it->y1 * scale_y)});
-							break;
-						}
-					if (path.size() >= 2)
-						data->paths.push_back(std::move(path));
-				}
-				plan_preview_ = std::move(data);
+				plan_preview_ = aegisub::visual_motion_track::BuildPlanPreview(plan,
+																			   last_identity.width, last_identity.height, input.script_width, input.script_height);
 			}
 			else {
 				// Surface the reason in the stats box instead of popping a
