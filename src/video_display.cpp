@@ -586,8 +586,8 @@ void VideoDisplay::DrawVisualGuides(VideoOverlayDrawContext &draw_context) {
 		return;
 
 	VisualGuideOverlayStyle style;
-	style.line_colour = to_wx(OPT_GET("Colour/Visual Tools/Lines Primary")->GetColor());
-	style.highlight_colour = to_wx(OPT_GET("Colour/Visual Tools/Highlight Primary")->GetColor());
+	style.line_colour = OPT_GET("Colour/Visual Tools/Lines Primary")->GetColor();
+	style.highlight_colour = OPT_GET("Colour/Visual Tools/Highlight Primary")->GetColor();
 	style.label_font_size = OPT_GET("Tool/Visual/Coordinate Font Size")->GetInt();
 
 	VisualGuideOverlay overlay;

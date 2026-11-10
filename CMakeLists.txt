@@ -887,8 +887,13 @@ set(AEGISUB_CORE_SOURCES
     src/visual_ass_edit.cpp
     src/visual_edit_controller.cpp
     src/visual_feature_overlay.cpp
+    src/visual_guide_controller.cpp
+    src/visual_guide_interaction.cpp
+    src/visual_guide_model.cpp
+    src/visual_guide_overlay.cpp
     src/visual_tool_cross_shared.cpp
     src/visual_tool_drag_snapshot.cpp
+    src/visual_tool_measure_shared.cpp
     src/visual_tool_shear_policy.cpp
     src/visual_tool_shear_shared.cpp
     src/visual_tool_vector_clip_shared.cpp
@@ -1013,6 +1018,7 @@ set(AEGISUB_CORE_SOURCES
     src/automation/automation_mutation_journal.cpp
     src/automation/automation_runtime_journal.cpp
     src/automation/automation_script_collection.cpp
+    src/automation/automation_visual_guide_snapshot.cpp
     src/automation/local_script_references.cpp
     src/automation/karaoke_line_classifier.cpp
     src/automation/lua_source_tools.cpp
@@ -1349,10 +1355,6 @@ add_executable(Aegisub WIN32
     src/video_renderer_opengl_tile.cpp
     src/video_slider.cpp
     src/visual_feature.cpp
-    src/visual_guide_controller.cpp
-    src/visual_guide_interaction.cpp
-    src/visual_guide_model.cpp
-    src/visual_guide_overlay.cpp
     src/visual_tool.cpp
     src/visual_tool_clip.cpp
     src/visual_tool_cross.cpp

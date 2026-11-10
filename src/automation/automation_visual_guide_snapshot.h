@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+struct VisualGuide;
+
 namespace Automation4 {
 
 struct AutomationVisualGuidePoint {
@@ -37,6 +39,8 @@ struct AutomationVisualGuide {
 	double angle_horizontal_degrees = 0.0;
 	double angle_vertical_degrees = 0.0;
 };
+
+[[nodiscard]] AutomationVisualGuide ToAutomationVisualGuide(VisualGuide const& guide);
 
 // A value-only snapshot captured by the live UI host. It intentionally has no
 // wx, rendering, Lua, controller, or guide-model references.

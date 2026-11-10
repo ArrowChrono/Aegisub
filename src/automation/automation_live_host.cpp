@@ -13,6 +13,7 @@
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 #include "automation_live_host.h"
+#include "automation_visual_guide_snapshot.h"
 
 #include "../ass_attachment.h"
 #include "../ass_dialogue.h"
@@ -38,7 +39,6 @@
 #include "../ui_dispatch.h"
 #include "../video_controller.h"
 #include "../visual_guide_controller.h"
-#include "../visual_guide_model.h"
 
 #include <libaegisub/fs.h>
 #include <libaegisub/path.h>
@@ -52,32 +52,6 @@ namespace {
 agi::ConstContextCoreSession GetCore(agi::Context const* context)
 {
 	return context->GetCore();
-}
-
-// Stable Automation spellings. The C++ model only stores measurement
-// endpoints in script pixels; these strings keep the Lua schema extensible.
-constexpr char kAutomationVisualGuideKind[] = "measurement_segment";
-constexpr char kAutomationVisualGuideCoordinateSpace[] = "script";
-
-AutomationVisualGuide ToAutomationVisualGuide(VisualGuide const& guide)
-{
-	AutomationVisualGuide result;
-	result.id = guide.id;
-	result.kind = kAutomationVisualGuideKind;
-	result.coordinate_space = kAutomationVisualGuideCoordinateSpace;
-	result.first = { guide.first.x, guide.first.y };
-	result.second = { guide.second.x, guide.second.y };
-
-	auto const metrics = CalculateVisualGuideMetrics(guide);
-	result.delta_x = metrics.delta_x;
-	result.delta_y = metrics.delta_y;
-	result.distance = metrics.distance;
-	result.angle_degrees = metrics.angle_degrees;
-	result.shear_x = metrics.shear_x;
-	result.shear_y = metrics.shear_y;
-	result.angle_horizontal_degrees = metrics.angle_horizontal;
-	result.angle_vertical_degrees = metrics.angle_vertical;
-	return result;
 }
 
 class LiveAutomationMediaState final : public AutomationMediaState {

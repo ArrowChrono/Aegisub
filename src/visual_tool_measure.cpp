@@ -1,4 +1,5 @@
 #include "visual_tool_measure.h"
+#include "visual_tool_measure_shared.h"
 
 #include "async_video_provider.h"
 #include "auto4_base.h"
@@ -35,7 +36,6 @@
 namespace {
 // Canvas pixels. The perspective hit tests multiply these by UiScale() so
 // handles stay grabbable on high-DPI screens.
-constexpr float kHandleRadius = 3.0f;
 constexpr float kHitTolerance = 5.0f;
 constexpr auto kPerspectiveFitTextOption = "Tool/Visual/Perspective/Fit Text";
 constexpr auto kPerspectiveBestFitOption = "Tool/Visual/Perspective/Best Fit";
@@ -46,7 +46,7 @@ constexpr auto kPerspectiveShapeToleranceOption = "Tool/Visual/Perspective/Shape
 // written digits may add. How far the reachable shape sits from the drawn one
 // is not budgeted at all -- the nearest shape is always returned and its
 // shortfall is drawn by the preview.
-constexpr double kPerspectiveMaxError = 0.1;
+constexpr double kPerspectiveMaxError = aegisub::visual_measure::PerspectiveMaxError;
 
 VisualGuidePoint ToGuidePoint(perspective::Vec2 point) {
 	return {point.x, point.y};
@@ -70,11 +70,11 @@ VisualGuideOverlayStyle MakeOverlayStyle(
 	agi::OptionValue const* line_colour,
 	agi::OptionValue const* highlight_colour) {
 	VisualGuideOverlayStyle style;
-	style.line_colour = to_wx(line_colour->GetColor());
-	style.highlight_colour = to_wx(highlight_colour->GetColor());
+	style.line_colour = line_colour->GetColor();
+	style.highlight_colour = highlight_colour->GetColor();
 	// Fixed white label border for contrast; the selected state borrows the
 	// highlight colour instead. Not user-configurable to avoid a new option.
-	style.label_border_colour = wxColour(255, 255, 255);
+	style.label_border_colour = {255, 255, 255};
 	style.label_font_size = OPT_GET("Tool/Visual/Coordinate Font Size")->GetInt();
 	return style;
 }
@@ -85,364 +85,13 @@ wxString MaximumGuidesStatusMessage() {
 		static_cast<int>(VisualGuideController::MaximumGuideCount));
 }
 
-// The pure perspective modules must stay wx-free, so user-facing strings are
-// localized here at the UI boundary instead of inside Describe* themselves.
-std::string LocalizedGeometryError(perspective::GeometryError error) {
-	using perspective::GeometryError;
-	switch (error) {
-		case GeometryError::None: return {};
-		case GeometryError::NonFinite:
-			return from_wx(_("coordinate is not finite"));
-		case GeometryError::CoordinateOutOfRange:
-			return from_wx(_("coordinate exceeds the supported range"));
-		case GeometryError::DuplicatePoint:
-			return from_wx(_("quad contains duplicate points"));
-		case GeometryError::EdgeTooShort:
-			return from_wx(_("quad edge is too short"));
-		case GeometryError::AreaTooSmall:
-			return from_wx(_("quad area is too small"));
-		case GeometryError::SelfIntersecting:
-			return from_wx(_("quad is self-intersecting"));
-		case GeometryError::WrongWinding:
-			return from_wx(_("quad winding must be TL, TR, BR, BL"));
-		case GeometryError::NonConvex:
-			return from_wx(_("quad must be strictly convex"));
-		case GeometryError::InvalidDomain:
-			return from_wx(_("geometry domain is invalid"));
-		case GeometryError::SingularHomography:
-			return from_wx(_("homography is singular"));
-		case GeometryError::ProjectionDomain:
-			return from_wx(_("projection denominator crosses or approaches zero"));
-	}
-	return from_wx(_("unknown geometry error"));
-}
-
-std::string LocalizedAssStateError(perspective::AssStateError error) {
-	using perspective::AssStateError;
-	switch (error) {
-		case AssStateError::None: return {};
-		case AssStateError::InvalidInput:
-			return from_wx(_("Perspective ASS state input is incomplete"));
-		case AssStateError::InvalidPlayResolution:
-			return from_wx(_("Perspective PlayRes is invalid"));
-		case AssStateError::MissingEventStyle:
-			return from_wx(_("the dialogue event style cannot be resolved"));
-		case AssStateError::MissingResetStyle:
-			return from_wx(_("a Perspective-relevant reset style cannot be resolved"));
-		case AssStateError::InvalidCaptureTime:
-			return from_wx(_("the capture time is outside the dialogue event"));
-		case AssStateError::InvalidGeometryParameter:
-			return from_wx(_("a Perspective geometry override is invalid"));
-		case AssStateError::InvalidAlignment:
-			return from_wx(_("the effective ASS alignment is invalid"));
-		case AssStateError::NonFiniteStyle:
-			return from_wx(_("the effective ASS style contains invalid geometry"));
-		case AssStateError::MixedGeometryRuns:
-			return from_wx(_("the dialogue has mixed Perspective geometry runs"));
-	}
-	return from_wx(_("unknown Perspective ASS state error"));
-}
-
-std::string LocalizedAssApplyBlocker(perspective::AssApplyBlocker blocker) {
-	using perspective::AssApplyBlocker;
-	switch (blocker) {
-		case AssApplyBlocker::None: return {};
-		case AssApplyBlocker::UnsupportedMove:
-			return from_wx(_("Perspective Apply does not support \\move"));
-		case AssApplyBlocker::UnsupportedGeometryAnimation:
-			return from_wx(_("Perspective Apply does not support animated geometry"));
-		case AssApplyBlocker::UnsupportedNamedReset:
-			return from_wx(_("Perspective Apply does not support named style resets"));
-	}
-	return from_wx(_("unknown Perspective Apply blocker"));
-}
-
-std::string LocalizedAssBoundsError(
-	perspective::AssBoundsError error,
-	std::string const& font = {}) {
-	using perspective::AssBoundsError;
-	switch (error) {
-		case AssBoundsError::None: return {};
-		case AssBoundsError::InvalidInput:
-			return from_wx(_("Perspective ASS bounds input is incomplete"));
-		case AssBoundsError::EmptyGeometry:
-			return from_wx(_("the dialogue has no visible geometry"));
-		case AssBoundsError::FontUnavailable:
-			// The face travels with the error so the user learns which font to
-			// fix rather than that some font somewhere went unmeasured.
-			return font.empty()
-					   ? from_wx(_("renderer-compatible text font bounds are unavailable"))
-					   : from_wx(fmt_tl(
-							 "renderer-compatible bounds are unavailable for the font %s",
-							 to_wx(font)));
-		case AssBoundsError::UnsupportedAutomaticWrap:
-			return from_wx(_("automatic text wrapping does not have stable Perspective base bounds; use explicit line breaks or \\q2"));
-		case AssBoundsError::MixedGeometryRuns:
-			return from_wx(_("mixed text and drawing runs do not have stable base bounds"));
-		case AssBoundsError::UnsupportedDrawingLayout:
-			return from_wx(_("multiple ASS drawing runs require unsupported glyph layout"));
-		case AssBoundsError::UnsupportedDrawingCommand:
-			return from_wx(_("ASS B-spline drawing metrics are not supported"));
-		case AssBoundsError::DrawingStateMismatch:
-			return from_wx(_("the parsed drawing runs do not match the evaluated ASS state"));
-		case AssBoundsError::InvalidDrawingSyntax:
-			return from_wx(_("the ASS drawing contains invalid syntax"));
-		case AssBoundsError::InvalidDrawingGeometry:
-			return from_wx(_("the ASS drawing does not produce measurable geometry"));
-		case AssBoundsError::InvalidDrawingBounds:
-			return from_wx(_("the ASS drawing bounds are degenerate or outside the supported range"));
-	}
-	return from_wx(_("unknown Perspective ASS bounds error"));
-}
-
-std::string LocalizedForwardError(perspective::ForwardError error) {
-	using perspective::ForwardError;
-	switch (error) {
-		case ForwardError::None: return {};
-		case ForwardError::UnsupportedMixedBounds:
-			return from_wx(_("mixed text and drawing runs do not have a stable base bounds"));
-		case ForwardError::UnsupportedDynamicBounds:
-			return from_wx(_("dynamic geometry has no single base bounds"));
-		case ForwardError::UnsupportedFontBounds:
-			return from_wx(_("font metrics are unavailable for base bounds"));
-		case ForwardError::InvalidBounds:
-			return from_wx(_("base bounds are invalid"));
-		case ForwardError::InvalidResolution:
-			return from_wx(_("PlayRes/LayoutRes/video resolution is invalid"));
-		case ForwardError::InvalidEventTime:
-			return from_wx(_("event-relative evaluation time is invalid"));
-		case ForwardError::InvalidAlignment:
-			return from_wx(_("alignment must be in the range 1..9"));
-		case ForwardError::NonFiniteState:
-			return from_wx(_("evaluated ASS state is not finite"));
-		case ForwardError::TransformParameterOutOfRange:
-			return from_wx(_("transform parameter exceeds the supported range"));
-		case ForwardError::DegenerateScale:
-			return from_wx(_("scale must not be zero"));
-		case ForwardError::MirroredTransform:
-			return from_wx(_("mirrored transforms are not supported for ordered quads"));
-		case ForwardError::SingularTransform:
-			return from_wx(_("shear transform is singular"));
-		case ForwardError::ProjectionDomain:
-			return from_wx(_("perspective denominator crosses or approaches zero"));
-		case ForwardError::InvalidQuad:
-			return from_wx(_("forward transform produced an invalid quad"));
-		case ForwardError::SingularHomography:
-			return from_wx(_("forward homography is singular"));
-	}
-	return from_wx(_("unknown forward error"));
-}
-
-std::string LocalizedSolverError(perspective::SolverError error) {
-	using perspective::SolverError;
-	switch (error) {
-		case SolverError::None: return {};
-		case SolverError::InvalidSource:
-			return from_wx(_("source Perspective state is invalid"));
-		case SolverError::InvalidTarget:
-			return from_wx(_("target Perspective quad is invalid"));
-		case SolverError::InvalidOutputMapping:
-			return from_wx(_("output coordinate mapping is invalid"));
-		case SolverError::InvalidErrorBudget:
-			return from_wx(_("Perspective error budget is invalid"));
-		case SolverError::NoFeasibleCandidate:
-			return from_wx(_("no quantized Perspective tag candidate meets the error budget"));
-	}
-	return from_wx(_("unknown Perspective solver error"));
-}
-
-std::string LocalizedRewriteError(perspective::RewriteError error) {
-	using perspective::RewriteError;
-	switch (error) {
-		case RewriteError::None: return {};
-		case RewriteError::InvalidInput:
-			return from_wx(_("Perspective ASS rewrite input is invalid"));
-		case RewriteError::InvalidTarget:
-			return from_wx(_("Perspective ASS rewrite target is invalid"));
-		case RewriteError::UnsupportedMove:
-			return from_wx(_("Perspective ASS rewrite does not support \\move"));
-		case RewriteError::UnsupportedGeometryAnimation:
-			return from_wx(_("Perspective ASS rewrite does not support animated geometry"));
-		case RewriteError::UnsupportedNamedReset:
-			return from_wx(_("Perspective ASS rewrite does not support named style resets"));
-		case RewriteError::InvalidGeometryParameter:
-			return from_wx(_("Perspective ASS rewrite contains invalid geometry"));
-	}
-	return from_wx(_("unknown Perspective ASS rewrite error"));
-}
-
-std::string LocalizedResidualError(perspective::ResidualError error) {
-	using perspective::ResidualError;
-	switch (error) {
-		case ResidualError::None: return {};
-		case ResidualError::InvalidCandidate:
-			return from_wx(_("candidate Perspective state is invalid"));
-		case ResidualError::InvalidTarget:
-			return from_wx(_("target Perspective quad is invalid"));
-		case ResidualError::InvalidOutputMapping:
-			return from_wx(_("output coordinate mapping is invalid"));
-		case ResidualError::ProjectionDomain:
-			return from_wx(_("Perspective residual sample is outside the projection domain"));
-	}
-	return from_wx(_("unknown Perspective residual error"));
-}
-
-// Gesture rejections used to be discarded at every call site, which is what
-// made the quad tool feel like it silently ignored input. These are phrased for
-// someone holding the mouse button, not for a log.
-std::string LocalizedQuadEditError(perspective::PerspectiveQuadEditError error) {
-	using perspective::PerspectiveQuadEditError;
-	switch (error) {
-		case PerspectiveQuadEditError::None: return {};
-		case PerspectiveQuadEditError::NotBound:
-			return from_wx(_("The Perspective quad is not bound to a line."));
-		case PerspectiveQuadEditError::NoTarget:
-			return from_wx(_("There is no Perspective target to edit."));
-		case PerspectiveQuadEditError::NoCurrentQuad:
-			return from_wx(_("The line's current Perspective quad is unavailable."));
-		case PerspectiveQuadEditError::ReadOnly:
-			return from_wx(_("The Perspective target is read-only."));
-		case PerspectiveQuadEditError::InvalidSource:
-			return from_wx(_("The Perspective source geometry is invalid."));
-		case PerspectiveQuadEditError::InvalidHandle:
-			return from_wx(_("That Perspective handle cannot be dragged."));
-		case PerspectiveQuadEditError::GestureAlreadyActive:
-			return from_wx(_("Another Perspective drag is already in progress."));
-		case PerspectiveQuadEditError::NoGesture:
-			return from_wx(_("No Perspective drag is in progress."));
-		case PerspectiveQuadEditError::InvalidTolerance:
-			return from_wx(_("The Perspective hit tolerance is invalid."));
-		case PerspectiveQuadEditError::NonFinitePointer:
-			return from_wx(_("The pointer position is outside the coordinate range."));
-		case PerspectiveQuadEditError::CoordinateOutOfRange:
-			return from_wx(_("The Perspective quad would leave the coordinate range."));
-	}
-	return from_wx(_("unknown Perspective quad edit error"));
-}
-
-perspective::PerspectiveEdgeAnchor EdgeAnchorForHandle(
-	perspective::PerspectiveQuadHandle handle) {
-	using perspective::PerspectiveEdgeAnchor;
-	using perspective::PerspectiveQuadHandle;
-	switch (handle) {
-		case PerspectiveQuadHandle::EdgeTop: return PerspectiveEdgeAnchor::Top;
-		case PerspectiveQuadHandle::EdgeRight: return PerspectiveEdgeAnchor::Right;
-		case PerspectiveQuadHandle::EdgeBottom: return PerspectiveEdgeAnchor::Bottom;
-		case PerspectiveQuadHandle::EdgeLeft: return PerspectiveEdgeAnchor::Left;
-		default: return PerspectiveEdgeAnchor::None;
-	}
-}
-
-std::string DescribeEdgeAnchor(perspective::PerspectiveEdgeAnchor anchor) {
-	using perspective::PerspectiveEdgeAnchor;
-	switch (anchor) {
-		case PerspectiveEdgeAnchor::None:
-			return from_wx(_(
-				"No Perspective edge is held; opposite edges are averaged. "
-				"Alt+click an edge to hold it."));
-		case PerspectiveEdgeAnchor::Top:
-			return from_wx(_("Holding the top edge; the bottom edge absorbs the difference."));
-		case PerspectiveEdgeAnchor::Right:
-			return from_wx(_("Holding the right edge; the left edge absorbs the difference."));
-		case PerspectiveEdgeAnchor::Bottom:
-			return from_wx(_("Holding the bottom edge; the top edge absorbs the difference."));
-		case PerspectiveEdgeAnchor::Left:
-			return from_wx(_("Holding the left edge; the right edge absorbs the difference."));
-	}
-	return {};
-}
-
-std::string LocalizedPlanError(perspective::PerspectivePlanError error) {
-	using perspective::PerspectivePlanError;
-	switch (error) {
-		case PerspectivePlanError::None: return {};
-		case PerspectivePlanError::InvalidInput:
-			return from_wx(_("Perspective plan input is incomplete"));
-		case PerspectivePlanError::InvalidContext:
-			return from_wx(_("Perspective capture context is invalid"));
-		case PerspectivePlanError::SourceNotInFile:
-			return from_wx(_("Perspective source is not a live event in this file"));
-		case PerspectivePlanError::SourceNotFound:
-			return from_wx(_("Perspective source event no longer exists"));
-		case PerspectivePlanError::DuplicateSourceId:
-			return from_wx(_("Perspective source event Id is not unique"));
-		case PerspectivePlanError::StaleSource:
-			return from_wx(_("Perspective source or capture context changed"));
-		case PerspectivePlanError::InvalidTarget:
-			return from_wx(_("Perspective target quad is invalid"));
-		case PerspectivePlanError::InvalidErrorBudget:
-			return from_wx(_("Perspective output error budget is invalid"));
-		case PerspectivePlanError::StateEvaluationFailed:
-			return from_wx(_("Perspective source state could not be evaluated"));
-		case PerspectivePlanError::ApplyBlocked:
-			return from_wx(_("Perspective Apply is blocked for this source"));
-		case PerspectivePlanError::BoundsEvaluationFailed:
-			return from_wx(_("Perspective source bounds could not be evaluated"));
-		case PerspectivePlanError::ForwardEvaluationFailed:
-			return from_wx(_("Perspective source transform could not be evaluated"));
-		case PerspectivePlanError::SolverFailed:
-			return from_wx(_("Perspective tags could not represent the target"));
-		case PerspectivePlanError::RewriteFailed:
-			return from_wx(_("Perspective tags could not be rewritten"));
-		case PerspectivePlanError::NoChange:
-			return from_wx(_("Perspective target requires no ASS change"));
-		case PerspectivePlanError::StagedStateEvaluationFailed:
-			return from_wx(_("rewritten Perspective state could not be evaluated"));
-		case PerspectivePlanError::StagedApplyBlocked:
-			return from_wx(_("rewritten Perspective state is not applyable"));
-		case PerspectivePlanError::StagedScaleMismatch:
-			return from_wx(_("rewritten Perspective state changed the preserved text scale"));
-		case PerspectivePlanError::StagedRepresentationMismatch:
-			return from_wx(_("rewritten Perspective state violates the selected representation policy"));
-		case PerspectivePlanError::StagedBoundsEvaluationFailed:
-			return from_wx(_("rewritten Perspective bounds could not be evaluated"));
-		case PerspectivePlanError::StagedBoundsMismatch:
-			return from_wx(_("rewritten Perspective source bounds changed"));
-		case PerspectivePlanError::StagedForwardEvaluationFailed:
-			return from_wx(_("rewritten Perspective transform could not be evaluated"));
-		case PerspectivePlanError::ResidualFailed:
-			return from_wx(_("rewritten Perspective residual could not be measured"));
-		case PerspectivePlanError::ResidualExceeded:
-			return from_wx(_("rewritten Perspective output exceeds the error budget"));
-	}
-	return from_wx(_("unknown Perspective mutation plan error"));
-}
-
-std::string DescribePerspectiveFailure(
-	perspective::PerspectivePlanDiagnostic const& diagnostic) {
-	using perspective::PerspectivePlanError;
-	switch (diagnostic.error) {
-		case PerspectivePlanError::InvalidTarget:
-			return LocalizedGeometryError(diagnostic.geometry_error);
-		case PerspectivePlanError::StateEvaluationFailed:
-		case PerspectivePlanError::StagedStateEvaluationFailed:
-			return LocalizedAssStateError(diagnostic.state_error);
-		case PerspectivePlanError::ApplyBlocked:
-		case PerspectivePlanError::StagedApplyBlocked:
-			return LocalizedAssApplyBlocker(diagnostic.apply_blocker);
-		case PerspectivePlanError::BoundsEvaluationFailed:
-		case PerspectivePlanError::StagedBoundsEvaluationFailed:
-			return LocalizedAssBoundsError(
-				diagnostic.bounds_error, diagnostic.bounds_font);
-		case PerspectivePlanError::ForwardEvaluationFailed:
-		case PerspectivePlanError::StagedForwardEvaluationFailed:
-			return LocalizedForwardError(diagnostic.forward_error);
-		case PerspectivePlanError::SolverFailed:
-			return LocalizedSolverError(diagnostic.solver_error);
-		case PerspectivePlanError::RewriteFailed:
-			return LocalizedRewriteError(diagnostic.rewrite_error);
-		case PerspectivePlanError::ResidualFailed:
-			return LocalizedResidualError(diagnostic.residual_error);
-		default:
-			return LocalizedPlanError(diagnostic.error);
-	}
-}
-
-// Two decimals, one px unit: these numbers exist to be dialled against an
-// option value, not admired.
-wxString FormatPx(double value) {
-	return wxString::Format(wxT("%.2f"), value);
-}
+using aegisub::visual_measure::DescribeEdgeAnchor;
+using aegisub::visual_measure::DescribePerspectiveFailure;
+using aegisub::visual_measure::EdgeAnchorForHandle;
+using aegisub::visual_measure::LocalizedAssApplyBlocker;
+using aegisub::visual_measure::LocalizedGeometryError;
+using aegisub::visual_measure::LocalizedPlanError;
+using aegisub::visual_measure::LocalizedQuadEditError;
 }
 
 VisualToolMeasure::VisualToolMeasure(VideoDisplay *parent, agi::Context *context)
@@ -692,49 +341,8 @@ std::optional<perspective::Vec2> VisualToolMeasure::CurrentPerspectivePoint() co
 }
 
 std::string VisualToolMeasure::UnreachableTargetDiagnostic() const {
-	// The solver reports the stage every candidate died at, so the message can
-	// name the option that actually owns that stage instead of guessing from
-	// the current flags. Models are never refused for distance anymore -- the
-	// solver always returns the best candidate and the preview shows where it
-	// lands -- so the only reachable-shape refusals left are the representation
-	// policy and the digits. When the closest digits rejection was measurable,
-	// its numbers ride along, so the option can be dialled instead of nudged.
-	auto const& metrics = perspective_no_feasible_metrics;
-	bool const quotable = metrics && metrics->best_error > metrics->budget;
-	switch (perspective_no_feasible_reason) {
-		case perspective::NoFeasibleReason::RepresentationPolicy:
-			return from_wx(_(
-				"The line already uses Perspective tags outside the Fax + Frz "
-				"Only subset, and they cannot be kept while reaching this "
-				"target. Turn the Fax + Frz Only option off to reach it."));
-		case perspective::NoFeasibleReason::EdgeAnchor:
-			return from_wx(_(
-				"No candidate can hold the anchored edge where it was drawn "
-				"while reaching this target. Alt+click the anchored edge again "
-				"to release it, or adjust the target."));
-		case perspective::NoFeasibleReason::ModelResidual:
-			return from_wx(_(
-				"No representable Perspective shape could be projected for "
-				"this target."));
-		case perspective::NoFeasibleReason::Quantization:
-			if (quotable)
-				return from_wx(fmt_tl(
-					"The tags can reach this shape, but not with only %d "
-					"decimal places: the written digits land %s px from the "
-					"shape they must reproduce, over a %s px budget. Raise "
-					"the Decimal Places option.",
-					perspective_decimal_places,
-					FormatPx(metrics->best_error), FormatPx(metrics->budget)));
-			return from_wx(_(
-				"The tags can reach this shape, but not enough decimal places "
-				"are allowed to write them down accurately. Raise the Decimal "
-				"Places option."));
-		case perspective::NoFeasibleReason::None:
-			break;
-	}
-	return from_wx(_(
-		"No representable Perspective shape could be projected for this "
-		"target."));
+	return aegisub::visual_measure::UnreachableTargetDiagnostic(perspective_no_feasible_reason,
+																perspective_no_feasible_metrics, perspective_decimal_places);
 }
 
 void VisualToolMeasure::ClearPerspectivePreview() {
@@ -773,24 +381,9 @@ void VisualToolMeasure::UpdatePerspectivePreview() {
 	if (!context)
 		return;
 
-	perspective::SolverInput input;
-	input.target = *target;
-	input.output_mapping = context->output_mapping;
-	input.max_error = kPerspectiveMaxError;
-	input.shape_tolerance = perspective_shape_tolerance;
-	input.best_fit = best_fit;
-	input.scale_policy = fit_text_to_target
-		? perspective::PerspectiveScalePolicy::Fit
-		: perspective::PerspectiveScalePolicy::Preserve;
-	input.representation_policy = fax_frz_only
-		? perspective::PerspectiveRepresentationPolicy::FaxFrzOnly
-		: perspective::PerspectiveRepresentationPolicy::Automatic;
-	input.edge_anchor = perspective_edge_anchor;
-	input.maximum_decimals = perspective_decimal_places;
-
-	perspective::PreparePerspectiveSolverInput(*perspective_source, input);
-	auto const solved = perspective::SolvePerspectiveTags(input);
-	if (!solved) {
+	auto const solved = aegisub::visual_measure::SolvePerspectivePreview(*perspective_source, *target,
+																		 context->output_mapping, {.fit_text = fit_text_to_target, .best_fit = best_fit, .fax_frz_only = fax_frz_only, .decimal_places = perspective_decimal_places, .shape_tolerance = perspective_shape_tolerance, .edge_anchor = perspective_edge_anchor});
+	if (!solved.feasible) {
 		// Mirror the verdict even when the diagnostic slot is owned elsewhere:
 		// the Apply gate only cares whether the target is reachable. Other
 		// solver errors describe the input, not reachability, so stay NotReady.
@@ -809,18 +402,7 @@ void VisualToolMeasure::UpdatePerspectivePreview() {
 	// A snapped result still applies fine, so feasibility does not depend on it.
 	perspective_solve_state = PerspectiveSolveState::Feasible;
 
-	// The solver measures its own residual exactly this way, so this is the
-	// shape it believes it reached rather than an independent estimate. Apply
-	// re-derives it through a staged file, which can differ once text extents
-	// change under Fit; that is a preview, not a promise. Stored whether or
-	// not the candidate snapped: under Preserve the candidate's own target is
-	// area-normalized, so a "not snapped" result can still sit far from the
-	// drawn quad, and the drawn preview is the only honest report of that.
-	auto const forward = perspective::ForwardQuad(
-		perspective_source->forward_input, solved.candidate->state);
-	if (!forward)
-		return;
-	perspective_preview = forward.quad;
+	perspective_preview = solved.reachable;
 }
 
 void VisualToolMeasure::BeginPerspectiveInteraction() {
@@ -1201,58 +783,7 @@ void VisualToolMeasure::ApplyPerspective() {
 		executed.line,
 		changed,
 		aegisub::LocalCommitFeedback::ObserveSelf);
-	// The commit rebinds the target to the just-applied geometry, so an
-	// immediate second Apply is intentionally a no-op; say so instead of
-	// silently greying the button.
-	if (planned.plan->Snapped()) {
-		// The user asked for a shape the tags cannot express and got the nearest
-		// one. Not saying so would leave them thinking the drag was applied
-		// exactly, then wondering why the result drifted from their reference.
-		c->ShowStatus(from_wx(fmt_tl(
-			"Perspective target applied, snapped %.2f px to the nearest shape "
-			"the tags can represent.",
-			planned.plan->MaxError())));
-		return;
-	}
-	// A plan the solver called exact can still land visibly off the drawn quad:
-	// under Preserve the candidates aim at the area-normalized quad, so the
-	// applied shape keeps the size the pinned scale produces rather than the
-	// size that was drawn. The staged output quad is the authority on what was
-	// actually written, so measure that against the drawn corners, in output
-	// pixels like every other solver number.
-	double const drawn_deviation = [&, mapping = current_context->output_mapping]() {
-		double worst = 0.0;
-		auto const& result = planned.plan->ResultQuad();
-		for (std::size_t index = 0; index < result.size(); ++index) {
-			worst = std::max(worst, std::hypot(
-				(result[index].x - drawn_target[index].x) * mapping.scale_x,
-				(result[index].y - drawn_target[index].y) * mapping.scale_y));
-		}
-		return worst;
-	}();
-	if (drawn_deviation > kPerspectiveMaxError) {
-		auto const& result = planned.plan->ResultQuad();
-		auto const drawn_area = std::abs(perspective::SignedArea(drawn_target));
-		auto const result_area = std::abs(perspective::SignedArea(result));
-		if (drawn_area > 0.0 && result_area > 0.0) {
-			auto const scale_percent = std::sqrt(result_area / drawn_area) * 100.0;
-			if (std::abs(scale_percent - 100.0) > 1.0) {
-				c->ShowStatus(from_wx(fmt_tl(
-					"Perspective target applied; the active policies rescale "
-					"it to %s%% of the drawn size, landing up to %s px away.",
-					FormatPx(scale_percent), FormatPx(drawn_deviation))));
-				return;
-			}
-		}
-		c->ShowStatus(from_wx(fmt_tl(
-			"Perspective target applied; the written shape sits up to %s px "
-			"from the drawn target.",
-			FormatPx(drawn_deviation))));
-		return;
-	}
-	c->ShowStatus(from_wx(_(
-		"Perspective target applied. Adjust or redraw the target to apply "
-		"again.")));
+	c->ShowStatus(aegisub::visual_measure::DescribePerspectiveApplySuccess(*planned.plan, drawn_target, *current_context));
 }
 
 void VisualToolMeasure::ClearPerspectiveBinding() {
@@ -1509,251 +1040,31 @@ bool VisualToolMeasure::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude
 }
 
 void VisualToolMeasure::DrawHandles(VideoOverlayDrawContext& context, VisualGuide const& guide) {
-	auto const viewport = parent->GetVisualGuideViewport();
-	if (!IsVisualGuideViewportMappable(viewport))
-		return;
-
-	auto const style = MakeOverlayStyle(line_color_primary_opt, highlight_color_primary_opt);
-	auto const draw_handle = [&](VisualGuidePoint point) {
-		auto const canvas_point = VisualGuideToCanvas(point, viewport);
-		context.SetLineColour(from_wx(style.outline_colour), 0.95f, 2);
-		context.SetFillColour(from_wx(style.outline_colour), 0.85f);
-		context.DrawCircle(canvas_point, kHandleRadius + 1.0f);
-		context.SetLineColour(from_wx(style.highlight_colour), 1.0f, 1);
-		context.SetFillColour(from_wx(style.highlight_colour), 0.85f);
-		context.DrawCircle(canvas_point, kHandleRadius);
-	};
-
-	draw_handle(guide.first);
-	draw_handle(guide.second);
-}
-
-void VisualToolMeasure::DrawPerspectivePreview(
-	VideoOverlayDrawContext& context, perspective::Quad const& quad) {
-	auto const& viewport = parent->GetVisualGuideViewport();
-	if (!IsVisualGuideViewportMappable(viewport))
-		return;
-
-	std::array<Vector2D, 4> corners;
-	for (std::size_t index = 0; index < quad.size(); ++index)
-		corners[index] = VisualGuideToCanvas(ToGuidePoint(quad[index]), viewport);
-
-	// A result that lands where the target already is would only add dash
-	// noise over the solid outline. Comparing in canvas pixels keeps the
-	// threshold zoom-independent: rounding residue stays hidden at every
-	// zoom, while a Preserve size drift grows with the picture exactly as
-	// the user sees it.
-	if (auto const& preview_target = perspective_state.Target()) {
-		double const hide_threshold = UiScale();
-		bool const coincident = std::all_of(
-			corners.begin(), corners.end(), [&, index = 0](Vector2D const& corner) mutable {
-				auto const drawn = VisualGuideToCanvas(
-					ToGuidePoint((*preview_target)[index++]), viewport);
-				return (corner - drawn).Len() <= hide_threshold;
-			});
-		if (coincident)
-			return;
-	}
-
-	// Dashed, so this reads as a report rather than a second draggable quad.
-	// The draw context has no dash primitive, so the segments are stepped by
-	// hand in canvas pixels.
-	double const dash = 6.0 * UiScale();
-	perspective::Rect const visible{
-		.left = -dash, .top = -dash, .right = canvas_size.X() + dash, .bottom = canvas_size.Y() + dash};
-	auto const stroke = [&](Vector2D from, Vector2D to) {
-		auto const range = perspective::ClipSegmentRange(
-			{.x = from.X(), .y = from.Y()}, {.x = to.X(), .y = to.Y()}, visible);
-		if (!range)
-			return;
-		Vector2D const delta = to - from;
-		double const length = std::hypot(delta.X(), delta.Y());
-		if (!(length > 0.0))
-			return;
-		// Keep the dash phase anchored at the original endpoint while skipping
-		// all offscreen segments, even at extreme zoom or source coordinates.
-		double const begin = std::floor((*range)[0] * length / (dash * 2.0)) * dash * 2.0;
-		double const limit = (*range)[1] * length;
-		for (double at = begin; at < limit; at += dash * 2.0) {
-			double const end = std::min(at + dash, length);
-			context.DrawLine(
-				from + delta * (at / length), from + delta * (end / length));
-		}
-	};
-
-	// Deliberately not the invalid colour: that one means Apply is impossible,
-	// and a snapped result applies fine, it just lands slightly off. Reusing it
-	// here would teach the user to ignore it.
-	context.SetLineColour(
-		highlight_color_secondary_opt->GetColor(), 0.9f, 2);
-	for (std::size_t index = 0; index < corners.size(); ++index)
-		stroke(corners[index], corners[(index + 1) % corners.size()]);
-
-	// Tie each preview corner to the target corner it stands in for, so the
-	// direction and size of the shortfall is readable at a glance. That is the
-	// whole point when only one or two edges have a reference in the video.
-	if (auto const& target = perspective_state.Target()) {
-		context.SetLineColour(
-			highlight_color_secondary_opt->GetColor(), 0.45f, 1);
-		for (std::size_t index = 0; index < corners.size(); ++index) {
-			context.DrawLine(
-				VisualGuideToCanvas(ToGuidePoint((*target)[index]), viewport),
-				corners[index]);
-		}
-	}
+	aegisub::visual_measure::DrawGuideHandles(context, parent->GetVisualGuideViewport(), guide,
+											  MakeOverlayStyle(line_color_primary_opt, highlight_color_primary_opt));
 }
 
 void VisualToolMeasure::DrawPerspective(VideoOverlayDrawContext& context) {
-	auto const* target = perspective_creation
-		? &perspective_creation->preview
-		: (perspective_state.Target() ? &*perspective_state.Target() : nullptr);
-	auto const& viewport = parent->GetVisualGuideViewport();
-	if (!IsVisualGuideViewportMappable(viewport))
-		return;
-	float const ui_scale = static_cast<float>(UiScale());
-
-	// The unmodified subtitle quad is the reference the target is edited
-	// against: draw it faintly whenever the target has moved away from it.
-	if (auto const& current = perspective_state.Current();
-		current
-		&& (perspective_state.IsEditable() || !target)) {
-		bool const differs = !target || perspective_state.IsModified();
-		if (differs) {
-			std::array<Vector2D, 5> current_outline;
-			for (std::size_t index = 0; index < current->size(); ++index)
-				current_outline[index] = VisualGuideToCanvas(
-					ToGuidePoint((*current)[index]), viewport);
-			current_outline.back() = current_outline.front();
-			context.SetLineColour(
-				line_color_secondary_opt->GetColor(), 0.4f, 1);
-			context.DrawLineStrip(current_outline.data(), current_outline.size());
-		}
-	}
-	std::string const diagnostic = LocalizedDiagnostic();
-	if (!diagnostic.empty()) {
-		VideoOverlayTextStyle style;
-		style.size = static_cast<int>(
-			OPT_GET("Tool/Visual/Coordinate Font Size")->GetInt() * ui_scale);
-		style.colour = invalid_line_color_opt->GetColor();
-		style.outline = true;
-		context.DrawText(
-			diagnostic,
-			static_cast<int>(viewport.canvas_x) + 8,
-			static_cast<int>(viewport.canvas_y) + 8,
-			style);
-	}
-
-	if (!target)
-		return;
-
-	std::array<Vector2D, 5> outline;
-	for (std::size_t index = 0; index < target->size(); ++index)
-		outline[index] = VisualGuideToCanvas(ToGuidePoint((*target)[index]), viewport);
-	outline.back() = outline.front();
-
 	auto const preview_validation = perspective_creation
-		? std::optional<perspective::GeometryValidation>(
-			perspective::ValidateQuad(perspective_creation->preview))
-		: std::nullopt;
-	auto const& state_validation = perspective_state.Validation();
-	bool const valid = preview_validation
-		? static_cast<bool>(*preview_validation)
-		: state_validation && static_cast<bool>(*state_validation);
-	// A parked off-frame target renders in the read-only colours without
-	// handles; it becomes editable again when the line is back on a frame.
-	bool const off_frame = perspective_state.IsBound() && !active_line;
-	bool const draw_editable = perspective_state.IsEditable() && !off_frame;
-	wxColour const line_colour = !valid
-		? to_wx(invalid_line_color_opt->GetColor())
-		: to_wx((draw_editable
-			? line_color_primary_opt : line_color_secondary_opt)->GetColor());
-	wxColour const handle_colour = !valid
-		? to_wx(invalid_handle_color_opt->GetColor())
-		: to_wx((draw_editable
-			? highlight_color_primary_opt : highlight_color_secondary_opt)->GetColor());
-	wxColour const handle_outline(20, 20, 20);
-
-	context.SetLineColour(from_wx(handle_outline), 0.95f, 3);
-	context.DrawLineStrip(outline.data(), outline.size());
-	context.SetLineColour(from_wx(line_colour), 1.0f, 1);
-	context.DrawLineStrip(outline.data(), outline.size());
-
-	// The held edge, drawn heavier than the rest of the outline. Without this
-	// the anchor is invisible state that silently changes what Apply produces.
-	// Width alone was too easy to miss, so on an otherwise valid quad it also
-	// takes the handle colour rather than the line colour; an invalid quad
-	// keeps the invalid colour on every edge, because readiness outranks the
-	// anchor as a signal.
-	if (!perspective_creation && !best_fit && perspective_edge_anchor != perspective::PerspectiveEdgeAnchor::None) {
-		std::size_t from = 0;
-		std::size_t to = 1;
-		switch (perspective_edge_anchor) {
-			case perspective::PerspectiveEdgeAnchor::Top: break;
-			case perspective::PerspectiveEdgeAnchor::Right: from = 1; to = 2; break;
-			case perspective::PerspectiveEdgeAnchor::Bottom: from = 3; to = 2; break;
-			case perspective::PerspectiveEdgeAnchor::Left: from = 0; to = 3; break;
-			case perspective::PerspectiveEdgeAnchor::None: break;
-		}
-		wxColour const anchored_colour = valid ? handle_colour : line_colour;
-		context.SetLineColour(from_wx(handle_outline), 0.95f, 5);
-		context.DrawLine(outline[from], outline[to]);
-		context.SetLineColour(from_wx(anchored_colour), 1.0f, 3);
-		context.DrawLine(outline[from], outline[to]);
-	}
-
-	// Only meaningful for the committed target, not for a quad still being
-	// rubber-banded into existence.
-	if (!perspective_creation && perspective_preview)
-		DrawPerspectivePreview(context, *perspective_preview);
-
-	if (!draw_editable)
-		return;
-
-	constexpr std::array<perspective::PerspectiveQuadHandle, 4> corner_handles {
-		perspective::PerspectiveQuadHandle::TopLeft,
-		perspective::PerspectiveQuadHandle::TopRight,
-		perspective::PerspectiveQuadHandle::BottomRight,
-		perspective::PerspectiveQuadHandle::BottomLeft,
-	};
-	auto const active_handle = perspective_state.ActiveHandle();
-	float const handle_radius = kHandleRadius * ui_scale;
-	for (std::size_t index = 0; index < target->size(); ++index) {
-		float const radius = corner_handles[index] == active_handle
-			? handle_radius + 1.0f : handle_radius;
-		context.SetLineColour(from_wx(handle_outline), 0.95f, 2);
-		context.SetFillColour(from_wx(handle_outline), 0.85f);
-		context.DrawCircle(outline[index], radius + 1.0f);
-		context.SetLineColour(from_wx(handle_colour), 1.0f, 1);
-		context.SetFillColour(from_wx(handle_colour), 0.9f);
-		context.DrawCircle(outline[index], radius);
-	}
-
-	// Edge midpoints give one-directional resize without corner gymnastics.
-	for (std::size_t index = 0; index < target->size(); ++index) {
-		auto const edge_handle = static_cast<perspective::PerspectiveQuadHandle>(
-			static_cast<int>(perspective::PerspectiveQuadHandle::EdgeTop) + index);
-		Vector2D const midpoint = (outline[index] + outline[(index + 1) % target->size()]) / 2.0;
-		float const radius = edge_handle == active_handle
-			? handle_radius : handle_radius - 1.0f;
-		context.SetLineColour(from_wx(handle_outline), 0.95f, 2);
-		context.SetFillColour(from_wx(handle_outline), 0.85f);
-		context.DrawCircle(midpoint, radius + 1.0f);
-		context.SetLineColour(from_wx(handle_colour), 1.0f, 1);
-		context.SetFillColour(from_wx(handle_colour), 0.75f);
-		context.DrawCircle(midpoint, radius);
-	}
-
-	if (auto const center = perspective::PerspectiveQuadArithmeticCenter(*target)) {
-		auto const canvas_center = VisualGuideToCanvas(ToGuidePoint(*center), viewport);
-		float const center_radius = active_handle == perspective::PerspectiveQuadHandle::Center
-			? handle_radius + 2.0f : handle_radius + 1.0f;
-		context.SetLineColour(from_wx(handle_outline), 0.95f, 2);
-		context.SetFillColour(from_wx(handle_outline), 0.85f);
-		context.DrawCircle(canvas_center, center_radius + 1.0f);
-		context.SetLineColour(from_wx(handle_colour), 1.0f, 1);
-		context.SetFillColour(from_wx(handle_colour), 0.9f);
-		context.DrawCircle(canvas_center, center_radius);
-	}
+										? std::optional<perspective::GeometryValidation>(perspective::ValidateQuad(perspective_creation->preview))
+										: std::nullopt;
+	auto const& validation = perspective_state.Validation();
+	aegisub::visual_measure::PerspectiveOverlay overlay{
+		.current = perspective_state.Current(),
+		.target = perspective_creation ? std::optional<perspective::Quad>(perspective_creation->preview) : perspective_state.Target(),
+		.reachable = perspective_preview,
+		.creating = perspective_creation.has_value(),
+		.editable = perspective_state.IsEditable(),
+		.off_frame = perspective_state.IsBound() && !active_line,
+		.modified = perspective_state.IsModified(),
+		.valid = preview_validation ? static_cast<bool>(*preview_validation) : validation && static_cast<bool>(*validation),
+		.best_fit = best_fit,
+		.active_handle = perspective_state.ActiveHandle(),
+		.edge_anchor = perspective_edge_anchor,
+		.diagnostic = LocalizedDiagnostic()};
+	aegisub::visual_measure::PerspectiveOverlayStyle style{
+		.line_primary = line_color_primary_opt->GetColor(), .line_secondary = line_color_secondary_opt->GetColor(), .highlight_primary = highlight_color_primary_opt->GetColor(), .highlight_secondary = highlight_color_secondary_opt->GetColor(), .invalid_line = invalid_line_color_opt->GetColor(), .invalid_handle = invalid_handle_color_opt->GetColor(), .label_font_size = static_cast<int>(OPT_GET("Tool/Visual/Coordinate Font Size")->GetInt()), .ui_scale = UiScale()};
+	aegisub::visual_measure::DrawPerspective(context, parent->GetVisualGuideViewport(), canvas_size, overlay, style);
 }
 
 void VisualToolMeasure::DrawWithContext(VideoOverlayDrawContext& context) {

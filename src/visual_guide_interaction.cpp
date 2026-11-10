@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace {
 constexpr double kTan22Point5Degrees = 0.4142135623730950488;
@@ -42,14 +43,13 @@ void ClampGuideEndpoints(VisualGuide& guide, VisualGuideViewport const& viewport
 	guide.first = ClampVisualGuidePointToScript(guide.first, viewport);
 	guide.second = ClampVisualGuidePointToScript(guide.second, viewport);
 }
-}
 
-VisualGuideHit HitTestVisualGuides(
+template <typename LabelGeometry>
+VisualGuideHit HitTestVisualGuidesImpl(
 	Vector2D point,
 	VisualGuideSnapshotView const& snapshot,
 	VisualGuideViewport const& viewport,
-	VisualGuideOverlayStyle const& style,
-	VideoOverlayDrawContext& context,
+	LabelGeometry&& label_geometry,
 	double tolerance) noexcept {
 	if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
 		|| !std::isfinite(tolerance) || tolerance < 0.0
@@ -101,20 +101,53 @@ VisualGuideHit HitTestVisualGuides(
 
 	// Info boxes last, so they never shadow endpoint or line-body drags. A user
 	// can still select the box by aiming at its interior padding.
-	for (auto guide = snapshot.guides.crbegin(); guide != snapshot.guides.crend(); ++guide) {
-		if (!IsValidVisualGuide(*guide))
+	for (auto index = snapshot.guides.size(); index > 0; --index) {
+		auto const& guide = snapshot.guides[index - 1];
+		if (!IsValidVisualGuide(guide))
 			continue;
 
-		auto const geometry = ComputeMeasurementLabelGeometry(
-			context, *guide, viewport,
-			VisualGuideToCanvas(guide->first, viewport),
-			VisualGuideToCanvas(guide->second, viewport),
-			style);
+		auto const geometry = label_geometry(guide, index - 1);
 		if (PointInsideRectangle(point, geometry.origin, geometry.size))
-			return { guide->id, VisualGuideHitPart::Label };
+			return {.id = guide.id, .part = VisualGuideHitPart::Label};
 	}
 
 	return {};
+}
+}
+
+VisualGuideHit HitTestVisualGuides(
+	Vector2D point,
+	VisualGuideSnapshotView const& snapshot,
+	VisualGuideViewport const& viewport,
+	VisualGuideOverlayStyle const& style,
+	VideoOverlayDrawContext& context,
+	double tolerance) noexcept {
+	return HitTestVisualGuidesImpl(
+		point, snapshot, viewport,
+		[&](VisualGuide const& guide, std::size_t) {
+			return ComputeMeasurementLabelGeometry(
+				context, guide, viewport,
+				VisualGuideToCanvas(guide.first, viewport),
+				VisualGuideToCanvas(guide.second, viewport),
+				style);
+		},
+		tolerance);
+}
+
+VisualGuideHit HitTestVisualGuides(
+	Vector2D point,
+	VisualGuideSnapshotView const& snapshot,
+	VisualGuideViewport const& viewport,
+	std::span<VisualGuideLabelGeometry const> rendered_labels,
+	double tolerance) {
+	if (rendered_labels.size() != snapshot.guides.size())
+		throw std::invalid_argument("Visual guide label geometry must match its snapshot");
+	return HitTestVisualGuidesImpl(
+		point, snapshot, viewport,
+		[&](VisualGuide const&, std::size_t index) {
+			return rendered_labels[index];
+		},
+		tolerance);
 }
 
 VisualGuidePoint SnapVisualGuideMeasurementPoint(

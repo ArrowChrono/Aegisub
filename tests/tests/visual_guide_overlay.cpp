@@ -3,8 +3,6 @@
 #include "../../src/visual_guide_overlay.h"
 #include "../../src/video_overlay_draw_context.h"
 
-#include <wx/colour.h>
-
 #include <limits>
 #include <string>
 #include <utility>
@@ -135,6 +133,42 @@ TEST(visual_guide_overlay, formats_measurement_values_without_negative_zero) {
 	EXPECT_EQ("0", FormatVisualGuideLabelNumber(std::numeric_limits<double>::infinity(), false));
 }
 
+TEST(visual_guide_overlay, callable_measurement_freezes_exact_rendered_label_geometry) {
+	VisualGuide const guide{.id = "guide-1", .first = {.x = 100, .y = 50}, .second = {.x = 200, .y = 50}};
+	VisualGuideOverlayStyle style;
+	style.label_font_size = 100;
+	CaptureOverlayContext context;
+	std::vector<std::string> measured_rows;
+	auto const measure = [&](std::string const& text, VideoOverlayTextStyle const& text_style) {
+		measured_rows.push_back(text);
+		EXPECT_EQ("Verdana", text_style.face);
+		EXPECT_EQ(72, text_style.size);
+		EXPECT_TRUE(text_style.bold);
+		EXPECT_EQ(agi::Color(255, 255, 255), text_style.colour);
+		return context.MeasureText(text, text_style);
+	};
+	auto const geometry = ComputeMeasurementLabelGeometry(
+		measure, guide, MakeViewport(), {300, 150}, {500, 150}, style);
+	EXPECT_EQ((std::vector<std::string>{
+				  "dX +100", "dY 0", "L 100", "sx -", "sy 0", "angH 0 deg", "angV 90 deg"}),
+			  measured_rows);
+	EXPECT_EQ(Vector2D(500, 162), geometry.origin);
+	EXPECT_EQ(Vector2D(85, 92), geometry.size);
+
+	auto const direct = ComputeMeasurementLabelGeometry(
+		context, guide, MakeViewport(), {300, 150}, {500, 150}, style);
+	EXPECT_EQ(geometry.origin, direct.origin);
+	EXPECT_EQ(geometry.size, direct.size);
+
+	auto const different_metrics = ComputeMeasurementLabelGeometry(
+		[](std::string const&, VideoOverlayTextStyle const&) {
+			return VideoOverlayTextExtent(73, 9);
+		},
+		guide, MakeViewport(), {300, 150}, {500, 150}, style);
+	EXPECT_EQ(Vector2D(500, 162), different_metrics.origin);
+	EXPECT_EQ(Vector2D(81, 71), different_metrics.size);
+}
+
 TEST(visual_guide_overlay, draws_selected_measurement_with_filled_quads_and_label) {
 	VisualGuide guide;
 	guide.id = "guide-1";
@@ -147,8 +181,8 @@ TEST(visual_guide_overlay, draws_selected_measurement_with_filled_quads_and_labe
 
 	CaptureOverlayContext context;
 	VisualGuideOverlayStyle style;
-	style.line_colour = wxColour(10, 20, 30);
-	style.highlight_colour = wxColour(40, 50, 60);
+	style.line_colour = agi::Color(10, 20, 30);
+	style.highlight_colour = agi::Color(40, 50, 60);
 	VisualGuideOverlay().Draw(context, MakeViewport(), ViewFrom(snapshot), style);
 
 	// Two line-stroke quads (outline + core) then two arrowhead triangles

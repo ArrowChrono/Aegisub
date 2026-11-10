@@ -157,8 +157,6 @@ class VisualToolMeasure final : public VisualToolBase {
 	void DrawWithContext(VideoOverlayDrawContext& context);
 	void DrawHandles(VideoOverlayDrawContext& context, VisualGuide const& guide);
 	void DrawPerspective(VideoOverlayDrawContext& context);
-	void DrawPerspectivePreview(
-		VideoOverlayDrawContext& context, perspective::Quad const& quad);
 	/// Re-solves the current target and caches the reachable shape plus, when the
 	/// target is out of reach entirely, the reason. Solver-only on purpose: this
 	/// runs before drawing or on explicit actions, without staging an AssFile

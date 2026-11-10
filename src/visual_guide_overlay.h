@@ -4,15 +4,18 @@
 
 #include "vector2d.h"
 
+#include <functional>
 #include <optional>
 #include <string>
 
-#include <wx/colour.h>
+#include <libaegisub/color.h>
 
 class VideoOverlayDrawContext;
+struct VideoOverlayTextExtent;
+struct VideoOverlayTextStyle;
 
 /// The logical video-content rectangle and the script coordinate system used
-/// by visual guides. Canvas values are always in wx logical pixels, after the
+/// by visual guides. Canvas values are always in logical pixels, after the
 /// current letterbox, zoom and pan layout has been applied. Guide endpoints are
 /// stored in script (PlayRes) pixels.
 struct VisualGuideViewport {
@@ -38,11 +41,11 @@ struct VisualGuideViewport {
 	VisualGuideViewport const& viewport);
 
 struct VisualGuideOverlayStyle {
-	wxColour line_colour = wxColour(255, 255, 255);
-	wxColour highlight_colour = wxColour(255, 255, 0);
-	wxColour outline_colour = wxColour(0, 0, 0);
-	wxColour label_background_colour = wxColour(0, 0, 0);
-	wxColour label_border_colour = wxColour(255, 255, 255);
+	agi::Color line_colour{255, 255, 255};
+	agi::Color highlight_colour{255, 255, 0};
+	agi::Color outline_colour{0, 0, 0};
+	agi::Color label_background_colour{0, 0, 0};
+	agi::Color label_border_colour{255, 255, 255};
 	int label_font_size = 12;
 };
 
@@ -59,6 +62,14 @@ struct VisualGuideLabelGeometry {
 /// the viewport the same way the draw pass does.
 [[nodiscard]] VisualGuideLabelGeometry ComputeMeasurementLabelGeometry(
 	VideoOverlayDrawContext& context,
+	VisualGuide const& guide,
+	VisualGuideViewport const& viewport,
+	Vector2D first,
+	Vector2D second,
+	VisualGuideOverlayStyle const& style);
+
+[[nodiscard]] VisualGuideLabelGeometry ComputeMeasurementLabelGeometry(
+	std::function<VideoOverlayTextExtent(std::string const&, VideoOverlayTextStyle const&)> const& measure_text,
 	VisualGuide const& guide,
 	VisualGuideViewport const& viewport,
 	Vector2D first,

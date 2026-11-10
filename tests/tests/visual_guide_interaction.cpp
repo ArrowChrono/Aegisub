@@ -4,6 +4,7 @@
 #include "../../src/visual_guide_interaction.h"
 
 #include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -144,6 +145,71 @@ TEST(visual_guide_interaction, info_box_is_selectable_and_lower_priority_than_li
 	ASSERT_TRUE(on_label);
 	EXPECT_EQ("guide", on_label.id);
 	EXPECT_EQ(VisualGuideHitPart::Label, on_label.part);
+}
+
+TEST(visual_guide_interaction, rendered_labels_preserve_hit_order_and_exact_rectangles) {
+	VisualGuideSnapshot snapshot;
+	snapshot.guides = {
+		MakeGuide("selected", {.x = 100.0, .y = 50.0}, {.x = 200.0, .y = 50.0}),
+		MakeGuide("newest", {.x = 100.0, .y = 50.0}, {.x = 200.0, .y = 50.0}),
+	};
+	snapshot.selected_id = "selected";
+	std::vector<VisualGuideLabelGeometry> labels{
+		{.origin = {650, 250}, .size = {80, 60}},
+		{.origin = {660, 260}, .size = {60, 40}},
+	};
+	auto const hit_at = [&](Vector2D point) {
+		return HitTestVisualGuides(point, View(snapshot), MakeViewport(), labels, 8.0);
+	};
+
+	auto hit = hit_at({665, 265});
+	EXPECT_EQ("newest", hit.id);
+	EXPECT_EQ(VisualGuideHitPart::Label, hit.part);
+	hit = hit_at({650, 250});
+	EXPECT_EQ("selected", hit.id);
+	EXPECT_EQ(VisualGuideHitPart::Label, hit.part);
+	hit = hit_at({720, 300});
+	EXPECT_EQ("newest", hit.id);
+	EXPECT_EQ(VisualGuideHitPart::Label, hit.part);
+	hit = hit_at({721, 301});
+	EXPECT_EQ("selected", hit.id);
+	EXPECT_EQ(VisualGuideHitPart::Label, hit.part);
+	EXPECT_FALSE(hit_at({731, 301}));
+
+	labels[1] = {.origin = {290, 140}, .size = {220, 30}};
+	hit = hit_at({300, 150});
+	EXPECT_EQ("selected", hit.id);
+	EXPECT_EQ(VisualGuideHitPart::FirstEndpoint, hit.part);
+	hit = hit_at({400, 150});
+	EXPECT_EQ("newest", hit.id);
+	EXPECT_EQ(VisualGuideHitPart::Line, hit.part);
+	snapshot.selected_id.reset();
+	hit = hit_at({500, 150});
+	EXPECT_EQ("newest", hit.id);
+	EXPECT_EQ(VisualGuideHitPart::SecondEndpoint, hit.part);
+}
+
+TEST(visual_guide_interaction, rendered_labels_require_matching_snapshot_and_valid_input) {
+	VisualGuideSnapshot snapshot;
+	std::vector<VisualGuideLabelGeometry> labels;
+	EXPECT_FALSE(HitTestVisualGuides({300, 150}, View(snapshot), MakeViewport(), labels, 8.0));
+
+	snapshot.guides.push_back(MakeGuide("guide", {.x = 100.0, .y = 50.0}, {.x = 200.0, .y = 50.0}));
+	EXPECT_THROW(
+		HitTestVisualGuides({300, 150}, View(snapshot), MakeViewport(), labels, 8.0),
+		std::invalid_argument);
+	labels = {{.origin = {650, 250}, .size = {80, 60}}, {.origin = {660, 260}, .size = {60, 40}}};
+	EXPECT_THROW(
+		HitTestVisualGuides({300, 150}, View(snapshot), MakeViewport(), labels, 8.0),
+		std::invalid_argument);
+	labels.resize(1);
+	auto viewport = MakeViewport();
+	viewport.script_width = 0.0;
+	EXPECT_FALSE(HitTestVisualGuides({650, 250}, View(snapshot), viewport, labels, 8.0));
+	EXPECT_FALSE(HitTestVisualGuides({650, 250}, View(snapshot), MakeViewport(), labels, -1.0));
+	EXPECT_FALSE(HitTestVisualGuides(
+		{std::numeric_limits<float>::infinity(), 250.0f},
+		View(snapshot), MakeViewport(), labels, 8.0));
 }
 
 TEST(visual_guide_interaction, drag_updates_measurement_endpoints_and_line_from_original_value) {

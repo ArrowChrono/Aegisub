@@ -3,6 +3,7 @@
 #include "visual_guide_controller.h"
 #include "visual_guide_overlay.h"
 
+#include <span>
 #include <string>
 
 class VideoOverlayDrawContext;
@@ -42,6 +43,13 @@ enum class VisualGuideDragAction {
 	VisualGuideOverlayStyle const& style,
 	VideoOverlayDrawContext& context,
 	double tolerance) noexcept;
+
+[[nodiscard]] VisualGuideHit HitTestVisualGuides(
+	Vector2D point,
+	VisualGuideSnapshotView const& snapshot,
+	VisualGuideViewport const& viewport,
+	std::span<VisualGuideLabelGeometry const> rendered_labels,
+	double tolerance);
 
 /// Snap a measurement endpoint to 0, 45 or 90 degrees when enabled.
 [[nodiscard]] VisualGuidePoint SnapVisualGuideMeasurementPoint(

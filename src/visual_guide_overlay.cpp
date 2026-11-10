@@ -1,7 +1,5 @@
 #include "visual_guide_overlay.h"
 
-#include "compat.h"
-
 #include "video_overlay_draw_context.h"
 
 #include <algorithm>
@@ -54,7 +52,7 @@ void DrawGuideStroke(
 	VideoOverlayDrawContext& context,
 	Vector2D first,
 	Vector2D second,
-	wxColour const& colour,
+	agi::Color const& colour,
 	float alpha,
 	float width) {
 	Vector2D direction = second - first;
@@ -74,8 +72,8 @@ void DrawGuideStroke(
 	};
 
 	// Fill only: line alpha 0 skips stroke on both legacy and Skia backends.
-	context.SetFillColour(from_wx(colour), alpha);
-	context.SetLineColour(from_wx(colour), 0.0f, 1);
+	context.SetFillColour(colour, alpha);
+	context.SetLineColour(colour, 0.0f, 1);
 	context.DrawPolygon(polygon, 4);
 }
 
@@ -83,7 +81,7 @@ void DrawGuideArrowhead(
 	VideoOverlayDrawContext& context,
 	Vector2D tip,
 	Vector2D direction,
-	wxColour const& colour,
+	agi::Color const& colour,
 	float alpha,
 	float length,
 	float half_width) {
@@ -102,8 +100,8 @@ void DrawGuideArrowhead(
 		base - perp * half_width,
 	};
 
-	context.SetFillColour(from_wx(colour), alpha);
-	context.SetLineColour(from_wx(colour), 0.0f, 1);
+	context.SetFillColour(colour, alpha);
+	context.SetLineColour(colour, 0.0f, 1);
 	context.DrawPolygon(polygon, 3);
 }
 
@@ -215,18 +213,24 @@ VideoOverlayTextStyle MakeLabelTextStyle(VisualGuideOverlayStyle const& style) {
 /// Measure the label rows and return the label box size including padding.
 /// Exposed so ComputeMeasurementLabelGeometry can share the exact same layout
 /// that the draw pass uses, keeping hit-testing in sync.
+template <typename MeasureText>
 Vector2D MeasureLabelBox(
-	VideoOverlayDrawContext& context,
+	MeasureText const& measure_text,
 	MeasurementLabel const& label,
 	VideoOverlayTextStyle const& text_style) {
 	std::array<std::string_view, 7> const lines = {
-		label.delta_x, label.delta_y, label.distance,
-		label.shear_x, label.shear_y, label.angle_h, label.angle_v,
+		label.delta_x,
+		label.delta_y,
+		label.distance,
+		label.shear_x,
+		label.shear_y,
+		label.angle_h,
+		label.angle_v,
 	};
 	int width = 0;
 	int height = 0;
 	for (auto const& line : lines) {
-		auto const extent = context.MeasureText(std::string(line), text_style);
+		auto const extent = measure_text(std::string(line), text_style);
 		width = std::max(width, extent.GetWidth());
 		height += extent.GetHeight();
 	}
@@ -288,12 +292,18 @@ Vector2D ResolveLabelOrigin(
 	return origin;
 }
 
-Vector2D ComputeMeasurementLabelSize(
-	VideoOverlayDrawContext& context,
+template <typename MeasureText>
+VisualGuideLabelGeometry ComputeMeasurementLabelGeometryImpl(
+	MeasureText const& measure_text,
 	VisualGuide const& guide,
+	VisualGuideViewport const& viewport,
+	Vector2D first,
+	Vector2D second,
 	VisualGuideOverlayStyle const& style) {
-	return MeasureLabelBox(
-		context, BuildMeasurementLabel(CalculateVisualGuideMetrics(guide)), MakeLabelTextStyle(style));
+	auto const box_size = MeasureLabelBox(
+		measure_text, BuildMeasurementLabel(CalculateVisualGuideMetrics(guide)), MakeLabelTextStyle(style));
+	auto const origin = ResolveLabelOrigin(second, box_size, second - first, viewport);
+	return {origin, box_size};
 }
 
 void DrawMeasurementLabel(
@@ -308,16 +318,16 @@ void DrawMeasurementLabel(
 	auto const label = BuildMeasurementLabel(metrics);
 	auto const text_style = MakeLabelTextStyle(style);
 
-	auto const box_size = ComputeMeasurementLabelSize(context, guide, style);
-	auto const origin = ResolveLabelOrigin(second, box_size, second - first, viewport);
-	auto const width = static_cast<int>(std::lround(box_size.X()));
-	auto const height = static_cast<int>(std::lround(box_size.Y()));
+	auto const geometry = ComputeMeasurementLabelGeometry(context, guide, viewport, first, second, style);
+	auto const origin = geometry.origin;
+	auto const width = static_cast<int>(std::lround(geometry.size.X()));
+	auto const height = static_cast<int>(std::lround(geometry.size.Y()));
 
 	Vector2D const background_end = origin + Vector2D(
 		static_cast<float>(width), static_cast<float>(height));
-	context.SetFillColour(from_wx(style.label_background_colour), 0.70f);
-	wxColour const border = selected ? style.highlight_colour : style.label_border_colour;
-	context.SetLineColour(from_wx(border), 0.9f, 1);
+	context.SetFillColour(style.label_background_colour, 0.70f);
+	agi::Color const border = selected ? style.highlight_colour : style.label_border_colour;
+	context.SetLineColour(border, 0.9f, 1);
 	context.DrawRectangle(origin, background_end);
 
 	std::array<std::string_view, 7> const lines = {
@@ -340,9 +350,21 @@ VisualGuideLabelGeometry ComputeMeasurementLabelGeometry(
 	Vector2D first,
 	Vector2D second,
 	VisualGuideOverlayStyle const& style) {
-	auto const box_size = ComputeMeasurementLabelSize(context, guide, style);
-	auto const origin = ResolveLabelOrigin(second, box_size, second - first, viewport);
-	return { origin, box_size };
+	return ComputeMeasurementLabelGeometryImpl(
+		[&](std::string const& text, VideoOverlayTextStyle const& text_style) {
+			return context.MeasureText(text, text_style);
+		},
+		guide, viewport, first, second, style);
+}
+
+VisualGuideLabelGeometry ComputeMeasurementLabelGeometry(
+	std::function<VideoOverlayTextExtent(std::string const&, VideoOverlayTextStyle const&)> const& measure_text,
+	VisualGuide const& guide,
+	VisualGuideViewport const& viewport,
+	Vector2D first,
+	Vector2D second,
+	VisualGuideOverlayStyle const& style) {
+	return ComputeMeasurementLabelGeometryImpl(measure_text, guide, viewport, first, second, style);
 }
 
 bool IsVisualGuideViewportMappable(VisualGuideViewport const& viewport) noexcept {
