@@ -297,6 +297,7 @@ class VideoDisplay final : public wxGLCanvas {
 
 	/// @brief Key event handler
 	void OnKeyDown(wxKeyEvent &event);
+	void OnCapturedKeyDown(wxKeyEvent& event);
 	/// @brief Mouse event handler
 	void OnMouseEvent(wxMouseEvent& event);
 	void OnMouseWheel(wxMouseEvent& event);

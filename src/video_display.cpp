@@ -519,6 +519,7 @@ VideoDisplay::VideoDisplay(wxToolBar *toolbar, bool freeSize, wxComboBox *zoomBo
 	Bind(wxEVT_CONTEXT_MENU, &VideoDisplay::OnContextMenu, this);
 	Bind(wxEVT_ENTER_WINDOW, &VideoDisplay::OnMouseEvent, this);
 	Bind(wxEVT_CHAR_HOOK, &VideoDisplay::OnKeyDown, this);
+	Bind(wxEVT_KEY_DOWN, &VideoDisplay::OnCapturedKeyDown, this);
 	Bind(wxEVT_LEAVE_WINDOW, &VideoDisplay::OnMouseLeave, this);
 	Bind(wxEVT_LEFT_DCLICK, &VideoDisplay::OnMouseEvent, this);
 	Bind(wxEVT_LEFT_DOWN, &VideoDisplay::OnMouseEvent, this);
@@ -2369,6 +2370,12 @@ void VideoDisplay::OnKeyDown(wxKeyEvent &event) {
 	if (tool && hotkey::check_exact(tool->GetHotkeyContext(), con, event))
 		return;
 	hotkey::check("Video", con, event);
+}
+
+void VideoDisplay::OnCapturedKeyDown(wxKeyEvent& event) {
+	if (event.GetKeyCode() == WXK_ESCAPE && HasCapture() && tool && tool->OnKeyDown(event))
+		return;
+	event.Skip();
 }
 
 void VideoDisplay::BeginPointSelection(
