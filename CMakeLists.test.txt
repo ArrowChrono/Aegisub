@@ -393,6 +393,7 @@ if(GTEST_FOUND)
         tests/tests/video_navigation_ops.cpp
         tests/tests/video_overlay_helpers.cpp
         tests/tests/visual_frame_visibility_index.cpp
+        tests/tests/visual_geometry_link.cpp
         tests/tests/visual_guide_controller.cpp
         tests/tests/visual_guide_interaction.cpp
         tests/tests/visual_guide_model.cpp

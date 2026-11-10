@@ -26,17 +26,18 @@
 #include "options.h"
 #include "subtitle_command_session.h"
 #include "ui_deadline_timer.h"
-#include "motion_track/geometry_tags.h"
+#include "visual_geometry_link.h"
 
 #include <libaegisub/owning_intrusive_list.h>
 #include <libaegisub/signal.h>
 
+#include <map>
+#include <optional>
 #include <set>
 #include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
-#include <map>
 
 #include <wx/gdicmn.h>
 #include <wx/timer.h>
@@ -93,6 +94,7 @@ class VisualToolBase {
 
 	/// Called when the file changes and the tool needs to resync from script state
 	virtual void OnFileChanged() { DoRefresh(); }
+	virtual void OnFileChanged(int, AssDialogue const *) { OnFileChanged(); }
 	/// Transient tools can request a refresh for external commits which the
 	/// generic active/displayed-line filter would otherwise ignore.
 	virtual bool ShouldRefreshOnAnyExternalCommit() const { return false; }
@@ -109,141 +111,116 @@ class VisualToolBase {
 	virtual void DoRefresh() { }
 
 protected:
-	bool CancelInteraction(bool release_capture);
-	enum class GeometryEditKind {
-		Affine,
-		Translation,
-		Endpoint,
-		Perspective
-	};
-	enum class GeometryValidationKind {
-		None,
-		StaticPose,
-		UnsupportedSource
-	};
-	struct GeometryState {
-		Vector2D position, origin, scale;
-		float rx = 0, ry = 0, rz = 0, fax = 0, fay = 0;
-	};
-	struct GeometrySnapshot {
-		std::unique_ptr<AssDialogue> source;
-		GeometryState state;
-		aegisub::motion_track::PreparedAffineGeometry geometry;
-		std::string validation_error;
-		GeometryValidationKind validation_kind = GeometryValidationKind::None;
-		GeometrySnapshot(AssDialogue const& line, GeometryState state, AssStyle const* style, int script_width, int script_height);
-	};
-	struct GeometryOverride {
-		std::string tag, value;
-		GeometryEditKind kind;
-		Vector2D translation;
-	};
-	std::map<AssDialogue *, GeometrySnapshot> geometry_snapshots;
-	std::map<AssDialogue *, std::vector<GeometryOverride>> geometry_overrides;
-	GeometryEditKind geometry_edit_kind = GeometryEditKind::Affine;
-	Vector2D geometry_translation;
-	bool geometry_error_reported = false;
-	bool geometry_mouse_gesture = false;
-	std::string geometry_error_message;
-	bool GeometryLinkingEnabled() const;
-	void BeginGeometryGesture(bool mouse = false);
-	void QueueGeometryOverride(AssDialogue *line, std::string const& tag, std::string const& value);
-	void QueueSelectedGeometryOverride(std::string const& tag, std::string const& value);
-	bool FinishGeometryEdit();
-	void ReportGeometryError();
-	void RefreshGeometryFeedback() { DoRefresh(); }
-	AssDialogue *GeometrySource(AssDialogue *line);
-	void SetGeometryEditKind(GeometryEditKind kind, Vector2D translation = Vector2D(0, 0));
-	virtual bool SupportsGeometryLinking() const { return false; }
-	std::vector<agi::signal::Connection> connections;
+bool CancelInteraction(bool release_capture);
+using GeometryEditKind = aegisub::visual_geometry::EditKind;
+std::map<AssDialogue *, aegisub::visual_geometry::Snapshot> geometry_snapshots;
+std::map<AssDialogue *, std::vector<aegisub::visual_geometry::Edit>> geometry_overrides;
+GeometryEditKind geometry_edit_kind = GeometryEditKind::Affine;
+Vector2D geometry_translation;
+bool geometry_error_reported = false;
+bool geometry_mouse_gesture = false;
+std::string geometry_error_message;
+bool GeometryLinkingEnabled() const;
+void BeginGeometryGesture(bool mouse = false);
+void CaptureGeometrySnapshot(AssDialogue *line);
+void QueueGeometryOverride(AssDialogue *line, std::string const& tag, std::string const& value);
+void QueueSelectedGeometryOverride(std::string const& tag, std::string const& value);
+bool FinishGeometryEdit();
+std::optional<std::map<AssDialogue *, std::string>> PlanGeometryEdit();
+void ReportGeometryError();
+void RefreshGeometryFeedback() { DoRefresh(); }
+AssDialogue const *GeometrySource(AssDialogue *line);
+void SetGeometryEditKind(GeometryEditKind kind, Vector2D translation = Vector2D(0, 0));
+virtual bool SupportsGeometryLinking() const { return false; }
+std::vector<agi::signal::Connection> connections;
 
 	/// Called if a mouse interaction is interrupted by wx losing capture. Tools
 	/// which keep their own edit transaction can override this to roll it back.
-	virtual void OnMouseCaptureLost(wxMouseCaptureLostEvent &);
+virtual void OnMouseCaptureLost(wxMouseCaptureLostEvent&);
 
-	void OnCommitIdResetTimer(wxTimerEvent &);
+void OnCommitIdResetTimer(wxTimerEvent&);
 
-	OpenGLWrapper gl;
+OpenGLWrapper gl;
 
 	/// Called when the user double-clicks
-	virtual void OnDoubleClick() { }
+virtual void OnDoubleClick() {}
 
-	agi::Context *c;
-	VideoDisplay *parent;
+agi::Context *c;
+VideoDisplay *parent;
 
-	bool holding = false; ///< Is a hold currently in progress?
-	AssDialogue *active_line = nullptr; ///< Active dialogue line; nullptr if it is not visible on the current frame
-	bool dragging = false; ///< Is a drag currently in progress?
-	bool interaction_trace_active = false;
+bool holding = false; ///< Is a hold currently in progress?
+AssDialogue *active_line = nullptr; ///< Active dialogue line; nullptr if it is not visible on the current frame
+bool dragging = false; ///< Is a drag currently in progress?
+bool interaction_trace_active = false;
 
-	int frame_number; ///< Current frame number
+int frame_number; ///< Current frame number
 
-	bool shift_down = false; ///< Is shift down?
-	bool ctrl_down = false; ///< Is ctrl down?
-	bool alt_down = false; ///< Is alt down?
+bool shift_down = false; ///< Is shift down?
+bool ctrl_down = false; ///< Is ctrl down?
+bool alt_down = false; ///< Is alt down?
 
-	Vector2D mouse_pos; ///< Last seen mouse position
-	Vector2D drag_start; ///< Mouse position at the beginning of the last drag
-	Vector2D script_res; ///< Script resolution (PlayRes)
-	Vector2D layout_res; ///< Layout resolution (for \frx/\fry perspective preview)
-	Vector2D canvas_size; ///< Size of the display canvas
-	Vector2D video_pos; ///< Top-left corner of the video in the display area
-	Vector2D video_res; ///< Video resolution
+Vector2D mouse_pos; ///< Last seen mouse position
+Vector2D drag_start; ///< Mouse position at the beginning of the last drag
+Vector2D script_res; ///< Script resolution (PlayRes)
+Vector2D layout_res; ///< Layout resolution (for \frx/\fry perspective preview)
+Vector2D canvas_size; ///< Size of the display canvas
+Vector2D video_pos; ///< Top-left corner of the video in the display area
+Vector2D video_res; ///< Video resolution
 
-	const agi::OptionValue *highlight_color_primary_opt;
-	const agi::OptionValue *highlight_color_secondary_opt;
-	const agi::OptionValue *line_color_primary_opt;
-	const agi::OptionValue *line_color_secondary_opt;
-	const agi::OptionValue *shaded_area_alpha_opt;
+const agi::OptionValue *highlight_color_primary_opt;
+const agi::OptionValue *highlight_color_secondary_opt;
+const agi::OptionValue *line_color_primary_opt;
+const agi::OptionValue *line_color_secondary_opt;
+const agi::OptionValue *shaded_area_alpha_opt;
 
-	aegisub::SubtitleCommandSession command_session;
-	std::vector<AssDialogue const *> changed_lines;
-	std::unordered_set<AssDialogue const *> changed_line_set;
-	AssDialogue *single_changed_line = nullptr;
-	agi::signal::Connection file_changed_connection;
-	UiDeadlineTimer interaction_render_timer;
+aegisub::SubtitleCommandSession command_session;
+std::vector<AssDialogue const *> changed_lines;
+std::unordered_set<AssDialogue const *> changed_line_set;
+AssDialogue *single_changed_line = nullptr;
+agi::signal::Connection file_changed_connection;
+UiDeadlineTimer interaction_render_timer;
 	// Keep this aligned with visual_subtitle_update_pacer; Final bypasses both gates.
-	DeadlinePacingPolicy interaction_render_pacer{std::chrono::milliseconds(17)};
-	int commit_id_reset_timer_id; ///< Distinct from other timers on VideoDisplay
-	wxTimer commit_id_reset_timer; ///< Splits keyboard-nudge undo after idle
-	void OnInteractionRenderTimer();
-	void ArmInteractionRenderTimer();
-	void RenderInteractionFrame(int reason);
-	void BeginInteractionPacing(int selection_count);
-	void EndInteractionPacing(bool render_final, int selection_count = -1);
+DeadlinePacingPolicy interaction_render_pacer{std::chrono::milliseconds(17)};
+int commit_id_reset_timer_id; ///< Distinct from other timers on VideoDisplay
+wxTimer commit_id_reset_timer; ///< Splits keyboard-nudge undo after idle
+void OnInteractionRenderTimer();
+void ArmInteractionRenderTimer();
+void RenderInteractionFrame(int reason);
+void BeginInteractionPacing(int selection_count);
+void EndInteractionPacing(bool render_final, int selection_count = -1);
 
 	/// @brief Identify the line to pass to AssFile::Commit when exactly one line changed
-	virtual AssDialogue *GetCommitTargetLine() const;
+virtual AssDialogue *GetCommitTargetLine() const;
 
 	/// @brief Commit the current file state
 	/// @param message Description of changes for undo
-	virtual void Commit(wxString message = wxString());
-	void CommitAndRefresh(wxString message = wxString());
-	bool IsDisplayed(AssDialogue const* line) const;
+virtual void Commit(wxString message = wxString());
+void CommitAndRefresh(wxString message = wxString());
+bool IsDisplayed(AssDialogue const *line) const;
 
 	/// Commit a keyboard nudge and schedule undo-coalesce reset after idle.
-	void CommitNudge(wxString message = wxString());
-	[[nodiscard]] static double GetNudgeStep(
-		char const* option,
-		char const* large_option,
-		VisualNudgeMagnitude magnitude);
+void CommitNudge(wxString message = wxString());
+[[nodiscard]] static double GetNudgeStep(
+	char const *option,
+	char const *large_option,
+	VisualNudgeMagnitude magnitude);
 
 	/// Get the line's position if it's set, or it's default based on style if not
-	Vector2D GetLinePosition(AssDialogue *diag);
+Vector2D GetLinePosition(AssDialogue const *diag);
 	/// Get the line's origin if it's set, or Vector2D::Bad() if not
-	Vector2D GetLineOrigin(AssDialogue *diag);
-	bool GetLineMove(AssDialogue *diag, Vector2D &p1, Vector2D &p2, int &t1, int &t2);
-	void GetLineRotation(AssDialogue *diag, float &rx, float &ry, float &rz);
-	void GetLineShear(AssDialogue *diag, float& fax, float& fay);
-	void GetLineScale(AssDialogue *diag, Vector2D &scale);
-	void GetLineClip(AssDialogue *diag, Vector2D &p1, Vector2D &p2, bool &inverse);
-	std::string GetLineVectorClip(AssDialogue *diag, int &scale, bool &inverse);
+Vector2D GetLineOrigin(AssDialogue const *diag);
+bool GetLineMove(AssDialogue *diag, Vector2D& p1, Vector2D& p2, int& t1, int& t2);
+void GetLineRotation(AssDialogue *diag, float& rx, float& ry, float& rz);
+void GetLineShear(AssDialogue *diag, float& fax, float& fay);
+void GetLineScale(AssDialogue *diag, Vector2D& scale);
+void GetLineClip(AssDialogue *diag, Vector2D& p1, Vector2D& p2, bool& inverse);
+std::string GetLineVectorClip(AssDialogue *diag, int& scale, bool& inverse);
 
-	void ClearChangedLines();
-	void SetOverride(AssDialogue* line, std::string const& tag, std::string const& value);
-	void SetSelectedOverride(std::string const& tag, std::string const& value);
+void ClearChangedLines();
+void SetOverride(AssDialogue *line, std::string const& tag, std::string const& value);
+void SetSelectedOverride(std::string const& tag, std::string const& value);
 
-	VisualToolBase(VideoDisplay *parent, agi::Context *context);
+VisualToolBase(VideoDisplay *parent, agi::Context *context);
 
 public:
 	/// Convert a point from video to script coordinates

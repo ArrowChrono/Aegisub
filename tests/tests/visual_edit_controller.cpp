@@ -8,6 +8,7 @@
 #include "../../src/visual_tool_scale_policy.h"
 #include "../../src/visual_tool_shear_shared.h"
 #include "../../src/visual_ass_edit.h"
+#include "../../src/visual_geometry_link.h"
 #include "../../src/ass_dialogue.h"
 #include "../../src/ass_style.h"
 
@@ -200,6 +201,128 @@ TEST(visual_edit_controller, double_click_restores_pre_click_selection_and_trans
 	ASSERT_EQ(2u, controller.DraftChanges().size());
 	EXPECT_EQ("{\\pos(50,70)\\org(40,50)}A", controller.DraftChanges()[0].text);
 	EXPECT_EQ("{\\move(130,160,170,200)\\org(120,140)}B", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, recognized_double_click_sequences_preserve_the_first_click_hidden_selection) {
+	for (bool second_press : {false, true}) {
+		SCOPED_TRACE(second_press ? "native-second-press" : "direct-double-click");
+		auto first = MakeLine(1, 0, R"({\pos(20,30)\org(10,10)}A)", {20, 30});
+		first.origin = Vector2D(10, 10);
+		auto second = MakeLine(2, 1, R"({\move(100,120,140,160,10,90)\org(90,100)}B)", {100, 120});
+		second.move = Move{.start = {100, 120}, .end = {140, 160}, .start_ms = 10, .end_ms = 90};
+		second.origin = Vector2D(90, 100);
+		second.first_frame = 80;
+		Controller controller(Mode::Drag);
+		controller.Reset({first, second}, {1, 2}, 1, {.number = 12, .time_ms = 500}, Canvas());
+		controller.Pointer(Input(PointerPhase::Press, {50, 70}, true));
+		controller.Pointer(Input(PointerPhase::Release, {50, 70}));
+		ASSERT_EQ((std::set<int>{1}), controller.SelectedLines());
+		if (second_press)
+			controller.Pointer(Input(PointerPhase::Press, {50, 70}, true));
+		auto const result = controller.Pointer(Input(PointerPhase::DoubleClick, {50, 70}, second_press));
+		EXPECT_TRUE(result.selection_changed);
+		EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+		ASSERT_EQ(2u, controller.DraftChanges().size());
+		EXPECT_EQ(R"({\pos(50,70)\org(40,50)}A)", controller.DraftChanges()[0].text);
+		EXPECT_EQ(R"({\move(130,160,170,200,10,90)\org(120,140)}B)", controller.DraftChanges()[1].text);
+		controller.Pointer(Input(PointerPhase::Release, {50, 70}));
+		EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+		EXPECT_EQ(2u, controller.DraftChanges().size());
+	}
+}
+
+TEST(visual_edit_controller, planned_double_click_second_press_retains_the_whole_captured_batch) {
+	auto first = MakeLine(1, 0, R"({\pos(20,30)}A)", {20, 30});
+	auto second = MakeLine(2, 1, R"({\move(100,120,140,160,10,90)\org(90,100)}B)", {100, 120});
+	second.move = Move{.start = {100, 120}, .end = {140, 160}, .start_ms = 10, .end_ms = 90};
+	second.origin = Vector2D(90, 100);
+	second.first_frame = 80;
+	Controller controller(Mode::Drag);
+	controller.Reset({first, second}, {1, 2}, 1, {.number = 12, .time_ms = 500}, Canvas());
+	int plans = 0;
+	OverridePlanner planner = [&](std::span<OverrideEdit const> edits) -> std::optional<std::vector<VisualTextEdit>> {
+		++plans;
+		EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+		EXPECT_EQ(3u, edits.size());
+		for (auto const& edit : edits) {
+			EXPECT_EQ(OverrideIntent::Translation, edit.intent);
+			EXPECT_EQ(Vector2D(30, 40), edit.translation);
+		}
+		return std::vector<VisualTextEdit>{
+			{.id = 1, .row = 0, .original_text = first.text, .text = R"({\pos(50,70)}A)"},
+			{.id = 2, .row = 1, .original_text = second.text, .text = R"({\move(130,160,170,200,10,90)\org(120,140)}B)"}};
+	};
+	controller.Pointer(Input(PointerPhase::Press, {50, 70}, true), nullptr, true, planner);
+	controller.BeginPreparedPress(true, planner);
+	controller.Pointer(Input(PointerPhase::Release, {50, 70}), nullptr, false, planner);
+	controller.Pointer(Input(PointerPhase::Press, {50, 70}, true), nullptr, true, planner);
+	controller.BeginPreparedPress(true, planner);
+	controller.Pointer(Input(PointerPhase::DoubleClick, {50, 70}, true), nullptr, false, planner);
+	controller.Pointer(Input(PointerPhase::Release, {50, 70}), nullptr, false, planner);
+	EXPECT_EQ(1, plans);
+	EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(first.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(second.text, controller.DraftChanges()[1].original_text);
+	EXPECT_EQ(R"({\pos(50,70)}A)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\move(130,160,170,200,10,90)\org(120,140)}B)", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, ordinary_click_release_replaces_an_older_double_click_target) {
+	for (bool second_press : {false, true}) {
+		SCOPED_TRACE(second_press ? "native-second-press" : "direct-double-click");
+		auto first = MakeLine(1, 0, R"({\pos(20,30)}A)", {20, 30});
+		auto second = MakeLine(2, 1, R"({\pos(100,120)}B)", {100, 120});
+		Controller controller(Mode::Drag);
+		controller.Reset({first, second}, {1, 2}, 1, {}, Canvas());
+		controller.Pointer(Input(PointerPhase::Press, {200, 200}, true));
+		controller.Pointer(Input(PointerPhase::Release, {200, 200}));
+		controller.Pointer(Input(PointerPhase::Press, {50, 70}, true));
+		controller.Pointer(Input(PointerPhase::Release, {50, 70}));
+		if (second_press)
+			controller.Pointer(Input(PointerPhase::Press, {50, 70}, true));
+		controller.Pointer(Input(PointerPhase::DoubleClick, {50, 70}, second_press));
+		EXPECT_EQ((std::set<int>{1}), controller.SelectedLines());
+		ASSERT_EQ(1u, controller.DraftChanges().size());
+		EXPECT_EQ(1, controller.DraftChanges()[0].id);
+		EXPECT_EQ(R"({\pos(50,70)}A)", controller.DraftChanges()[0].text);
+	}
+}
+
+TEST(visual_edit_controller, external_owner_changes_retire_saved_double_click_targets) {
+	enum class OwnerChange : std::uint8_t { Selection,
+											Frame,
+											Viewport,
+											Lines,
+											Reset,
+											CaptureLoss };
+	for (auto change : {OwnerChange::Selection, OwnerChange::Frame, OwnerChange::Viewport,
+						OwnerChange::Lines, OwnerChange::Reset, OwnerChange::CaptureLoss}) {
+		for (bool second_press : {false, true}) {
+			SCOPED_TRACE(static_cast<int>(change));
+			SCOPED_TRACE(second_press ? "native-second-press" : "direct-double-click");
+			auto first = MakeLine(1, 0, R"({\pos(20,30)}A)", {20, 30});
+			auto second = MakeLine(2, 1, R"({\pos(100,120)}B)", {100, 120});
+			Controller controller(Mode::Drag);
+			controller.Reset({first, second}, {1, 2}, 1, {}, Canvas());
+			controller.Pointer(Input(PointerPhase::Press, {50, 70}, true));
+			controller.Pointer(Input(PointerPhase::Release, {50, 70}));
+			if (second_press || change == OwnerChange::CaptureLoss)
+				controller.Pointer(Input(PointerPhase::Press, {50, 70}, true));
+			switch (change) {
+				case OwnerChange::Selection: controller.SetSelection({2}, 2); break;
+				case OwnerChange::Frame: controller.SetFrame({.number = 1, .time_ms = 40}); break;
+				case OwnerChange::Viewport: controller.SetViewport(Canvas()); break;
+				case OwnerChange::Lines: controller.UpdateLines(std::array{first}); break;
+				case OwnerChange::Reset: controller.Reset({first, second}, {2}, 2, {}, Canvas()); break;
+				case OwnerChange::CaptureLoss: controller.FinishInteraction(); break;
+			}
+			auto const selected = controller.SelectedLines();
+			controller.Pointer(Input(PointerPhase::DoubleClick, {50, 70}, second_press));
+			EXPECT_EQ(selected, controller.SelectedLines());
+			EXPECT_TRUE(controller.DraftChanges().empty());
+		}
+	}
 }
 
 TEST(visual_edit_controller, double_click_normalizes_conflicting_position_tags_before_next_drag) {
@@ -1056,7 +1179,7 @@ TEST(visual_transform_overlay, rotate_xy_preserves_transparency_and_independent_
 	EXPECT_EQ(18u, batch.arrows.size());
 	auto const ray = [&](VideoOverlayPerspectiveVertex const& from, VideoOverlayPerspectiveVertex const& to) {
 		return from.x == 0 && from.y == 0 && from.z == 0 && from.opacity == 1 &&
-			   to.x == 0 && to.y == -320 && to.z == 0 && to.opacity == 0;
+			to.x == 0 && to.y == -320 && to.z == 0 && to.opacity == 0;
 	};
 	int matches = 0;
 	for (size_t i = 0; i < batch.grid.size(); i += 2) {
@@ -2854,4 +2977,129 @@ TEST(visual_edit_controller, vector_finish_smooth_freehand_smooths_once_and_pres
 	EXPECT_EQ(final, controller.DraftChanges()[0].text);
 	controller.AcceptChanges();
 	EXPECT_TRUE(controller.DraftChanges().empty());
+}
+
+TEST(visual_edit_controller, planned_xy_rejection_keeps_selected_draft_and_unselected_active_overlay) {
+	auto active = MakeLine(1, 0, R"({\frx23\fry71\frz52}Active)", {200, 200});
+	active.rotation_x = 23;
+	active.rotation_y = 71;
+	active.rotation_z = 52;
+	auto selected = MakeLine(2, 9, R"({\frx80\fry12\i1}Selected)", {300, 300});
+	Controller controller(Mode::RotateXY);
+	controller.Reset({active, selected}, {2}, 1, {}, Canvas());
+	auto context = std::make_shared<VisualToolRenderContext>();
+	VisualToolDragSnapshot displayed_miss(context);
+	bool reject = false;
+	int calls = 0;
+	OverridePlanner planner = [&](std::span<OverrideEdit const> writes) -> std::optional<std::vector<VisualTextEdit>> {
+		++calls;
+		EXPECT_EQ(2u, writes.size());
+		auto text = selected.text;
+		for (auto const& write : writes) {
+			EXPECT_EQ(2, write.id);
+			EXPECT_EQ(OverrideIntent::Perspective, write.intent);
+			text = SetOverride(text, write.tag, write.value);
+		}
+		if (reject)
+			return {};
+		return std::vector<VisualTextEdit>{{.id = 2, .row = 9, .original_text = selected.text, .text = text}};
+	};
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {200, 200}, true), &displayed_miss, false, planner).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {211, 193}, true), &displayed_miss, false, planner);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	auto const accepted = controller.DraftChanges()[0].text;
+	TransformOverlayRecorder before;
+	controller.CaptureSnapshot(context, {})->Draw(before);
+	ASSERT_EQ(1u, before.perspective_batches.size());
+	EXPECT_FLOAT_EQ(37.f, before.perspective_batches.front().transform.angle_x);
+	EXPECT_FLOAT_EQ(93.f, before.perspective_batches.front().transform.angle_y);
+	reject = true;
+	controller.Pointer(Input(PointerPhase::Move, {220, 190}, true), &displayed_miss, false, planner);
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(accepted, controller.DraftChanges()[0].text);
+	TransformOverlayRecorder after;
+	controller.CaptureSnapshot(context, {})->Draw(after);
+	EXPECT_TRUE(SamePerspectiveBatches(before, after));
+	auto released = controller.Pointer(Input(PointerPhase::Release, {220, 190}), &displayed_miss, false, planner);
+	EXPECT_EQ(CaptureAction::Release, released.capture);
+	EXPECT_TRUE(released.interaction_ended);
+	EXPECT_EQ(accepted, controller.DraftChanges()[0].text);
+	EXPECT_EQ(3, calls);
+}
+
+TEST(visual_edit_controller, planned_scale_return_to_start_restores_exact_source_without_inherited_tags) {
+	auto line = MakeLine(1, 0, R"({\b1}Text)", {200, 200});
+	Controller controller(Mode::Scale);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	bool restored = false;
+	OverridePlanner planner = [&](std::span<OverrideEdit const> writes) -> std::optional<std::vector<VisualTextEdit>> {
+		auto text = line.text;
+		for (auto const& write : writes) {
+			EXPECT_EQ(OverrideIntent::Affine, write.intent);
+			if (write.restore_source) {
+				restored = true;
+				EXPECT_TRUE(write.tag.empty());
+			}
+			else
+				text = SetOverride(text, write.tag, write.value);
+		}
+		return std::vector<VisualTextEdit>{{.id = 1, .row = 0, .original_text = line.text, .text = text}};
+	};
+	controller.Pointer(Input(PointerPhase::Press, {200, 200}, true), nullptr, false, planner);
+	controller.Pointer(Input(PointerPhase::Move, {220, 190}, true), nullptr, false, planner);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	controller.Pointer(Input(PointerPhase::Release, {200, 200}), nullptr, false, planner);
+	EXPECT_TRUE(restored);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	ASSERT_EQ(1u, controller.IncrementalChanges().size());
+	EXPECT_EQ(line.text, controller.IncrementalChanges()[0].text);
+}
+
+TEST(visual_edit_controller, linked_scale_commands_reuse_burst_source_and_reject_without_partial_drafts) {
+	using namespace aegisub::visual_geometry;
+	AssStyle style;
+	AssDialogue dialogue;
+	dialogue.Id = 1;
+	dialogue.Row = 0;
+	dialogue.Text = R"({\pos(0,0)\clip(0,0,20,20)\b1}Text)";
+	auto line = ReadLine(dialogue, &style, {640, 480});
+	line.first_frame = 0;
+	line.last_frame = 100;
+	Snapshot snapshot(dialogue, &style, {640, 480});
+	Controller controller(Mode::Scale);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	bool reject = false;
+	OverridePlanner planner = [&](std::span<OverrideEdit const> writes) -> std::optional<std::vector<VisualTextEdit>> {
+		if (reject)
+			return {};
+		std::vector<Edit> edits;
+		bool restore = false;
+		for (auto const& write : writes) {
+			EXPECT_EQ(OverrideIntent::Affine, write.intent);
+			restore |= write.restore_source;
+			if (!write.restore_source)
+				edits.push_back({.tag = write.tag, .value = write.value});
+		}
+		Request request{.source = &snapshot, .edits = edits};
+		auto result = Plan(std::span(&request, 1), {640, 480}, restore);
+		EXPECT_TRUE(result) << result.error;
+		return result ? std::optional(std::move(result.edits)) : std::nullopt;
+	};
+	EXPECT_TRUE(controller.Nudge({1, -1}, 10, 1, planner).geometry_changed);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_NE(std::string::npos, controller.DraftChanges()[0].text.find(R"(\clip(0,0,22,22))"));
+	EXPECT_TRUE(controller.Nudge({1, -1}, 10, 1, planner).geometry_changed);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_NE(std::string::npos, controller.DraftChanges()[0].text.find(R"(\clip(0,0,24,24))"));
+	auto const last_valid = controller.DraftChanges()[0].text;
+	reject = true;
+	EXPECT_FALSE(controller.NormalizeScale(visual_tool_scale_policy::Axis::X, planner).geometry_changed);
+	EXPECT_EQ(last_valid, controller.DraftChanges()[0].text);
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	reject = false;
+	EXPECT_TRUE(controller.NormalizeScale(visual_tool_scale_policy::Axis::X, planner).geometry_changed);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	ASSERT_EQ(1u, controller.IncrementalChanges().size());
+	EXPECT_EQ(dialogue.Text.get(), controller.IncrementalChanges()[0].text);
 }

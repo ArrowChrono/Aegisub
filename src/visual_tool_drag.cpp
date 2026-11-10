@@ -417,7 +417,7 @@ bool VisualToolDrag::InitializeDrag(Feature *feature) {
 			if (selected->type == DRAG_ORIGIN || !selected->parent)
 				continue;
 			auto const found = geometry_snapshots.find(selected->line);
-			if (found != geometry_snapshots.end() && (found->second.geometry.HasClip() || found->second.geometry.HasOrigin()))
+			if (found != geometry_snapshots.end() && (found->second.HasClip() || found->second.HasOrigin()))
 				preserve_move_times = true;
 		}
 	}

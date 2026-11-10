@@ -34,6 +34,7 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -295,7 +296,8 @@ struct Controller::Impl {
 	std::map<Key, size_t> feature_index;
 	std::set<Key> picked;
 	std::set<int> selected;
-	std::set<int> double_click_selection;
+	std::optional<std::set<int>> pressed_click_selection;
+	std::optional<std::set<int>> released_click_selection;
 	std::optional<int> active;
 	std::optional<Key> hovered;
 	std::optional<Key> primary;
@@ -706,6 +708,11 @@ struct Controller::Impl {
 			RebuildFeatures();
 	}
 
+	void RetireClickSequence() {
+		pressed_click_selection.reset();
+		released_click_selection.reset();
+	}
+
 	void BeginOperation() {
 		incremental.clear();
 		dirty.clear();
@@ -738,14 +745,22 @@ struct Controller::Impl {
 		std::ranges::sort(cumulative, row_less);
 	}
 
-	Result ApplyCommand(std::vector<Line> changes) {
+	Result ApplyCommand(std::vector<Line> changes, OverridePlanner const& planner = {}) {
 		BeginOperation();
+		std::vector<OverrideEdit> writes;
+		if (planner)
+			writes.reserve(changes.size() * 2);
 		for (auto& candidate : changes) {
 			auto const& current = GetLine(candidate.id);
 			auto const& source = planned_sources.try_emplace(candidate.id, current).first->second;
 			candidate.text = source.text;
+			auto const write_start = writes.size();
 			auto write = [&](char const *tag, std::string const& value) {
-				candidate.text = SetOverride(candidate.text, tag, value);
+				if (planner)
+					writes.push_back({.id = candidate.id, .tag = tag, .value = value, .intent = std::string_view(tag) == "\\org" ? OverrideIntent::Origin : mode == Mode::RotateXY ? OverrideIntent::Perspective
+																																												   : OverrideIntent::Affine});
+				else
+					candidate.text = SetOverride(candidate.text, tag, value);
 			};
 			if (mode == Mode::RotateZ) {
 				if (candidate.rotation_z != source.rotation_z) {
@@ -789,11 +804,18 @@ struct Controller::Impl {
 				write("\\fscy", y);
 				candidate.scale = {std::stof(x), std::stof(y)};
 			}
-			if (candidate.text != current.text)
+			if (planner && writes.size() == write_start)
+				writes.push_back({.id = candidate.id, .tag = {}, .value = {}, .intent = OverrideIntent::Affine, .restore_source = true});
+			if (!planner && candidate.text != current.text)
 				dirty.insert(candidate.id);
 		}
-		for (auto& candidate : changes)
-			GetLine(candidate.id) = std::move(candidate);
+		if (planner) {
+			if (!ApplyPlannedOverrides(writes, planner, changes))
+				return {};
+		}
+		else
+			for (auto& candidate : changes)
+				GetLine(candidate.id) = std::move(candidate);
 		EndOperation();
 		return {.geometry_changed = !incremental.empty(), .toolbar_changed = !incremental.empty()};
 	}
@@ -854,7 +876,7 @@ struct Controller::Impl {
 			planned_sources.try_emplace(id, GetLine(id));
 	}
 
-	bool ApplyPlannedOverrides(std::span<OverrideEdit const> writes, OverridePlanner const& planner) {
+	bool ApplyPlannedOverrides(std::span<OverrideEdit const> writes, OverridePlanner const& planner, std::span<Line const> candidates = {}) {
 		if (writes.empty())
 			return true;
 		auto planned = planner(writes);
@@ -870,20 +892,30 @@ struct Controller::Impl {
 		}
 		if (received != expected)
 			throw std::logic_error("Visual override planner omitted a selected line");
+		std::vector<Line> projections;
+		projections.reserve(planned->size());
 		for (auto const& edit : *planned) {
-			auto& line = GetLine(edit.id);
-			auto projected = planned_sources.at(edit.id);
-			if (edit.text != projected.text) {
+			auto candidate = std::ranges::find(candidates, edit.id, &Line::id);
+			auto projected = candidate == candidates.end() ? planned_sources.at(edit.id) : *candidate;
+			if (edit.text != planned_sources.at(edit.id).text) {
 				projected.text = edit.text;
 				RefreshGeometryFromText(projected, viewport.script_size);
 				if (std::ranges::none_of(writes, [&](auto const& write) { return write.id == edit.id && (write.tag == "\\pos" || write.tag == "\\move"); }))
 					projected.position = planned_sources.at(edit.id).position;
 			}
-			if (line.text != edit.text)
-				dirty.insert(edit.id);
+			else
+				projected = planned_sources.at(edit.id);
+			projections.push_back(std::move(projected));
+		}
+		for (auto& projected : projections) {
+			auto& line = GetLine(projected.id);
+			if (line.text != projected.text)
+				dirty.insert(projected.id);
 			line = std::move(projected);
+			if (mode != Mode::Drag)
+				continue;
 			for (auto& feature : features) {
-				if (std::get<0>(feature.key) != edit.id)
+				if (std::get<0>(feature.key) != line.id)
 					continue;
 				switch (std::get<1>(feature.key)) {
 					case DRAG_BIG_SQUARE: feature.position = ToCanvas(line.position); break;
@@ -1065,7 +1097,7 @@ struct Controller::Impl {
 		return result;
 	}
 
-	Result TransformPointer(PointerInput const& input, VisualToolRenderSnapshot const *displayed, bool defer_begin) {
+	Result TransformPointer(PointerInput const& input, VisualToolRenderSnapshot const *displayed, bool defer_begin, OverridePlanner const& planner) {
 		Result result;
 		if (input.phase == PointerPhase::Leave)
 			return result;
@@ -1128,46 +1160,70 @@ struct Controller::Impl {
 							   });
 			}
 			if (valid_update) {
-				transform_active_preview = transform_active_source;
-				if (dragging && delta != Vector2D(0, 0))
-					transform_active_preview.origin = transform_active_source.origin.value_or(transform_active_source.position) + delta;
-				else if (mode == Mode::RotateZ && !dragging)
-					transform_active_preview.rotation_z = angle;
-				else if (mode == Mode::RotateXY && !dragging) {
-					transform_active_preview.rotation_x = xy->X();
-					transform_active_preview.rotation_y = xy->Y();
+				bool const restore_source = planner && input.position == drag_start;
+				auto active_preview = transform_active_source;
+				if (!restore_source && dragging && delta != Vector2D(0, 0))
+					active_preview.origin = transform_active_source.origin.value_or(transform_active_source.position) + delta;
+				else if (!restore_source && mode == Mode::RotateZ && !dragging)
+					active_preview.rotation_z = angle;
+				else if (!restore_source && mode == Mode::RotateXY && !dragging) {
+					active_preview.rotation_x = xy->X();
+					active_preview.rotation_y = xy->Y();
 				}
-				else if (mode == Mode::Scale)
-					transform_active_preview.scale = *scale;
+				else if (!restore_source && mode == Mode::Scale)
+					active_preview.scale = *scale;
+				std::vector<Line> changes;
+				std::vector<OverrideEdit> writes;
+				changes.reserve(selected.size());
+				if (planner)
+					writes.reserve(selected.size() * 2);
 				for (int id : selected) {
-					auto& line = GetLine(id);
 					auto const& source = planned_sources.at(id);
-					auto previous = line.text;
-					line = source;
-					if (dragging && delta != Vector2D(0, 0)) {
+					auto line = source;
+					auto const write_start = writes.size();
+					auto write = [&](char const *tag, std::string const& value, OverrideIntent intent) {
+						if (planner)
+							writes.push_back({.id = id, .tag = tag, .value = value, .intent = intent});
+						else
+							line.text = SetOverride(line.text, tag, value);
+					};
+					if (!restore_source && dragging && delta != Vector2D(0, 0)) {
 						line.origin = source.origin.value_or(source.position) + delta;
-						Write(line, "\\org", line.origin->PStr());
+						write("\\org", line.origin->PStr(), OverrideIntent::Origin);
 					}
-					else if (mode == Mode::RotateZ && !dragging && angle != initial_angle) {
+					else if (!restore_source && mode == Mode::RotateZ && !dragging && angle != initial_angle) {
 						line.rotation_z = angle;
-						Write(line, "\\frz", agi::format("%.4g", angle));
+						write("\\frz", agi::format("%.4g", angle), OverrideIntent::Affine);
 					}
-					else if (mode == Mode::RotateXY && !dragging && *xy != initial_xy) {
+					else if (!restore_source && mode == Mode::RotateXY && !dragging && *xy != initial_xy) {
 						line.rotation_x = xy->X();
 						line.rotation_y = xy->Y();
-						Write(line, "\\frx", agi::format("%.4g", xy->X()));
-						Write(line, "\\fry", agi::format("%.4g", xy->Y()));
+						write("\\frx", agi::format("%.4g", xy->X()), OverrideIntent::Perspective);
+						write("\\fry", agi::format("%.4g", xy->Y()), OverrideIntent::Perspective);
 					}
-					else if (mode == Mode::Scale && *scale != initial_scale) {
+					else if (!restore_source && mode == Mode::Scale && *scale != initial_scale) {
 						line.scale = *scale;
-						Write(line, "\\fscx", std::to_string(static_cast<int>(scale->X())));
-						Write(line, "\\fscy", std::to_string(static_cast<int>(scale->Y())));
+						write("\\fscx", std::to_string(static_cast<int>(scale->X())), OverrideIntent::Affine);
+						write("\\fscy", std::to_string(static_cast<int>(scale->Y())), OverrideIntent::Affine);
 					}
-					if (previous != line.text)
-						dirty.insert(id);
+					if (planner && writes.size() == write_start)
+						writes.push_back({.id = id, .tag = {}, .value = {}, .intent = OverrideIntent::Affine, .restore_source = true});
+					changes.push_back(std::move(line));
 				}
+				if (planner)
+					valid_update = ApplyPlannedOverrides(writes, planner, changes);
+				else {
+					for (auto& line : changes) {
+						auto& current = GetLine(line.id);
+						if (current.text != line.text)
+							dirty.insert(line.id);
+						current = std::move(line);
+					}
+				}
+				if (valid_update)
+					transform_active_preview = std::move(active_preview);
 			}
-			if (mode != Mode::RotateXY || valid_update)
+			if (valid_update || (!planner && mode != Mode::RotateXY))
 				result.geometry_changed = true;
 		}
 		if (!input.left_down) {
@@ -1254,13 +1310,13 @@ struct Controller::Impl {
 	}
 
 	void DoubleClick(Vector2D position, Result& result, OverridePlanner const& planner) {
-		if (mode != Mode::Drag || !ActiveVisible())
+		if (mode != Mode::Drag || !ActiveVisible() || !released_click_selection)
 			return;
-		if (selected != double_click_selection) {
-			SetSelection(double_click_selection, active);
+		if (selected != *released_click_selection) {
+			SetSelection(std::move(*released_click_selection), active);
 			result.selection_changed = true;
 		}
-		double_click_selection.clear();
+		RetireClickSequence();
 		auto delta = ToScript(position) - (primary ? ToScript(GetFeature(*primary).position) : GetLine(*active).position);
 		if (planner) {
 			CapturePlannedSources();
@@ -1336,6 +1392,7 @@ void Controller::Reset(std::vector<Line> lines, std::set<int> selected, std::opt
 void Controller::SetFrame(Frame frame) {
 	if (IsInteracting())
 		throw std::logic_error("Finish visual interaction before changing frame");
+	impl->RetireClickSequence();
 	if (impl->mode == Mode::VectorClip)
 		impl->RetireVectorPress();
 	std::vector<Line *> entered;
@@ -1363,6 +1420,7 @@ void Controller::UpdateLines(std::span<Line const> replacements) {
 	auto& s = *impl;
 	if (IsInteracting() || !s.drafts.empty())
 		throw std::logic_error("Finish or discard visual drafts before replacing lines");
+	s.RetireClickSequence();
 	if (s.mode == Mode::VectorClip)
 		s.RetireVectorPress();
 	std::unordered_set<int> ids;
@@ -1417,6 +1475,7 @@ void Controller::UpdateLines(std::span<Line const> replacements) {
 void Controller::SetViewport(Viewport viewport) {
 	if (IsInteracting())
 		throw std::logic_error("Finish visual interaction before changing viewport");
+	impl->RetireClickSequence();
 	if (impl->mode == Mode::VectorClip) {
 		auto& s = *impl;
 		s.RetireVectorPress();
@@ -1448,7 +1507,10 @@ void Controller::SetViewport(Viewport viewport) {
 	impl->viewport = viewport;
 }
 
-void Controller::SetSelection(std::set<int> selected, std::optional<int> active) { impl->SetSelection(std::move(selected), active); }
+void Controller::SetSelection(std::set<int> selected, std::optional<int> active) {
+	impl->RetireClickSequence();
+	impl->SetSelection(std::move(selected), active);
+}
 
 Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot const *displayed_snapshot, bool defer_begin, OverridePlanner const& planner) {
 	auto& s = *impl;
@@ -1474,7 +1536,7 @@ Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot c
 		return result;
 	}
 	if (s.IsTransform()) {
-		result = s.TransformPointer(input, displayed_snapshot, defer_begin);
+		result = s.TransformPointer(input, displayed_snapshot, defer_begin, planner);
 		s.EndOperation();
 		return result;
 	}
@@ -1483,9 +1545,22 @@ Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot c
 		return result;
 	}
 	if (input.phase == PointerPhase::Leave) {
+		s.RetireClickSequence();
 		if (!s.dragging)
 			s.hovered.reset();
 		result.geometry_changed = true;
+		return result;
+	}
+	if (s.mode == Mode::Drag && input.phase == PointerPhase::DoubleClick) {
+		if (s.dragging || s.holding) {
+			s.dragging = s.holding = false;
+			result.capture = CaptureAction::Release;
+			result.interaction_ended = true;
+		}
+		s.prepared = false;
+		s.DoubleClick(input.position, result, planner);
+		s.pressed_click_selection.reset();
+		s.EndOperation();
 		return result;
 	}
 	if (!s.dragging) {
@@ -1523,12 +1598,12 @@ Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot c
 	}
 	else if (input.phase == PointerPhase::Press) {
 		s.drag_start = input.position;
-		s.double_click_selection = s.selected;
+		s.pressed_click_selection = s.selected;
 		if (s.hovered) {
 			s.selection_changed_on_press = !s.picked.contains(*s.hovered);
 			if (s.selection_changed_on_press)
 				s.SelectFeature(*s.hovered, !input.control, result);
-			s.double_click_selection = s.selected;
+			s.pressed_click_selection = s.selected;
 			int id = std::get<0>(*s.hovered);
 			if (id != NoLine && s.active != id) {
 				s.active = id;
@@ -1553,8 +1628,14 @@ Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot c
 		}
 		result.geometry_changed = true;
 	}
-	if (input.phase == PointerPhase::DoubleClick)
-		s.DoubleClick(input.position, result, planner);
+	if (input.phase == PointerPhase::Release && s.pressed_click_selection) {
+		if (s.drafts.empty()) {
+			s.released_click_selection = std::move(s.pressed_click_selection);
+			s.pressed_click_selection.reset();
+		}
+		else
+			s.RetireClickSequence();
+	}
 	s.EndOperation();
 	return result;
 }
@@ -1599,7 +1680,7 @@ bool Controller::CanNudge() const {
 	return supported && impl->ActiveVisible() && !impl->selected.empty() && !IsInteracting() && !impl->prepared;
 }
 
-Result Controller::Nudge(Vector2D direction, float step, float origin_step) {
+Result Controller::Nudge(Vector2D direction, float step, float origin_step, OverridePlanner const& planner) {
 	auto& s = *impl;
 	if (!CanNudge() || !std::isfinite(direction.X()) || !std::isfinite(direction.Y()) ||
 		!std::isfinite(step) || !std::isfinite(origin_step) || step <= 0 || origin_step <= 0 ||
@@ -1654,7 +1735,7 @@ Result Controller::Nudge(Vector2D direction, float step, float origin_step) {
 		}
 		changes.push_back(std::move(candidate));
 	}
-	return s.ApplyCommand(std::move(changes));
+	return s.ApplyCommand(std::move(changes), s.IsTransform() ? planner : OverridePlanner{});
 }
 
 bool Controller::CanNormalizeScale(visual_tool_scale_policy::Axis axis) const {
@@ -1662,7 +1743,7 @@ bool Controller::CanNormalizeScale(visual_tool_scale_policy::Axis axis) const {
 		   std::ranges::all_of(impl->selected, [&](int id) { return visual_tool_scale_policy::NormalizeTo100(impl->GetLine(id).scale, axis).has_value(); });
 }
 
-Result Controller::NormalizeScale(visual_tool_scale_policy::Axis axis) {
+Result Controller::NormalizeScale(visual_tool_scale_policy::Axis axis, OverridePlanner const& planner) {
 	if (!CanNormalizeScale(axis))
 		return {};
 	auto& s = *impl;
@@ -1673,7 +1754,7 @@ Result Controller::NormalizeScale(visual_tool_scale_policy::Axis axis) {
 		candidate.scale = *visual_tool_scale_policy::NormalizeTo100(candidate.scale, axis);
 		changes.push_back(std::move(candidate));
 	}
-	return s.ApplyCommand(std::move(changes));
+	return s.ApplyCommand(std::move(changes), planner);
 }
 
 bool Controller::CanResetShear(visual_shear::Axis axis) const {
@@ -1709,6 +1790,8 @@ visual_vector_clip::Mode Controller::VectorClipMode() const noexcept { return im
 Result Controller::FinishInteraction() {
 	impl->BeginOperation();
 	bool active = IsInteracting();
+	if (active || impl->pressed_click_selection)
+		impl->RetireClickSequence();
 	bool toolbar_changed = false;
 	if (impl->mode == Mode::VectorClip && impl->holding &&
 		(impl->vector_mode == visual_vector_clip::Mode::Freehand || impl->vector_mode == visual_vector_clip::Mode::FreehandSmooth)) {
@@ -1731,6 +1814,8 @@ Result Controller::FinishInteraction() {
 void Controller::AcceptChanges() {
 	if (IsInteracting())
 		throw std::logic_error("Finish visual interaction before accepting changes");
+	if (!impl->drafts.empty())
+		impl->RetireClickSequence();
 	for (auto const& [id, edit] : impl->drafts)
 		impl->originals.at(id) = edit.text;
 	impl->drafts.clear();

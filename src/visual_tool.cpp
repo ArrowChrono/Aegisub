@@ -19,12 +19,8 @@
 /// @ingroup visual_ts
 
 #include "visual_tool.h"
-
 #include "visual_ass_edit.h"
 
-#include "ass_compat.h"
-#include "ass_tag_scanner.h"
-#include "perspective_quad_geometry.h"
 #include "ui_services.h"
 #include "ass_dialogue.h"
 #include "async_video_provider.h"
@@ -53,13 +49,10 @@
 #include <libaegisub/scope_exit.h>
 
 #include <algorithm>
-#include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <numbers>
 
 VisualToolBase::VisualToolBase(VideoDisplay *parent, agi::Context *context)
 	: c(context), parent(parent), command_session(context->GetCore().ass.get()), frame_number(c->GetCore().videoController->GetFrameN()), highlight_color_primary_opt(OPT_GET("Colour/Visual Tools/Highlight Primary")), highlight_color_secondary_opt(OPT_GET("Colour/Visual Tools/Highlight Secondary")), line_color_primary_opt(OPT_GET("Colour/Visual Tools/Lines Primary")), line_color_secondary_opt(OPT_GET("Colour/Visual Tools/Lines Secondary")), shaded_area_alpha_opt(OPT_GET("Colour/Visual Tools/Shaded Area Alpha")), file_changed_connection(c->GetCore().ass->AddCommitListener(&VisualToolBase::OnCommit, this)), interaction_render_timer([this] { OnInteractionRenderTimer(); }) {
@@ -224,7 +217,7 @@ void VisualToolBase::OnCommit(int type, AssDialogue const* changed) {
 
 	if (needs_file_refresh) {
 		active_line = new_active_line;
-		OnFileChanged();
+		OnFileChanged(type, changed);
 		needs_render = true;
 	}
 
@@ -745,37 +738,11 @@ static param_vec find_tag(std::vector<std::unique_ptr<AssDialogueBlock>> const& 
 	return nullptr;
 }
 
-struct DefaultPositionLayout {
-	std::array<int, 3> margins;
-	int alignment;
-};
-
-static int ReadLineAlignment(std::vector<std::unique_ptr<AssDialogueBlock>> const& blocks) {
-	int alignment = 0;
-	if (auto tag = find_tag(blocks, "\\an"))
-		alignment = (*tag)[0].Get<int>(0);
-	else if (auto tag = find_tag(blocks, "\\a"))
-		alignment = AssCompat::NormalizeLegacyAssAlignment((*tag)[0].Get<int>(0), 0);
-	return alignment;
-}
-
-static DefaultPositionLayout ResolveDefaultPositionLayout(AssDialogue const& line, AssStyle const *style, int override_alignment) {
-	DefaultPositionLayout layout{.margins = line.Margin, .alignment = style ? style->alignment : 2};
-	if (style) {
-		for (size_t i = 0; i < layout.margins.size(); ++i)
-			if (layout.margins[i] == 0)
-				layout.margins[i] = style->Margin[i];
-	}
-	if (override_alignment > 0 && override_alignment <= 9)
-		layout.alignment = override_alignment;
-	return layout;
-}
-
-Vector2D VisualToolBase::GetLinePosition(AssDialogue *diag) {
+Vector2D VisualToolBase::GetLinePosition(AssDialogue const *diag) {
 	return aegisub::visual_edit::ReadLine(*diag, c->GetCore().ass->GetStyle(diag->Style), script_res).position;
 }
 
-Vector2D VisualToolBase::GetLineOrigin(AssDialogue *diag) {
+Vector2D VisualToolBase::GetLineOrigin(AssDialogue const *diag) {
 	return aegisub::visual_edit::ReadLine(*diag, nullptr, script_res).origin.value_or(Vector2D{});
 }
 
@@ -814,7 +781,7 @@ void VisualToolBase::GetLineClip(AssDialogue *diag, Vector2D& p1, Vector2D& p2, 
 	inverse = clip.inverse;
 }
 
-std::string VisualToolBase::GetLineVectorClip(AssDialogue *diag, int &scale, bool &inverse) {
+std::string VisualToolBase::GetLineVectorClip(AssDialogue *diag, int& scale, bool& inverse) {
 	auto blocks = diag->ParseTags();
 
 	scale = 1;
@@ -877,7 +844,6 @@ void VisualToolBase::ScheduleInteractionRender() {
 	}
 }
 
-
 void VisualToolBase::SetOverride(AssDialogue *line, std::string const& tag, std::string const& value) {
 	if (!line)
 		return;
@@ -903,145 +869,6 @@ template class VisualTool<ClipCorner>;
 template class VisualTool<VisualToolDragDraggableFeature>;
 template class VisualTool<VisualToolVectorClipDraggableFeature>;
 
-VisualToolBase::GeometrySnapshot::GeometrySnapshot(AssDialogue const& line, GeometryState state, AssStyle const *style, int script_width, int script_height)
-	: source(std::make_unique<AssDialogue>(line)), state(state), geometry(line.Text.get()) {
-	bool visible = false;
-	bool animated_geometry = false;
-	bool has_position = false;
-	bool has_move = false;
-	bool malformed_position = false;
-	bool noncanonical_geometry = false;
-	bool vertical_font = style && style->font.starts_with("@");
-	bool const style_vertical_font = vertical_font;
-	bool has_reset = false;
-	size_t alignment_tags = 0;
-	std::set<std::string_view> initial_pose_tags;
-	auto const blocks = source->ParseTags();
-	size_t last_visible = 0;
-	for (size_t i = 0; i < blocks.size(); ++i) {
-		if ((blocks[i]->GetType() == AssBlockType::PLAIN || blocks[i]->GetType() == AssBlockType::DRAWING) && !blocks[i]->GetRawText().empty())
-			last_visible = i;
-	}
-	for (size_t block_index = 0; block_index < blocks.size(); ++block_index) {
-		auto const& block = blocks[block_index];
-		if (block->GetType() == AssBlockType::PLAIN || block->GetType() == AssBlockType::DRAWING) {
-			visible |= !block->GetRawText().empty();
-			if (block->GetType() == AssBlockType::PLAIN && !block->GetRawText().empty() && vertical_font)
-				validation_error = "Vertical fonts do not have a supported static clip transform in this phase.";
-			continue;
-		}
-		if (block->GetType() != AssBlockType::OVERRIDE)
-			continue;
-		auto scan = [&](auto&& self, std::string_view body, bool animated, int depth) -> void {
-			aegisub::ass_tag_scanner::ScanRawTags(body, [&](auto const& tag) {
-				if (aegisub::ass_tag_scanner::NameHasPrefix(tag.name, "t") && tag.has_paren) {
-					if (depth >= 32)
-						animated_geometry = true;
-					else
-						self(self, tag.args, true, depth + 1);
-					return;
-				}
-				for (std::string_view name : {"pos", "move", "org"}) {
-					if (tag.name.starts_with(name) && (tag.name != name || tag.name.data() != tag.bytes.data() + 1))
-						noncanonical_geometry = true;
-				}
-				if (!animated && tag.name.starts_with("fn")) {
-					auto const font = tag.name.substr(2);
-					vertical_font = font.empty() ? style_vertical_font : font.starts_with("@");
-				}
-				for (std::string_view name : {"fsc", "fscx", "fscy", "frz", "frx", "fry", "fr", "fax", "fay", "fs", "fsp", "pos", "move", "org", "clip", "iclip", "an", "a", "r", "pbo", "p"}) {
-					bool const reset = name == "r" && tag.name.starts_with("r");
-					if (!reset && !aegisub::ass_tag_scanner::NameIs(tag.name, name))
-						continue;
-					if (name != "clip" && name != "iclip" && tag.name.data() != tag.bytes.data() + 1)
-						noncanonical_geometry = true;
-					if (reset) {
-						has_reset = true;
-						validation_error = "Style resets cannot be linked safely.";
-					}
-					if (!animated && (name == "an" || name == "a"))
-						++alignment_tags;
-					if (animated)
-						animated_geometry = true;
-					if (!animated && (name == "pos" || name == "move")) {
-						auto const args = aegisub::ass_tag_scanner::SplitLibassArgs(tag.args);
-						bool supported = tag.has_paren && tag.bytes.ends_with(')') && (name == "pos" ? args.size() == 2 : args.size() == 4 || args.size() == 6) && static_cast<size_t>(std::ranges::count(tag.args, ',')) + 1 == args.size();
-						for (size_t i = 0; supported && i < args.size(); ++i) {
-							auto number = args[i];
-							if (number.starts_with('+'))
-								number.remove_prefix(1);
-							if (i >= 4) {
-								int value = 0;
-								auto const parsed = std::from_chars(number.data(), number.data() + number.size(), value);
-								supported = parsed.ec == std::errc{} && parsed.ptr == number.data() + number.size();
-							}
-							else {
-								double value = 0;
-								auto const parsed = std::from_chars(number.data(), number.data() + number.size(), value);
-								supported = parsed.ec == std::errc{} && parsed.ptr == number.data() + number.size() && std::isfinite(value);
-							}
-						}
-						malformed_position |= !supported;
-						has_position |= supported && name == "pos";
-						has_move |= supported && name == "move";
-					}
-					if (name == "fsc")
-						validation_error = "Combined scale tags cannot be linked safely; use fscx and fscy.";
-					if (visible && block_index < last_visible && name != "clip" && name != "iclip" && name != "org")
-						validation_error = "Visible runs do not have one static geometry transform.";
-					if (!animated && !visible && (name == "fscx" || name == "fscy" || name == "frz" || name == "fr" || name == "frx" || name == "fry" || name == "fax" || name == "fay" || name == "r")) {
-						if (!initial_pose_tags.insert(name == "fr" ? "frz" : name).second || name == "r")
-							validation_error = "Duplicate pose tags or style resets cannot be linked safely.";
-					}
-				}
-			});
-		};
-		scan(scan, block->GetRawText(), false, 0);
-	}
-	if (!validation_error.empty())
-		validation_kind = GeometryValidationKind::StaticPose;
-	if (animated_geometry) {
-		validation_error = "Animated geometry cannot be linked. Disable geometry linking to edit this line.";
-		validation_kind = GeometryValidationKind::UnsupportedSource;
-	}
-	if (has_position && has_move) {
-		validation_error = "Conflicting position and move tags cannot be linked safely.";
-		validation_kind = GeometryValidationKind::UnsupportedSource;
-	}
-	if (!has_position && !has_move) {
-		auto const layout = ResolveDefaultPositionLayout(line, style, ReadLineAlignment(blocks));
-		int const horizontal = (layout.alignment - 1) % 3;
-		int const vertical = (layout.alignment - 1) / 3;
-		double const x = horizontal == 0 ? layout.margins[0] : horizontal == 1 ? (static_cast<double>(script_width) + layout.margins[0] - layout.margins[1]) / 2.0
-																			   : static_cast<double>(script_width) - layout.margins[1];
-		double const y = vertical == 0   ? static_cast<double>(script_height) - layout.margins[2]
-						 : vertical == 1 ? script_height / 2.0
-										 : layout.margins[2];
-		if (!style || x != std::trunc(x) || y != std::trunc(y) || x != state.position.X() || y != state.position.Y()) {
-			validation_error = "The implicit default position cannot be linked consistently with the renderer. Set an explicit pos or disable geometry linking.";
-			validation_kind = GeometryValidationKind::UnsupportedSource;
-		}
-		if (has_reset || alignment_tags > 1) {
-			validation_error = "Implicit positioning with style resets or ambiguous alignment cannot be linked safely. Set an explicit pos or disable geometry linking.";
-			validation_kind = GeometryValidationKind::UnsupportedSource;
-		}
-	}
-	if (malformed_position) {
-		validation_error = "Malformed position or move parameters cannot be linked safely. Use complete canonical pos or move parameters, or disable geometry linking.";
-		validation_kind = GeometryValidationKind::UnsupportedSource;
-	}
-	if (noncanonical_geometry) {
-		validation_error = "Noncanonical geometry tags are parsed differently by visual tools and renderers. Normalize their spelling before linking.";
-		validation_kind = GeometryValidationKind::UnsupportedSource;
-	}
-	auto effect = line.Effect.get();
-	std::ranges::transform(effect, effect.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-	if (effect.starts_with("banner;") || effect.starts_with("scroll up;") || effect.starts_with("scroll down;")) {
-		validation_error = "Scrolling dialogue effects do not have a supported geometry transform.";
-		validation_kind = GeometryValidationKind::UnsupportedSource;
-	}
-}
-
 bool VisualToolBase::GeometryLinkingEnabled() const {
 	return SupportsGeometryLinking() && parent->GeometryLinkingEnabled();
 }
@@ -1054,26 +881,18 @@ void VisualToolBase::BeginGeometryGesture(bool mouse) {
 	geometry_edit_kind = GeometryEditKind::Affine;
 	if (!GeometryLinkingEnabled())
 		return;
-	int script_width, script_height;
-	c->GetCore().ass->GetResolution(ScriptResolutionType::PlayRes, script_width, script_height);
-	for (auto *line : c->GetCore().selectionController->GetSelectedSet()) {
-		auto const *style = c->GetCore().ass->GetStyle(line->Style);
-		auto const geometry = aegisub::visual_edit::ReadLine(*line, style, script_res);
-		GeometryState state;
-		state.position = geometry.position;
-		state.origin = geometry.origin.value_or(geometry.position);
-		state.scale = geometry.scale;
-		state.rx = geometry.rotation_x;
-		state.ry = geometry.rotation_y;
-		state.rz = geometry.rotation_z;
-		state.fax = geometry.fax;
-		state.fay = geometry.fay;
-		geometry_snapshots.try_emplace(line, *line, state, style, script_width, script_height);
-	}
+	for (auto *line : c->GetCore().selectionController->GetSelectedSet())
+		CaptureGeometrySnapshot(line);
 }
-AssDialogue *VisualToolBase::GeometrySource(AssDialogue *line) {
+void VisualToolBase::CaptureGeometrySnapshot(AssDialogue *line) {
+	if (geometry_snapshots.contains(line))
+		return;
+	auto const *style = c->GetCore().ass->GetStyle(line->Style);
+	geometry_snapshots.try_emplace(line, *line, style, script_res);
+}
+AssDialogue const *VisualToolBase::GeometrySource(AssDialogue *line) {
 	auto const found = geometry_snapshots.find(line);
-	return GeometryLinkingEnabled() && found != geometry_snapshots.end() ? found->second.source.get() : line;
+	return GeometryLinkingEnabled() && found != geometry_snapshots.end() ? &found->second.Source() : line;
 }
 void VisualToolBase::SetGeometryEditKind(GeometryEditKind kind, Vector2D translation) {
 	geometry_edit_kind = kind;
@@ -1090,122 +909,37 @@ void VisualToolBase::QueueSelectedGeometryOverride(std::string const& tag, std::
 		QueueGeometryOverride(line, tag, value);
 }
 
-bool VisualToolBase::FinishGeometryEdit() {
+std::optional<std::map<AssDialogue *, std::string>> VisualToolBase::PlanGeometryEdit() {
 	if (!GeometryLinkingEnabled() || geometry_overrides.empty())
-		return true;
+		return std::map<AssDialogue *, std::string>{};
 	auto clear = agi::make_scope_exit([&] { geometry_overrides.clear(); });
-	std::map<AssDialogue *, std::string> planned;
-	auto reject = [&](std::string const& message) {
+	std::vector<aegisub::visual_geometry::Request> requests;
+	std::vector<AssDialogue *> lines;
+	requests.reserve(geometry_overrides.size());
+	lines.reserve(geometry_overrides.size());
+	for (auto const& [line, edits] : geometry_overrides) {
+		requests.push_back({.source = &geometry_snapshots.at(line), .edits = edits});
+		lines.push_back(line);
+	}
+	auto result = aegisub::visual_geometry::Plan(requests, layout_res, geometry_mouse_gesture && mouse_pos == drag_start);
+	if (!result) {
 		if (!geometry_error_reported) {
 			geometry_error_reported = true;
-			geometry_error_message = message + "\nNo selected line was changed by this update; the last valid preview is retained.";
-			c->ShowStatus("Geometry Linking: " + message, 10000);
+			geometry_error_message = result.error + "\n" + from_wx(_("No selected line was changed by this update; the last valid preview is retained."));
+			c->ShowStatus(from_wx(_("Geometry Linking")) + ": " + result.error, 10000);
 		}
-		return false;
-	};
-	for (auto const& [line, edits] : geometry_overrides) {
-		auto const& snapshot = geometry_snapshots.at(line);
-		auto kind = edits.front().kind;
-		auto translation = edits.front().translation;
-		bool mixed = false;
-		for (auto const& edit : edits) {
-			if (edit.kind == GeometryEditKind::Translation) {
-				kind = GeometryEditKind::Translation;
-				translation = edit.translation;
-			}
-		}
-		if (std::ranges::any_of(edits, [](auto const& edit) { return edit.kind == GeometryEditKind::Endpoint; }))
-			kind = GeometryEditKind::Endpoint;
-		for (auto const& edit : edits) {
-			if (edit.kind == kind) {
-				if (kind == GeometryEditKind::Translation && (edit.translation - translation).SquareLen() > 0.000001f)
-					mixed = true;
-				continue;
-			}
-			if (kind == GeometryEditKind::Translation && edit.tag == "\\org") {
-				AssOverrideTag parsed(edit.tag + edit.value);
-				Vector2D const target(parsed.Params[0].Get<float>(), parsed.Params[1].Get<float>());
-				if ((target - snapshot.state.origin - translation).SquareLen() > 0.000001f)
-					mixed = true;
-			}
-			else
-				mixed = true;
-		}
-		bool const linked_object = kind == GeometryEditKind::Translation || kind == GeometryEditKind::Endpoint
-									   ? snapshot.geometry.HasClip() || snapshot.geometry.HasOrigin()
-									   : snapshot.geometry.HasClip();
-		if (geometry_mouse_gesture && mouse_pos == drag_start) {
-			planned.emplace(line, snapshot.source->Text.get());
-			continue;
-		}
-		AssDialogue candidate(*snapshot.source);
-		if (linked_object) {
-			if (mixed)
-				return reject("Selected features request incompatible geometry edits on the same line. Select a position or one origin, or disable geometry linking.");
-			if (!snapshot.validation_error.empty() && !(kind == GeometryEditKind::Translation && snapshot.validation_kind == GeometryValidationKind::StaticPose))
-				return reject(snapshot.validation_error);
-			if (kind == GeometryEditKind::Endpoint)
-				return reject("Editing a single move endpoint or its time cannot preserve attached geometry over the complete trajectory. Use Drag double-click to translate the complete trajectory, or disable geometry linking.");
-			aegisub::motion_track::TrackTransform transform;
-			if (kind == GeometryEditKind::Translation)
-				transform.matrix = {1, 0, translation.X(), 0, 1, translation.Y(), 0, 0, 1};
-			else {
-				GeometryState next = snapshot.state;
-				for (auto const& edit : edits) {
-					AssOverrideTag parsed(edit.tag + edit.value);
-					if (edit.tag == "\\fscx")
-						next.scale = Vector2D(parsed.Params[0].Get<float>(), next.scale.Y());
-					if (edit.tag == "\\fscy")
-						next.scale = Vector2D(next.scale.X(), parsed.Params[0].Get<float>());
-					if (edit.tag == "\\frz")
-						next.rz = parsed.Params[0].Get<float>();
-					if (edit.tag == "\\org")
-						next.origin = Vector2D(parsed.Params[0].Get<float>(), parsed.Params[1].Get<float>());
-					if (edit.tag == "\\frx")
-						next.rx = parsed.Params[0].Get<float>();
-					if (edit.tag == "\\fry")
-						next.ry = parsed.Params[0].Get<float>();
-				}
-				if (kind == GeometryEditKind::Perspective || snapshot.state.rx != 0 || snapshot.state.ry != 0 || next.rx != 0 || next.ry != 0)
-					return reject("Perspective clip linking is not supported in this phase. Disable geometry linking to edit this pose.");
-				Vector2D p1, p2;
-				int t1, t2;
-				if (GetLineMove(snapshot.source.get(), p1, p2, t1, t2))
-					return reject("A moving line has no single static clip transform. Translate its complete trajectory, or disable geometry linking.");
-				if (snapshot.state.scale.X() <= 0 || snapshot.state.scale.Y() <= 0 || next.scale.X() <= 0 || next.scale.Y() <= 0)
-					return reject("Non-positive scales cannot be linked. Use positive X and Y scales.");
-				double const aspect = (layout_res.X() / script_res.X()) / (layout_res.Y() / script_res.Y());
-				auto matrix = [&](GeometryState const& state) {
-					double const theta = -state.rz * std::numbers::pi / 180;
-					double const cosine = std::cos(theta), sine = std::sin(theta);
-					double const sx = state.scale.X() / 100.0, sy = state.scale.Y() / 100.0;
-					double const a = cosine * sx - sine * sy * state.fay;
-					double const b = (cosine * sx * state.fax - sine * sy) / aspect;
-					double const d = (sine * sx + cosine * sy * state.fay) * aspect;
-					double const e = sine * sx * state.fax + cosine * sy;
-					auto const offset = state.position - state.origin;
-					double const tx = state.origin.X() + cosine * offset.X() - sine * offset.Y() / aspect;
-					double const ty = state.origin.Y() + sine * offset.X() * aspect + cosine * offset.Y();
-					return perspective::Matrix3({a, b, tx, d, e, ty, 0, 0, 1});
-				};
-				auto const before = matrix(snapshot.state), after = matrix(next);
-				auto inverse = before.Inverse();
-				if (!inverse || !after.Inverse())
-					return reject("Zero scale or singular shear cannot be linked. Use nonzero scales and a nonsingular pose.");
-				transform.matrix = (after * *inverse).Values();
-				transform.matrix[6] = transform.matrix[7] = 0;
-				transform.matrix[8] = 1;
-			}
-			auto linked = snapshot.geometry.Transform(transform, kind == GeometryEditKind::Translation);
-			if (!linked.success)
-				return reject(linked.error);
-			candidate.Text = linked.text;
-		}
-		for (auto const& edit : edits)
-			aegisub::visual_edit::SetOverride(candidate, edit.tag, edit.value);
-		planned.emplace(line, candidate.Text.get());
+		return std::nullopt;
 	}
-	for (auto const& [line, text] : planned) {
+	std::map<AssDialogue *, std::string> planned;
+	for (size_t i = 0; i < result.edits.size(); ++i)
+		planned.emplace(lines[i], std::move(result.edits[i].text));
+	return planned;
+}
+bool VisualToolBase::FinishGeometryEdit() {
+	auto planned = PlanGeometryEdit();
+	if (!planned)
+		return false;
+	for (auto const& [line, text] : *planned) {
 		if (line->Text.get() == text)
 			continue;
 		line->Text = text;
@@ -1224,6 +958,6 @@ void VisualToolBase::ReportGeometryError() {
 	auto notification = c->GetNotificationSink();
 	parent->CallAfter([notification = std::move(notification), message = std::move(message)] {
 		if (notification)
-			notification->ShowWarning("Geometry Linking", message);
+			notification->ShowWarning(from_wx(_("Geometry Linking")), message);
 	});
 }

@@ -887,6 +887,7 @@ set(AEGISUB_CORE_SOURCES
     src/visual_ass_edit.cpp
     src/visual_edit_controller.cpp
     src/visual_feature_overlay.cpp
+    src/visual_geometry_link.cpp
     src/visual_guide_controller.cpp
     src/visual_guide_interaction.cpp
     src/visual_guide_model.cpp

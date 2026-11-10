@@ -112,7 +112,9 @@ struct Result {
 
 enum class OverrideIntent : std::uint8_t { Translation,
 										   Endpoint,
-										   Origin };
+										   Origin,
+										   Affine,
+										   Perspective };
 
 struct OverrideEdit {
 	int id;
@@ -120,6 +122,7 @@ struct OverrideEdit {
 	std::string value;
 	OverrideIntent intent;
 	Vector2D translation{0, 0};
+	bool restore_source = false;
 };
 
 using OverridePlanner = std::function<std::optional<std::vector<VisualTextEdit>>(std::span<OverrideEdit const>)>;
@@ -156,9 +159,9 @@ class Controller final {
 	Result BeginPreparedPress(bool preserve_move_times = false, OverridePlanner const& planner = {});
 	Result ToggleMovePosition();
 	[[nodiscard]] bool CanNudge() const;
-	Result Nudge(Vector2D direction, float step, float origin_step);
+	Result Nudge(Vector2D direction, float step, float origin_step, OverridePlanner const& planner = {});
 	[[nodiscard]] bool CanNormalizeScale(visual_tool_scale_policy::Axis axis) const;
-	Result NormalizeScale(visual_tool_scale_policy::Axis axis);
+	Result NormalizeScale(visual_tool_scale_policy::Axis axis, OverridePlanner const& planner = {});
 	[[nodiscard]] bool CanResetShear(visual_shear::Axis axis) const;
 	Result ResetShear(visual_shear::Axis axis);
 	Result SetVectorClipMode(visual_vector_clip::Mode mode);
