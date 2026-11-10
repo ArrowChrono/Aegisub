@@ -211,7 +211,6 @@ if(GTEST_FOUND)
         src/resample_dialog_policy.cpp
         src/resolution_resampler.cpp
         src/single_choice_layout.cpp
-        src/spline_curve.cpp
         src/text_file_writer.cpp
         src/vobsub_packet_stream.cpp
         src/text_file_reader.cpp
@@ -406,6 +405,7 @@ if(GTEST_FOUND)
         tests/tests/visual_tool_scale_policy.cpp
         tests/tests/visual_tool_shear_policy.cpp
         tests/tests/visual_tool_shear_shared.cpp
+        tests/tests/visual_tool_vector_clip_shared.cpp
         tests/tests/navigation_preview_policy.cpp
         tests/tests/deadline_pacing_policy.cpp
         tests/tests/video_tool_release_feedback.cpp

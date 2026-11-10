@@ -891,6 +891,7 @@ set(AEGISUB_CORE_SOURCES
     src/visual_tool_drag_snapshot.cpp
     src/visual_tool_shear_policy.cpp
     src/visual_tool_shear_shared.cpp
+    src/visual_tool_vector_clip_shared.cpp
     src/subtitle_editor_ops.cpp
     src/subtitle_grid_ops.cpp
     src/subtitle_grid_folding.cpp
@@ -1040,10 +1041,8 @@ set(AEGISUB_CORE_SOURCES
     src/font_matching_common.cpp
     src/font_matching_libass.cpp
     # Utility / math / codecs
-    # NOTE: spline/spline_curve depend on VisualToolBase (coord translator) and
-    # transitively on visual_tool.h which exposes wxString. They stay in the
-    # exe until the coord-translator is abstracted (part of the visual tool
-    # cluster cleanup).
+    src/spline.cpp
+    src/spline_curve.cpp
     src/colorspace.cpp
     src/fft.cpp
     src/string_codec.cpp
@@ -1388,9 +1387,6 @@ add_executable(Aegisub WIN32
     src/project.cpp
     src/text_selection_controller.cpp
     src/subs_controller_timer.cpp
-    # spline cluster (depends on VisualToolBase)
-    src/spline.cpp
-    src/spline_curve.cpp
     src/fontcollector_subcommand.cpp
     ${AEGISUB_SHARED_EXE_ENTRY_SOURCES}
     ${AEGISUB_SHARED_HEADLESS_ENTRY_BOOTSTRAP_SOURCES}

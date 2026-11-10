@@ -47,6 +47,63 @@ Key MakeKey(VisualToolFeatureKey const& key) {
 	return {key.line_id.value_or(NoLine), key.type, key.line_id ? 0 : key.index};
 }
 
+bool SameVectorPath(Spline const& first, Spline const& second) {
+	return first.GetScale() == second.GetScale() && first.size() == second.size() &&
+		   std::ranges::equal(first, second, [](SplineCurve const& left, SplineCurve const& right) {
+			   return left.type == right.type && left.p1 == right.p1 && left.p2 == right.p2 &&
+					  left.p3 == right.p3 && left.p4 == right.p4;
+		   });
+}
+
+bool ValidVectorViewport(Viewport const& viewport) {
+	auto finite = [](Vector2D point) { return std::isfinite(point.X()) && std::isfinite(point.Y()); };
+	return finite(viewport.video_position) && finite(viewport.video_size) && finite(viewport.script_size) &&
+		   viewport.video_size.X() > 0 && viewport.video_size.Y() > 0 && viewport.script_size.X() > 0 && viewport.script_size.Y() > 0;
+}
+
+class VectorClipSnapshot final : public VisualToolRenderSnapshot {
+	public:
+	Spline path;
+	std::vector<visual_vector_clip::Feature> features;
+	std::shared_ptr<int const> source;
+	visual_vector_clip::Mode mode = visual_vector_clip::Mode::Drag;
+	Viewport viewport;
+	Style style;
+	std::optional<Vector2D> pointer;
+	Vector2D drag_start;
+	bool inverse = false;
+	bool editable = false;
+	bool holding = false;
+
+	using VisualToolRenderSnapshot::VisualToolRenderSnapshot;
+
+	[[nodiscard]] std::optional<VisualToolFeatureKey> HitTest(Vector2D const& point) const override {
+		if (editable)
+			if (auto index = visual_vector_clip::HitTest(features, point))
+				return VisualToolFeatureKey{.type = features[*index].square ? DRAG_SMALL_SQUARE : DRAG_SMALL_CIRCLE, .index = *index};
+		return {};
+	}
+
+	void Draw(VideoOverlayDrawContext& target) const override {
+		visual_vector_clip::DrawOverlay(target, {
+													.spline = path,
+													.features = features,
+													.mode = mode,
+													.inverse = inverse,
+													.video_position = viewport.video_position,
+													.video_size = viewport.video_size,
+													.pointer = pointer.value_or(Vector2D{}),
+													.pointer_valid = pointer.has_value(),
+													.holding = holding,
+													.drag_start = drag_start,
+													.line_colour = VideoOverlayColourFromRgb(style.line_primary),
+													.highlight_primary = VideoOverlayColourFromRgb(style.highlight_primary),
+													.highlight_secondary = VideoOverlayColourFromRgb(style.highlight_secondary),
+													.shaded_alpha = style.shaded_alpha,
+												});
+	}
+};
+
 class CrossSnapshot final : public VisualToolRenderSnapshot {
 	public:
 	Vector2D pointer;
@@ -266,6 +323,20 @@ struct Controller::Impl {
 	std::map<int, Line> planned_sources;
 	mutable visual_transform::RotateXYOverlayGeometryCache xy_geometry;
 	visual_shear::Axis shear_axis = visual_shear::Axis::X;
+	Spline vector_path;
+	Spline vector_baseline;
+	std::vector<visual_vector_clip::Feature> vector_features;
+	std::vector<visual_vector_clip::Feature> vector_start_features;
+	std::set<size_t> vector_picked;
+	std::set<size_t> vector_box_initial;
+	std::optional<size_t> vector_hovered;
+	std::optional<size_t> vector_prepared_feature;
+	std::optional<visual_vector_clip::ClosestPoint> vector_prepared_closest;
+	std::optional<Vector2D> vector_pointer;
+	std::shared_ptr<int const> vector_source = std::make_shared<int const>(0);
+	visual_vector_clip::Mode vector_mode = visual_vector_clip::Mode::Drag;
+	std::string vector_original_value;
+	bool vector_path_valid = false;
 
 	explicit Impl(Mode mode) : mode(mode) {}
 
@@ -306,6 +377,261 @@ struct Controller::Impl {
 		return geometry;
 	}
 
+	void RetireVectorPress() {
+		prepared = false;
+		vector_prepared_feature.reset();
+		vector_prepared_closest.reset();
+		vector_source = std::make_shared<int const>(0);
+	}
+
+	void RebuildVectorFeatures(bool clear_selection = false) {
+		vector_features = visual_vector_clip::MakeFeatures(vector_path);
+		if (clear_selection)
+			vector_picked.clear();
+		else
+			std::erase_if(vector_picked, [&](size_t index) { return index >= vector_features.size(); });
+		if (vector_hovered && *vector_hovered >= vector_features.size())
+			vector_hovered.reset();
+	}
+
+	void RebuildVectorPath() {
+		RetireVectorPress();
+		vector_path_valid = false;
+		vector_path = Spline{};
+		vector_features.clear();
+		vector_picked.clear();
+		vector_hovered.reset();
+		if (!ActiveVisible() || !ValidVectorViewport(viewport))
+			return;
+		auto const& clip = GetLine(*active).vector_clip;
+		if (!clip.editable)
+			return;
+		vector_path.SetCoordinateSystem({.video_position = viewport.video_position, .video_size = viewport.video_size, .script_size = viewport.script_size});
+		vector_path.SetScale(clip.scale);
+		vector_path.DecodeFromAss(clip.drawing);
+		vector_path_valid = visual_vector_clip::IsEncodable(vector_path);
+		if (vector_path_valid)
+			RebuildVectorFeatures();
+	}
+
+	[[nodiscard]] bool CanEditVector() const {
+		return ActiveVisible() && vector_path_valid && !selected.empty() &&
+			   std::ranges::all_of(selected, [&](int id) { return GetLine(id).vector_clip.editable; });
+	}
+
+	[[nodiscard]] bool MatchesVectorSnapshot(VectorClipSnapshot const& snapshot) const {
+		return snapshot.source == vector_source && snapshot.mode == vector_mode &&
+			   snapshot.viewport.video_position == viewport.video_position && snapshot.viewport.video_size == viewport.video_size &&
+			   snapshot.viewport.script_size == viewport.script_size && SameVectorPath(snapshot.path, vector_path);
+	}
+
+	bool WriteVectorPath(Spline candidate) {
+		if (!visual_vector_clip::IsEncodable(candidate))
+			return false;
+		bool const geometry_changed = !SameVectorPath(vector_path, candidate);
+		auto const value = visual_vector_clip::BuildClipValue(candidate);
+		bool const original = value == vector_original_value;
+		std::string const drawing = original ? std::string{} : candidate.EncodeToAss();
+		std::vector<Line> replacements;
+		replacements.reserve(selected.size());
+		for (int id : selected) {
+			auto replacement = planned_sources.at(id);
+			if (!original) {
+				replacement.text = SetOverride(replacement.text, replacement.vector_clip.inverse ? "\\iclip" : "\\clip", value);
+				replacement.vector_clip.drawing = drawing;
+				replacement.vector_clip.scale = candidate.GetScale();
+			}
+			replacements.push_back(std::move(replacement));
+		}
+		for (auto& replacement : replacements) {
+			auto& current = GetLine(replacement.id);
+			if (current.text != replacement.text)
+				dirty.insert(replacement.id);
+			current = std::move(replacement);
+		}
+		vector_path = std::move(candidate);
+		RebuildVectorFeatures();
+		return geometry_changed || !dirty.empty();
+	}
+
+	Result BeginVectorPress() {
+		using VectorMode = visual_vector_clip::Mode;
+		if (!prepared)
+			return {};
+		prepared = false;
+		if (!CanEditVector())
+			return {};
+		planned_sources.clear();
+		CapturePlannedSources();
+		vector_baseline = vector_path;
+		vector_start_features = vector_features;
+		vector_original_value = visual_vector_clip::BuildClipValue(vector_path);
+		if (vector_prepared_feature) {
+			if (vector_mode == VectorMode::Remove) {
+				auto candidate = vector_path;
+				auto const& feature = vector_features.at(*vector_prepared_feature);
+				if (!visual_vector_clip::RemovePoint(candidate, feature.curve_index, feature.point) || !WriteVectorPath(std::move(candidate)))
+					return {};
+				vector_picked.clear();
+				vector_hovered.reset();
+				return {.interaction_began = true, .interaction_ended = true, .geometry_changed = true};
+			}
+			dragging = true;
+			return {.capture = CaptureAction::Capture, .interaction_began = true, .geometry_changed = true};
+		}
+		if (vector_mode == VectorMode::Drag) {
+			vector_box_initial = vector_picked;
+			holding = true;
+			return {.capture = CaptureAction::Capture, .interaction_began = true, .geometry_changed = true};
+		}
+		auto candidate = vector_path;
+		bool discrete = false;
+		if (vector_mode == VectorMode::Convert || vector_mode == VectorMode::Insert) {
+			if (!vector_prepared_closest)
+				return {};
+			bool const changed = vector_mode == VectorMode::Convert ? visual_vector_clip::Convert(candidate, *vector_prepared_closest)
+																	: visual_vector_clip::Insert(candidate, *vector_prepared_closest);
+			if (!changed)
+				return {};
+			discrete = true;
+		}
+		else if (vector_mode == VectorMode::Line || vector_mode == VectorMode::Bicubic || vector_mode == VectorMode::Move) {
+			visual_vector_clip::Append(candidate, vector_mode, drag_start);
+			discrete = vector_mode == VectorMode::Move;
+			if (!discrete)
+				visual_vector_clip::UpdateAppend(candidate, vector_mode, drag_start);
+		}
+		else if (vector_mode == VectorMode::Freehand || vector_mode == VectorMode::FreehandSmooth)
+			visual_vector_clip::BeginFreehand(candidate, drag_start);
+		else
+			return {};
+		if (!visual_vector_clip::IsEncodable(candidate))
+			return {};
+		WriteVectorPath(std::move(candidate));
+		vector_picked.clear();
+		vector_hovered.reset();
+		holding = !discrete;
+		return {.capture = discrete ? CaptureAction::None : CaptureAction::Capture, .interaction_began = true, .interaction_ended = discrete, .geometry_changed = true};
+	}
+
+	bool UpdateVectorHold(Vector2D position, bool final) {
+		using VectorMode = visual_vector_clip::Mode;
+		if (vector_mode == VectorMode::Drag) {
+			auto picked = vector_box_initial;
+			for (size_t i = 0; i < vector_features.size(); ++i)
+				if (visual_vector_clip::InBox(drag_start, position, vector_features[i].position))
+					picked.insert(i);
+			bool const changed = picked != vector_picked || vector_pointer != position;
+			vector_picked = std::move(picked);
+			vector_pointer = position;
+			return changed;
+		}
+		auto candidate = vector_path;
+		if (vector_mode == VectorMode::Line || vector_mode == VectorMode::Bicubic)
+			visual_vector_clip::UpdateAppend(candidate, vector_mode, position);
+		else if (vector_mode == VectorMode::Freehand || vector_mode == VectorMode::FreehandSmooth)
+			visual_vector_clip::UpdateFreehand(candidate, vector_mode, position, final);
+		if (!visual_vector_clip::IsEncodable(candidate))
+			return false;
+		bool const changed = WriteVectorPath(std::move(candidate));
+		vector_pointer = position;
+		return changed;
+	}
+
+	Result VectorPointer(PointerInput const& input, VisualToolRenderSnapshot const *displayed, bool defer_begin) {
+		using VectorMode = visual_vector_clip::Mode;
+		Result result;
+		if (input.phase == PointerPhase::Leave) {
+			if (!dragging && !holding) {
+				result.geometry_changed = vector_pointer.has_value() || vector_hovered.has_value();
+				vector_pointer.reset();
+				vector_hovered.reset();
+			}
+			return result;
+		}
+		bool const finite = std::isfinite(input.position.X()) && std::isfinite(input.position.Y());
+		if (dragging || holding) {
+			bool const final = !input.left_down;
+			if (finite) {
+				if (dragging) {
+					auto candidate = vector_baseline;
+					auto delta = input.position - drag_start;
+					if (input.shift)
+						delta = delta.SingleAxis();
+					for (size_t index : vector_picked) {
+						auto const& feature = vector_start_features.at(index);
+						candidate.MovePoint(candidate.begin() + feature.curve_index, feature.point, feature.position + delta);
+					}
+					if (visual_vector_clip::IsEncodable(candidate)) {
+						result.geometry_changed = WriteVectorPath(std::move(candidate));
+						vector_pointer = input.position;
+					}
+				}
+				else
+					result.geometry_changed = UpdateVectorHold(input.position, final);
+			}
+			if (final) {
+				if (dragging && SameVectorPath(vector_path, vector_baseline) && !selection_changed_on_press && vector_prepared_feature) {
+					if (input.control)
+						vector_picked.erase(*vector_prepared_feature);
+					else
+						vector_picked = {*vector_prepared_feature};
+					result.geometry_changed = true;
+				}
+				if (holding && (vector_mode == VectorMode::Freehand || vector_mode == VectorMode::FreehandSmooth)) {
+					if (vector_pointer && (!finite || *vector_pointer != input.position))
+						result.geometry_changed |= UpdateVectorHold(*vector_pointer, true);
+					vector_mode = VectorMode::Drag;
+					result.toolbar_changed = true;
+				}
+				dragging = holding = false;
+				vector_hovered.reset();
+				result.capture = CaptureAction::Release;
+				result.interaction_ended = true;
+			}
+			return result;
+		}
+		if (input.phase == PointerPhase::Release || input.phase == PointerPhase::DoubleClick || !finite || !vector_path_valid)
+			return result;
+		auto const snapshot = dynamic_cast<VectorClipSnapshot const *>(displayed);
+		if (input.phase == PointerPhase::Press &&
+			(!CanEditVector() || (displayed && (!snapshot || !MatchesVectorSnapshot(*snapshot)))))
+			return result;
+		auto const& hit_features = snapshot ? snapshot->features : vector_features;
+		auto const hit = visual_vector_clip::HitTest(hit_features, input.position);
+		result.geometry_changed = vector_hovered != hit || vector_pointer != input.position;
+		vector_hovered = hit;
+		vector_pointer = input.position;
+		if (input.phase != PointerPhase::Press)
+			return result;
+		drag_start = input.position;
+		vector_prepared_feature = hit;
+		vector_prepared_closest.reset();
+		if (hit) {
+			selection_changed_on_press = !vector_picked.contains(*hit);
+			if (selection_changed_on_press) {
+				if (!input.control)
+					vector_picked.clear();
+				vector_picked.insert(*hit);
+			}
+		}
+		else {
+			if (!input.control && !input.alt)
+				vector_picked.clear();
+			if (vector_mode == VectorMode::Convert || vector_mode == VectorMode::Insert)
+				vector_prepared_closest = visual_vector_clip::FindClosest(snapshot ? snapshot->path : vector_path, input.position);
+		}
+		prepared = true;
+		if (!defer_begin) {
+			auto begin = BeginVectorPress();
+			result.capture = begin.capture;
+			result.interaction_began = begin.interaction_began;
+			result.interaction_ended = begin.interaction_ended;
+			result.geometry_changed |= begin.geometry_changed;
+		}
+		return result;
+	}
+
 	void ReindexFeatures() {
 		feature_index.clear();
 		for (size_t i = 0; i < features.size(); ++i)
@@ -344,7 +670,9 @@ struct Controller::Impl {
 	void RebuildFeatures() {
 		features.clear();
 		picked.clear();
-		if (mode == Mode::Drag) {
+		if (mode == Mode::VectorClip)
+			RebuildVectorPath();
+		else if (mode == Mode::Drag) {
 			for (auto const& line : lines)
 				if (visibility.Visible().contains(const_cast<Line *>(&line)))
 					AddLineFeatures(line);
@@ -359,6 +687,11 @@ struct Controller::Impl {
 	void SetSelection(std::set<int> value, std::optional<int> active_line) {
 		if (selected == value && active == active_line)
 			return;
+		if (mode == Mode::VectorClip) {
+			if (dragging || holding)
+				throw std::logic_error("Finish vector interaction before changing selection");
+			RetireVectorPress();
+		}
 		for (auto const& feature : features) {
 			auto id = std::get<0>(feature.key);
 			if (selected.contains(id) && !value.contains(id))
@@ -996,11 +1329,15 @@ void Controller::Reset(std::vector<Line> lines, std::set<int> selected, std::opt
 	}
 	impl->visibility.Rebuild(intervals, frame.number);
 	impl->RebuildFeatures();
+	if (mode == Mode::VectorClip)
+		impl->vector_mode = impl->vector_path.empty() ? visual_vector_clip::Mode::Line : visual_vector_clip::Mode::Drag;
 }
 
 void Controller::SetFrame(Frame frame) {
 	if (IsInteracting())
 		throw std::logic_error("Finish visual interaction before changing frame");
+	if (impl->mode == Mode::VectorClip)
+		impl->RetireVectorPress();
 	std::vector<Line *> entered;
 	std::vector<Line *> exited;
 	bool was_active_visible = impl->ActiveVisible();
@@ -1026,6 +1363,8 @@ void Controller::UpdateLines(std::span<Line const> replacements) {
 	auto& s = *impl;
 	if (IsInteracting() || !s.drafts.empty())
 		throw std::logic_error("Finish or discard visual drafts before replacing lines");
+	if (s.mode == Mode::VectorClip)
+		s.RetireVectorPress();
 	std::unordered_set<int> ids;
 	bool timing_changed = false;
 	for (auto const& line : replacements) {
@@ -1078,6 +1417,32 @@ void Controller::UpdateLines(std::span<Line const> replacements) {
 void Controller::SetViewport(Viewport viewport) {
 	if (IsInteracting())
 		throw std::logic_error("Finish visual interaction before changing viewport");
+	if (impl->mode == Mode::VectorClip) {
+		auto& s = *impl;
+		s.RetireVectorPress();
+		if (!s.vector_path_valid || !ValidVectorViewport(viewport)) {
+			s.viewport = viewport;
+			s.RebuildVectorPath();
+			return;
+		}
+		auto project = [&](Vector2D point) {
+			return s.ToScript(point) * viewport.video_size / viewport.script_size + viewport.video_position;
+		};
+		for (auto& curve : s.vector_path) {
+			curve.p1 = project(curve.p1);
+			if (curve.type != SplineCurve::POINT)
+				curve.p2 = project(curve.p2);
+			if (curve.type == SplineCurve::BICUBIC) {
+				curve.p3 = project(curve.p3);
+				curve.p4 = project(curve.p4);
+			}
+		}
+		s.viewport = viewport;
+		s.vector_path.SetCoordinateSystem({.video_position = viewport.video_position, .video_size = viewport.video_size, .script_size = viewport.script_size});
+		s.vector_path_valid = visual_vector_clip::IsEncodable(s.vector_path);
+		s.RebuildVectorFeatures();
+		return;
+	}
 	for (auto& feature : impl->features)
 		feature.position = impl->ToScript(feature.position) * viewport.video_size / viewport.script_size + viewport.video_position;
 	impl->viewport = viewport;
@@ -1089,6 +1454,11 @@ Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot c
 	auto& s = *impl;
 	s.BeginOperation();
 	Result result;
+	if (s.mode == Mode::VectorClip) {
+		result = s.VectorPointer(input, displayed_snapshot, defer_begin);
+		s.EndOperation();
+		return result;
+	}
 	if (s.mode == Mode::Cross) {
 		if (input.phase == PointerPhase::Leave) {
 			s.cross_pointer.reset();
@@ -1189,7 +1559,14 @@ Result Controller::Pointer(PointerInput const& input, VisualToolRenderSnapshot c
 	return result;
 }
 
-Result Controller::BeginPreparedPress(bool preserve_move_times, OverridePlanner const& planner) { return impl->BeginPress(preserve_move_times, static_cast<bool>(planner)); }
+Result Controller::BeginPreparedPress(bool preserve_move_times, OverridePlanner const& planner) {
+	if (impl->mode != Mode::VectorClip)
+		return impl->BeginPress(preserve_move_times, static_cast<bool>(planner));
+	impl->BeginOperation();
+	auto result = impl->BeginVectorPress();
+	impl->EndOperation();
+	return result;
+}
 
 Result Controller::ToggleMovePosition() {
 	auto& s = *impl;
@@ -1317,14 +1694,38 @@ Result Controller::ResetShear(visual_shear::Axis axis) {
 	return s.ApplyCommand(std::move(changes));
 }
 
+Result Controller::SetVectorClipMode(visual_vector_clip::Mode mode) {
+	if (impl->mode != Mode::VectorClip || static_cast<int>(mode) >= visual_vector_clip::kModeCount ||
+		impl->vector_mode == mode || impl->prepared || IsInteracting())
+		return {};
+	impl->vector_mode = mode;
+	impl->vector_hovered.reset();
+	impl->RetireVectorPress();
+	return {.geometry_changed = true, .toolbar_changed = true};
+}
+
+visual_vector_clip::Mode Controller::VectorClipMode() const noexcept { return impl->vector_mode; }
+
 Result Controller::FinishInteraction() {
 	impl->BeginOperation();
 	bool active = IsInteracting();
+	bool toolbar_changed = false;
+	if (impl->mode == Mode::VectorClip && impl->holding &&
+		(impl->vector_mode == visual_vector_clip::Mode::Freehand || impl->vector_mode == visual_vector_clip::Mode::FreehandSmooth)) {
+		if (impl->vector_pointer)
+			impl->UpdateVectorHold(*impl->vector_pointer, true);
+		impl->vector_mode = visual_vector_clip::Mode::Drag;
+		toolbar_changed = true;
+		impl->EndOperation();
+	}
 	impl->dragging = false;
 	impl->holding = false;
 	impl->prepared = false;
 	impl->hovered.reset();
-	return {.capture = active ? CaptureAction::Release : CaptureAction::None, .interaction_ended = active, .geometry_changed = active};
+	impl->vector_hovered.reset();
+	impl->vector_prepared_feature.reset();
+	impl->vector_prepared_closest.reset();
+	return {.capture = active ? CaptureAction::Release : CaptureAction::None, .interaction_ended = active, .geometry_changed = active, .toolbar_changed = toolbar_changed};
 }
 
 void Controller::AcceptChanges() {
@@ -1356,6 +1757,27 @@ std::span<const VisualTextEdit> Controller::DraftChanges() const noexcept { retu
 
 std::shared_ptr<const VisualToolRenderSnapshot> Controller::CaptureSnapshot(std::shared_ptr<const VisualToolRenderContext> const& context, Style const& style) const {
 	auto const& s = *impl;
+	if (s.mode == Mode::VectorClip) {
+		if (!s.ActiveVisible() || !s.vector_path_valid)
+			return {};
+		auto snapshot = std::make_shared<VectorClipSnapshot>(context);
+		snapshot->path = s.vector_path;
+		snapshot->features = s.vector_features;
+		for (size_t i = 0; i < snapshot->features.size(); ++i) {
+			snapshot->features[i].selected = s.vector_picked.contains(i);
+			snapshot->features[i].active = s.vector_hovered == i;
+		}
+		snapshot->source = s.vector_source;
+		snapshot->mode = s.vector_mode;
+		snapshot->viewport = s.viewport;
+		snapshot->style = style;
+		snapshot->pointer = s.vector_pointer;
+		snapshot->drag_start = s.drag_start;
+		snapshot->inverse = s.GetLine(*s.active).vector_clip.inverse;
+		snapshot->editable = s.CanEditVector();
+		snapshot->holding = s.holding;
+		return snapshot;
+	}
 	if (s.mode == Mode::Cross) {
 		if (!s.cross_pointer || !visual_cross::IsValidGeometry(*s.cross_pointer, s.viewport))
 			return {};

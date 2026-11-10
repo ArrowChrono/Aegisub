@@ -27,6 +27,8 @@
 //
 // Aegisub Project http://www.aegisub.org/
 
+#pragma once
+
 #include "spline_curve.h"
 
 #include <bit>
@@ -36,8 +38,6 @@
 #include <span>
 #include <string>
 #include <vector>
-
-class VisualToolBase;
 
 namespace spline_detail {
 struct ClosingSegment {
@@ -98,77 +98,84 @@ inline bool FindClosestParametricPoint(
 }
 
 class Spline final : private std::vector<SplineCurve> {
-	/// Visual tool to do the conversion between script and video pixels
-	const VisualToolBase &coord_translator;
-	/// Spline scale
-	int scale = 0;
-	int raw_scale = 0;
+	public:
+	struct CoordinateSystem {
+		Vector2D video_position{0, 0};
+		Vector2D video_size{1, 1};
+		Vector2D script_size{1, 1};
+	};
 
-	/// Video coordinates -> Script coordinates
-	Vector2D ToScript(Vector2D vec) const;
-
-	/// Script coordinates -> Video coordinates
+	private:
+	CoordinateSystem coordinates;
+	int scale = 1;
+	int raw_scale = 1;
 	Vector2D FromScript(Vector2D vec) const;
+
 public:
-	Spline(const VisualToolBase &scale);
+Spline() = default;
+explicit Spline(CoordinateSystem coordinates);
+void SetCoordinateSystem(CoordinateSystem coordinates);
+Vector2D ToScript(Vector2D vec) const;
 
 	/// Encode to an ASS vector drawing
-	std::string EncodeToAss() const;
+std::string EncodeToAss() const;
 
 	/// Decode an ASS vector drawing
-	void DecodeFromAss(std::string const& str);
+void DecodeFromAss(std::string const& str);
 
 	/// Set the scale
 	/// @param new_scale Power-of-two to scale coordinates by
-	void SetScale(int new_scale);
+void SetScale(int new_scale);
 	/// Get the current scale
-	int GetScale() const { return raw_scale; }
+int GetScale() const { return raw_scale; }
 
 	/// @brief Moves a specific point in the spline
 	/// @param curve Curve which the point is in
 	/// @param point Index in the curve
 	/// @param pos New position
-	void MovePoint(iterator curve, int point, Vector2D pos);
+void MovePoint(iterator curve, int point, Vector2D pos);
 
 	/// Smooth the spline
-	void Smooth(float smooth=1.0f);
+void Smooth(float smooth = 1.0f);
 
 	/// Gets a list of points in the curve
-	std::vector<float> GetPointList(std::vector<int>& first, std::vector<int>& count);
+std::vector<float> GetPointList(std::vector<int>& first, std::vector<int>& count) const;
 	/// Gets a list of points in the curve
-	std::vector<float> GetPointList(iterator curve);
+std::vector<float> GetPointList(const_iterator curve) const;
 
+bool FindClosestParametricPoint(Vector2D reference, std::size_t& curve_index,
+								float& t, Vector2D& point, std::optional<spline_detail::ClosingSegment> *closing = nullptr) const;
 	/// Get t value and curve of the point closest to reference
-	void GetClosestParametricPoint(Vector2D reference, iterator& curve, float &t, Vector2D &point,
-		std::optional<spline_detail::ClosingSegment> *closing = nullptr);
+void GetClosestParametricPoint(Vector2D reference, iterator& curve, float& t, Vector2D& point,
+							   std::optional<spline_detail::ClosingSegment> *closing = nullptr);
 	/// Get closest point on the curve to reference
-	Vector2D GetClosestPoint(Vector2D reference);
-	Vector2D GetClosestControlPoint(Vector2D reference);
+Vector2D GetClosestPoint(Vector2D reference);
+Vector2D GetClosestControlPoint(Vector2D reference);
 
-	using std::vector<SplineCurve>::value_type;
-	using std::vector<SplineCurve>::pointer;
-	using std::vector<SplineCurve>::reference;
-	using std::vector<SplineCurve>::const_reference;
-	using std::vector<SplineCurve>::size_type;
-	using std::vector<SplineCurve>::difference_type;
-	using std::vector<SplineCurve>::iterator;
-	using std::vector<SplineCurve>::const_iterator;
-	using std::vector<SplineCurve>::reverse_iterator;
-	using std::vector<SplineCurve>::const_reverse_iterator;
+using std::vector<SplineCurve>::value_type;
+using std::vector<SplineCurve>::pointer;
+using std::vector<SplineCurve>::reference;
+using std::vector<SplineCurve>::const_reference;
+using std::vector<SplineCurve>::size_type;
+using std::vector<SplineCurve>::difference_type;
+using std::vector<SplineCurve>::iterator;
+using std::vector<SplineCurve>::const_iterator;
+using std::vector<SplineCurve>::reverse_iterator;
+using std::vector<SplineCurve>::const_reverse_iterator;
 
-	using std::vector<SplineCurve>::back;
-	using std::vector<SplineCurve>::begin;
-	using std::vector<SplineCurve>::clear;
-	using std::vector<SplineCurve>::emplace_back;
-	using std::vector<SplineCurve>::empty;
-	using std::vector<SplineCurve>::end;
-	using std::vector<SplineCurve>::erase;
-	using std::vector<SplineCurve>::front;
-	using std::vector<SplineCurve>::insert;
-	using std::vector<SplineCurve>::operator[];
-	using std::vector<SplineCurve>::pop_back;
-	using std::vector<SplineCurve>::push_back;
-	using std::vector<SplineCurve>::rbegin;
-	using std::vector<SplineCurve>::rend;
-	using std::vector<SplineCurve>::size;
+using std::vector<SplineCurve>::back;
+using std::vector<SplineCurve>::begin;
+using std::vector<SplineCurve>::clear;
+using std::vector<SplineCurve>::emplace_back;
+using std::vector<SplineCurve>::empty;
+using std::vector<SplineCurve>::end;
+using std::vector<SplineCurve>::erase;
+using std::vector<SplineCurve>::front;
+using std::vector<SplineCurve>::insert;
+using std::vector<SplineCurve>::operator[];
+using std::vector<SplineCurve>::pop_back;
+using std::vector<SplineCurve>::push_back;
+using std::vector<SplineCurve>::rbegin;
+using std::vector<SplineCurve>::rend;
+using std::vector<SplineCurve>::size;
 };

@@ -34,22 +34,21 @@
 
 #include "spline.h"
 
-#include "visual_tool.h"
-
 #include <libaegisub/split.h>
 #include <libaegisub/util.h>
 
-Spline::Spline(const VisualToolBase &tl)
-: coord_translator(tl)
-{
+Spline::Spline(CoordinateSystem coordinates) : coordinates(coordinates) {}
+
+void Spline::SetCoordinateSystem(CoordinateSystem value) {
+	coordinates = value;
 }
 
 Vector2D Spline::ToScript(Vector2D vec) const {
-	return coord_translator.ToScriptCoords(vec) * scale;
+	return (vec - coordinates.video_position) * coordinates.script_size / coordinates.video_size * scale;
 }
 
 Vector2D Spline::FromScript(Vector2D vec) const {
-	return coord_translator.FromScriptCoords(vec / scale);
+	return (vec / scale * coordinates.video_size / coordinates.script_size) + coordinates.video_position;
 }
 
 void Spline::SetScale(int new_scale) {
@@ -182,7 +181,7 @@ void Spline::MovePoint(iterator curve,int point,Vector2D pos) {
 	}
 }
 
-std::vector<float> Spline::GetPointList(std::vector<int>& first, std::vector<int>& count) {
+std::vector<float> Spline::GetPointList(std::vector<int>& first, std::vector<int>& count) const {
 	first.clear();
 	count.clear();
 
@@ -207,7 +206,7 @@ std::vector<float> Spline::GetPointList(std::vector<int>& first, std::vector<int
 	return points;
 }
 
-std::vector<float> Spline::GetPointList(iterator curve) {
+std::vector<float> Spline::GetPointList(const_iterator curve) const {
 	std::vector<float> points;
 	if (curve == end()) return points;
 	switch (curve->type) {
@@ -227,6 +226,12 @@ std::vector<float> Spline::GetPointList(iterator curve) {
 	return points;
 }
 
+bool Spline::FindClosestParametricPoint(Vector2D reference, std::size_t& curve_index,
+										float& t, Vector2D& point, std::optional<spline_detail::ClosingSegment> *closing) const {
+	return spline_detail::FindClosestParametricPoint(
+		std::span<SplineCurve const>(data(), size()), reference, curve_index, t, point, closing);
+}
+
 void Spline::GetClosestParametricPoint(Vector2D reference, iterator& curve, float& t, Vector2D& pt,
 									   std::optional<spline_detail::ClosingSegment> *closing) {
 	curve = end();
@@ -237,13 +242,7 @@ void Spline::GetClosestParametricPoint(Vector2D reference, iterator& curve, floa
 
 	size_t idx = 0;
 	size_t const curve_count = size();
-	spline_detail::FindClosestParametricPoint(
-		std::span<SplineCurve const>(data(), curve_count),
-		reference,
-		idx,
-		t,
-		pt,
-		closing);
+	FindClosestParametricPoint(reference, idx, t, pt, closing);
 	curve = idx == curve_count ? end() : begin() + idx;
 }
 

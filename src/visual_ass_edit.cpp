@@ -25,6 +25,9 @@
 #include <libaegisub/vfr.h>
 
 #include <algorithm>
+#include <array>
+#include <charconv>
+#include <string_view>
 #include <unordered_map>
 
 namespace aegisub::visual_edit {
@@ -47,6 +50,109 @@ Vector2D Point(Parameters tag, size_t x, size_t y) {
 	if (!tag || tag->size() <= x || tag->size() <= y || (*tag)[x].omitted || (*tag)[y].omitted)
 		return {};
 	return {(*tag)[x].Get<float>(), (*tag)[y].Get<float>()};
+}
+
+std::string_view Trim(std::string_view value) {
+	constexpr std::string_view spaces = " \t\r\n";
+	auto first = value.find_first_not_of(spaces);
+	if (first == std::string_view::npos)
+		return {};
+	return value.substr(first, value.find_last_not_of(spaces) - first + 1);
+}
+
+std::optional<std::string_view> ClipArguments(Blocks const& blocks, std::string_view name) {
+	for (auto const& block : blocks) {
+		if (block->GetType() != AssBlockType::OVERRIDE)
+			continue;
+		std::string_view const raw = block->GetRawText();
+		int depth = 0;
+		for (size_t i = 0; i < raw.size(); ++i) {
+			if (raw[i] == '(')
+				++depth;
+			else if (raw[i] == ')' && depth)
+				--depth;
+			else if (raw[i] == '\\' && !depth && raw.substr(i).starts_with(name)) {
+				auto const start = i + name.size();
+				if (start == raw.size() || raw[start] != '(')
+					return {};
+				auto const end = raw.find(')', start + 1);
+				if (end == std::string_view::npos || raw.substr(start + 1, end - start - 1).find('(') != std::string_view::npos)
+					return {};
+				auto const next = raw.find('\\', end + 1);
+				if (!Trim(raw.substr(end + 1, next == std::string_view::npos ? next : next - end - 1)).empty())
+					return {};
+				return raw.substr(start + 1, end - start - 1);
+			}
+		}
+	}
+	return {};
+}
+
+bool ClipInteger(std::string_view value, int& output) {
+	value = Trim(value);
+	if (value.starts_with('+'))
+		value.remove_prefix(1);
+	if (value.empty())
+		return false;
+	auto const result = std::from_chars(value.data(), value.data() + value.size(), output);
+	return result.ec == std::errc{} && result.ptr == value.data() + value.size();
+}
+
+VectorClip ReadVectorClip(Blocks const& blocks, Parameters parameters, bool inverse) {
+	VectorClip result;
+	result.inverse = inverse;
+	if (!parameters)
+		return result;
+	if (parameters->size() == 2) {
+		result.scale = std::max((*parameters)[0].Get(1), 1);
+		result.drawing = (*parameters)[1].Get(std::string{});
+	}
+	auto raw = ClipArguments(blocks, inverse ? "\\iclip" : "\\clip");
+	if (!raw) {
+		result.editable = false;
+		return result;
+	}
+	std::array<std::string_view, 4> arguments;
+	size_t argument_count = 0;
+	size_t start = 0;
+	do {
+		if (argument_count == arguments.size()) {
+			result.editable = false;
+			return result;
+		}
+		auto const comma = raw->find(',', start);
+		arguments[argument_count++] = Trim(raw->substr(start, comma == std::string_view::npos ? comma : comma - start));
+		if (comma == std::string_view::npos)
+			break;
+		start = comma + 1;
+	} while (start <= raw->size());
+	if (argument_count == 4) {
+		std::array<int, 4> points{};
+		for (size_t i = 0; i < points.size(); ++i)
+			if (!ClipInteger(arguments[i], points[i])) {
+				result.editable = false;
+				return result;
+			}
+		auto point = [&](size_t x, size_t y) { return std::to_string(points[x]) + " " + std::to_string(points[y]); };
+		result.drawing = "m " + point(0, 1) + " l " + point(2, 1) + " " + point(2, 3) + " " + point(0, 3);
+	}
+	else if (argument_count == 1)
+		result.drawing = arguments.front();
+	else if (argument_count == 2) {
+		int scale = 1;
+		if (!ClipInteger(arguments.front(), scale)) {
+			result.editable = false;
+			return result;
+		}
+		result.scale = std::max(scale, 1);
+		result.drawing = arguments[1];
+	}
+	else {
+		result.editable = false;
+		return result;
+	}
+	result.editable = visual_vector_clip::IsEditableDrawing(result.drawing, result.scale);
+	return result;
 }
 }
 
@@ -117,6 +223,7 @@ Line ReadLine(AssDialogue const& dialogue, AssStyle const *style, Vector2D scrip
 		line.clip = {.first = Point(clip, 0, 1), .second = Point(clip, 2, 3), .inverse = line.clip.inverse};
 	else
 		line.clip = {.first = {0, 0}, .second = script_size - 1, .inverse = line.clip.inverse};
+	line.vector_clip = ReadVectorClip(blocks, clip, line.clip.inverse);
 	return line;
 }
 
@@ -139,6 +246,7 @@ void RefreshGeometryFromText(Line& line, Vector2D script_size) {
 	line.move = geometry.move;
 	line.origin = geometry.origin;
 	line.clip = geometry.clip;
+	line.vector_clip = std::move(geometry.vector_clip);
 }
 
 std::vector<Line> BuildLines(AssFile const& file, agi::vfr::Framerate const& timecodes, Vector2D script_size) {

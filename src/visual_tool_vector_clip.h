@@ -16,7 +16,7 @@
 
 #include "visual_feature.h"
 #include "visual_tool.h"
-#include "spline.h"
+#include "visual_tool_vector_clip_shared.h"
 
 class wxToolBar;
 
@@ -33,10 +33,11 @@ struct VisualToolVectorClipDraggableFeature final : public VisualDraggableFeatur
 class VisualToolVectorClip final : public VisualTool<VisualToolVectorClipDraggableFeature> {
 public:
 	/// Number of sub-modes (BUTTON_LAST - BUTTON_DRAG).
-	static constexpr int kSubModeCount = 9;
+static constexpr int kSubModeCount = aegisub::visual_vector_clip::kModeCount;
 
 private:
 	Spline spline; /// The current spline
+	std::vector<aegisub::visual_vector_clip::Feature> overlay_features;
 	wxToolBar *toolBar = nullptr; /// The subtoolbar
 	int mode = 0; /// 0-8
 	bool inverse = false; /// is iclip?

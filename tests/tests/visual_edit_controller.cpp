@@ -14,6 +14,7 @@
 #include <libaegisub/vfr.h>
 
 #include <algorithm>
+#include <array>
 #include <limits>
 
 using namespace aegisub::visual_edit;
@@ -2388,4 +2389,469 @@ TEST(visual_edit_controller, shear_retained_snapshot_keeps_geometry_labels_style
 	EXPECT_FALSE(draw.texts[0].style.bold);
 	EXPECT_TRUE(draw.texts[0].style.outline);
 	EXPECT_EQ(context, retained->context);
+}
+
+namespace {
+using VectorMode = aegisub::visual_vector_clip::Mode;
+
+Line VectorLine(int id, int row, std::string text, bool comment = false, int start_ms = 0) {
+	return ReadShearLine(id, row, std::move(text), comment, start_ms);
+}
+}
+
+TEST(visual_edit_controller, vector_mode_selection_rejects_wrong_tool_invalid_values_and_active_or_prepared_gestures) {
+	auto line = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10 90 90)}A)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	EXPECT_EQ(VectorMode::Drag, controller.VectorClipMode());
+	for (auto mode : {VectorMode::Line, VectorMode::Bicubic, VectorMode::Convert, VectorMode::Insert,
+					  VectorMode::Remove, VectorMode::Freehand, VectorMode::FreehandSmooth, VectorMode::Move, VectorMode::Drag}) {
+		EXPECT_TRUE(controller.SetVectorClipMode(mode).toolbar_changed);
+		EXPECT_EQ(mode, controller.VectorClipMode());
+		EXPECT_FALSE(controller.SetVectorClipMode(mode).toolbar_changed);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+	}
+	EXPECT_FALSE(controller.SetVectorClipMode(static_cast<VectorMode>(9)).toolbar_changed);
+	EXPECT_FALSE(controller.SetVectorClipMode(static_cast<VectorMode>(255)).toolbar_changed);
+	EXPECT_EQ(VectorMode::Drag, controller.VectorClipMode());
+	auto displayed = controller.CaptureSnapshot({}, {});
+	ASSERT_TRUE(displayed);
+	auto prepared = controller.Pointer(Input(PointerPhase::Press, {90, 10}, true), displayed.get(), true);
+	EXPECT_EQ(CaptureAction::None, prepared.capture);
+	EXPECT_FALSE(controller.IsInteracting());
+	EXPECT_FALSE(controller.SetVectorClipMode(VectorMode::Move).toolbar_changed);
+	auto began = controller.BeginPreparedPress();
+	ASSERT_TRUE(began.interaction_began);
+	EXPECT_EQ(CaptureAction::Capture, began.capture);
+	EXPECT_FALSE(controller.SetVectorClipMode(VectorMode::Move).toolbar_changed);
+	auto finished = controller.FinishInteraction();
+	EXPECT_EQ(CaptureAction::Release, finished.capture);
+	EXPECT_TRUE(finished.interaction_ended);
+	EXPECT_TRUE(controller.SetVectorClipMode(VectorMode::Move).toolbar_changed);
+	Controller other(Mode::RectClip);
+	other.Reset({line}, {1}, 1, {}, Canvas());
+	EXPECT_FALSE(other.SetVectorClipMode(VectorMode::Line).toolbar_changed);
+	auto empty = VectorLine(2, 0, "No clip");
+	controller.Reset({empty}, {2}, 2, {}, Canvas());
+	EXPECT_EQ(VectorMode::Line, controller.VectorClipMode());
+}
+
+TEST(visual_edit_controller, vector_read_line_uses_first_inverse_tag_rectangle_conversion_and_original_source_bytes) {
+	auto vector = VectorLine(1, 0, R"({\clip(m 1 2 l 3 4)\b1}A{\iclip(3,m -8 16 l 32 48)\clip(m 8 9)}B)");
+	EXPECT_EQ("m -8 16 l 32 48", vector.vector_clip.drawing);
+	EXPECT_EQ(3, vector.vector_clip.scale);
+	EXPECT_TRUE(vector.vector_clip.inverse);
+	EXPECT_TRUE(vector.vector_clip.editable);
+	EXPECT_EQ(R"({\clip(m 1 2 l 3 4)\b1}A{\iclip(3,m -8 16 l 32 48)\clip(m 8 9)}B)", vector.text);
+	auto rectangle = VectorLine(2, 0, R"({\iclip(-10,20,30,40)}A)");
+	EXPECT_EQ("m -10 20 l 30 20 30 40 -10 40", rectangle.vector_clip.drawing);
+	EXPECT_EQ(1, rectangle.vector_clip.scale);
+	EXPECT_TRUE(rectangle.vector_clip.inverse);
+	auto literal = VectorLine(3, 0, R"({\clip(m 10 10 l 20 20)}Literal \iclip(3,m 80 80) text)");
+	EXPECT_FALSE(literal.vector_clip.inverse);
+	EXPECT_EQ("m 10 10 l 20 20", literal.vector_clip.drawing);
+	auto absent = VectorLine(4, 0, R"({\b1}No clip)");
+	EXPECT_TRUE(absent.vector_clip.drawing.empty());
+	EXPECT_EQ(1, absent.vector_clip.scale);
+	EXPECT_FALSE(absent.vector_clip.inverse);
+	EXPECT_TRUE(absent.vector_clip.editable);
+	auto low = VectorLine(5, 0, R"({\clip(0,m 10 20 l 30 40)}A)");
+	EXPECT_EQ(1, low.vector_clip.scale);
+	EXPECT_TRUE(low.vector_clip.editable);
+}
+
+TEST(visual_edit_controller, vector_invalid_selected_or_active_geometry_blocks_the_entire_batch_and_rebind_recovers) {
+	auto active = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10 90 90)}Active)");
+	std::array<char const *, 12> const rejected{
+		R"({\clip(m 0 0 n 20 30)}Unsupported)",
+		R"({\iclip(m 0 0 s 10 10 20 20 30 30)}Spline)",
+		R"({\clip(m 0 0 l 20)}Incomplete)",
+		R"({\clip(m NaN 0 l 20 30)}NaN)",
+		R"({\clip(m 0 0 b 1 2 3 4 5 inf)}Infinity)",
+		R"({\clip(32,m 0 0 l 20 30)}Scale)",
+		R"({\clip(33,m 0 0 l 20 30)}ScaleWrap)",
+		R"({\clip(m 0 0 l 2147483648 0)}Overflow)",
+		R"({\clip(l 10 20 30 40)}MissingMove)",
+		R"({\clip(m 0 0 l 20 30}Unterminated)",
+		R"({\clip(m 0 0 l 20 30)trailing}Garbage)",
+		R"({\clip(m 0 0 b 1 2 m 3 4)}PartialCurve)"};
+	for (size_t index = 0; index < rejected.size(); ++index) {
+		SCOPED_TRACE(index);
+		auto invalid = VectorLine(2, 5, rejected[index], true, 8000);
+		ASSERT_FALSE(invalid.vector_clip.editable);
+		Controller controller(Mode::VectorClip);
+		controller.Reset({active, invalid}, {1, 2}, 1, {}, Canvas());
+		EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Press, {90, 10}, true)).interaction_began);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+		EXPECT_TRUE(controller.IncrementalChanges().empty());
+		auto replacement = VectorLine(2, 5, R"({\iclip(m 5 5 l 15 15)}Recovered)", true, 8000);
+		controller.UpdateLines(std::span<Line const>(&replacement, 1));
+		ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {90, 10}, true)).interaction_began);
+		controller.Pointer(Input(PointerPhase::Release, {100, 20}));
+		ASSERT_EQ(2u, controller.DraftChanges().size());
+		EXPECT_EQ(R"({\clip(m 10 10 l 100 20 90 90)}Active)", controller.DraftChanges()[0].text);
+		EXPECT_EQ(R"({\iclip(m 10 10 l 100 20 90 90)}Recovered)", controller.DraftChanges()[1].text);
+	}
+	auto invalid_active = VectorLine(3, 0, R"({\clip(m 0 0 n 20 20)}Anchor)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({invalid_active, active}, {1}, 3, {}, Canvas());
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Press, {20, 20}, true)).interaction_began);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+}
+
+TEST(visual_edit_controller, vector_drag_replaces_selected_hidden_comment_offframe_paths_with_own_inverse_and_active_scale) {
+	auto active = VectorLine(1, 0, R"({\clip(3,m 40 40 l 360 40 360 360)\b1}Anchor)");
+	auto hidden = VectorLine(2, 4, R"({\iclip(m 100 100 l 200 100)\pos(20,30)}Hidden{\i1}tail)", false, 8000);
+	auto comment = VectorLine(3, 8, R"({\clip(1,2,30,40)\fax0.25}Comment)", true);
+	auto literal = VectorLine(4, 9, R"({\b1}Literal \iclip text)");
+	auto unselected = VectorLine(5, 10, R"({\clip(m 7 8 l 9 10)}Unselected)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({active, hidden, comment, literal, unselected}, {2, 3, 4}, 1, {}, Canvas());
+	auto press = controller.Pointer(Input(PointerPhase::Press, {90, 10}, true));
+	ASSERT_TRUE(press.interaction_began);
+	EXPECT_FALSE(press.selection_changed);
+	EXPECT_EQ(CaptureAction::Capture, press.capture);
+	controller.Pointer(Input(PointerPhase::Release, {100, 20}));
+	ASSERT_EQ(3u, controller.DraftChanges().size());
+	EXPECT_EQ(2, controller.DraftChanges()[0].id);
+	EXPECT_EQ(hidden.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(R"({\pos(20,30)\iclip(3,m 40 40 l 400 80 360 360)}Hidden{\i1}tail)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\fax0.25\clip(3,m 40 40 l 400 80 360 360)}Comment)", controller.DraftChanges()[1].text);
+	EXPECT_EQ(R"({\b1\clip(3,m 40 40 l 400 80 360 360)}Literal \iclip text)", controller.DraftChanges()[2].text);
+	EXPECT_EQ((std::set<int>{2, 3, 4}), controller.SelectedLines());
+	EXPECT_EQ(std::optional<int>(1), controller.ActiveLine());
+}
+
+TEST(visual_edit_controller, vector_control_toggle_and_shrinking_box_select_handles_without_document_edits) {
+	auto active = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10 90 90)}A)");
+	auto hidden = VectorLine(2, 5, R"({\iclip(m 200 200 l 220 220)}B)", true);
+	Controller controller(Mode::VectorClip);
+	controller.Reset({active, hidden}, {1, 2}, 1, {}, Canvas());
+	controller.Pointer(Input(PointerPhase::Press, {90, 10}, true, true));
+	controller.Pointer(Input(PointerPhase::Release, {90, 10}, false, true));
+	controller.Pointer(Input(PointerPhase::Press, {90, 90}, true, true));
+	controller.Pointer(Input(PointerPhase::Release, {90, 90}, false, true));
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	controller.Pointer(Input(PointerPhase::Press, {90, 90}, true, true));
+	controller.Pointer(Input(PointerPhase::Release, {90, 90}, false, true));
+	controller.Pointer(Input(PointerPhase::Press, {0, 0}, true, true));
+	controller.Pointer(Input(PointerPhase::Move, {100, 100}, true, true));
+	controller.Pointer(Input(PointerPhase::Move, {20, 20}, true, true));
+	controller.Pointer(Input(PointerPhase::Release, {20, 20}, false, true));
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+	controller.Pointer(Input(PointerPhase::Press, {90, 10}, true));
+	controller.Pointer(Input(PointerPhase::Release, {100, 20}));
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\clip(m 20 20 l 100 20 90 90)}A)", controller.DraftChanges()[0].text);
+	EXPECT_EQ(R"({\iclip(m 20 20 l 100 20 90 90)}B)", controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, vector_shift_drag_uses_logical_screen_axis_and_ignores_script_anisotropy) {
+	auto line = VectorLine(1, 0, R"({\clip(3,m 40 80 l 120 160 200 240)}A)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, {.video_position = {40, 30}, .video_size = {1280, 240}, .script_size = {640, 480}});
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {100, 50}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {110, 65}, true, false, false, true));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\clip(3,m 40 80 l 120 280 200 240)}A)", controller.DraftChanges()[0].text);
+	controller.Pointer(Input(PointerPhase::Release, {120, 70}, false, false, false, true));
+	EXPECT_EQ(R"({\clip(3,m 40 80 l 160 160 200 240)}A)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, vector_no_motion_and_return_to_origin_preserve_every_selected_original_byte) {
+	auto active = VectorLine(1, 0, R"({\clip(1,m 010 010 l 090.0 010.0 090 090)\b1}A{\i1}tail)");
+	auto hidden = VectorLine(2, 5, R"({\iclip(3,m 004 008 l 012 016)\fax.2500}B)", true);
+	Controller controller(Mode::VectorClip);
+	controller.Reset({active, hidden}, {1, 2}, 1, {}, Canvas());
+	controller.Pointer(Input(PointerPhase::Press, {90, 10}, true));
+	controller.Pointer(Input(PointerPhase::Release, {90, 10}));
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_TRUE(controller.IncrementalChanges().empty());
+	controller.Pointer(Input(PointerPhase::Press, {90, 10}, true));
+	controller.Pointer(Input(PointerPhase::Move, {100, 20}, true));
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	controller.Pointer(Input(PointerPhase::Release, {90, 10}));
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	ASSERT_EQ(2u, controller.IncrementalChanges().size());
+	EXPECT_EQ(active.text, controller.IncrementalChanges()[0].text);
+	EXPECT_EQ(hidden.text, controller.IncrementalChanges()[1].text);
+}
+
+TEST(visual_edit_controller, vector_deferred_discrete_actions_mutate_once_without_capture_or_document_selection_change) {
+	auto line = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10 90 90)}A)");
+	auto hidden = VectorLine(2, 5, R"({\iclip(m 200 200 l 220 220)}B)", true);
+	struct Case {
+		VectorMode mode;
+		Vector2D point;
+		char const *expected;
+	};
+	std::array<Case, 4> const cases{{{.mode = VectorMode::Convert, .point = {50, 12}, .expected = R"({\clip(m 10 10 b 30 10 70 10 90 10 l 90 90)}A)"},
+									 {.mode = VectorMode::Insert, .point = {50, 12}, .expected = R"({\clip(m 10 10 l 50 10 90 10 90 90)}A)"},
+									 {.mode = VectorMode::Remove, .point = {90, 10}, .expected = R"({\clip(m 10 10 l 90 90)}A)"},
+									 {.mode = VectorMode::Move, .point = {200, 200}, .expected = R"({\clip(m 10 10 l 90 10 90 90 m 200 200)}A)"}}};
+	for (size_t index = 0; index < cases.size(); ++index) {
+		SCOPED_TRACE(index);
+		auto const& item = cases[index];
+		Controller controller(Mode::VectorClip);
+		controller.Reset({line, hidden}, {1, 2}, 1, {}, Canvas());
+		controller.SetVectorClipMode(item.mode);
+		auto displayed = controller.CaptureSnapshot({}, {});
+		auto prepared = controller.Pointer(Input(PointerPhase::Press, item.point, true), displayed.get(), true);
+		EXPECT_EQ(CaptureAction::None, prepared.capture);
+		EXPECT_FALSE(prepared.interaction_began);
+		EXPECT_TRUE(controller.DraftChanges().empty());
+		auto applied = controller.BeginPreparedPress();
+		EXPECT_TRUE(applied.interaction_began);
+		EXPECT_TRUE(applied.interaction_ended);
+		EXPECT_TRUE(applied.geometry_changed);
+		EXPECT_FALSE(applied.selection_changed);
+		EXPECT_EQ(CaptureAction::None, applied.capture);
+		EXPECT_FALSE(controller.IsInteracting());
+		ASSERT_EQ(2u, controller.DraftChanges().size());
+		EXPECT_EQ(item.expected, controller.DraftChanges()[0].text);
+		EXPECT_EQ((std::set<int>{1, 2}), controller.SelectedLines());
+		auto const accepted = controller.DraftChanges()[0].text;
+		EXPECT_FALSE(controller.BeginPreparedPress().interaction_began);
+		EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Release, item.point)).geometry_changed);
+		EXPECT_EQ(accepted, controller.DraftChanges()[0].text);
+	}
+}
+
+TEST(visual_edit_controller, vector_append_line_and_bicubic_finish_at_release_and_preserve_other_subpaths) {
+	auto line = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10 m 200 200 l 280 200)}A)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	controller.SetVectorClipMode(VectorMode::Line);
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {300, 220}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {310, 230}, true));
+	auto ended = controller.Pointer(Input(PointerPhase::Release, {320, 240}));
+	EXPECT_EQ(CaptureAction::Release, ended.capture);
+	EXPECT_TRUE(ended.interaction_ended);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\clip(m 10 10 l 90 10 m 200 200 l 280 200 320 240)}A)", controller.DraftChanges()[0].text);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	controller.SetVectorClipMode(VectorMode::Bicubic);
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {280, 240}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Release, {280, 280}));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\clip(m 10 10 l 90 10 m 200 200 l 280 200 b 300 200 280 260 280 280)}A)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, vector_freehand_variants_replace_path_keep_final_point_and_return_to_drag) {
+	auto line = VectorLine(1, 0, R"({\iclip(3,m 40 40 l 360 40)}A)");
+	for (auto mode : {VectorMode::Freehand, VectorMode::FreehandSmooth}) {
+		SCOPED_TRACE(static_cast<int>(mode));
+		Controller controller(Mode::VectorClip);
+		controller.Reset({line}, {1}, 1, {}, Canvas());
+		controller.SetVectorClipMode(mode);
+		ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {200, 200}, true)).interaction_began);
+		controller.Pointer(Input(PointerPhase::Move, {210, 200}, true));
+		auto released = controller.Pointer(Input(PointerPhase::Release, {220, 210}));
+		EXPECT_TRUE(released.interaction_ended);
+		EXPECT_TRUE(released.toolbar_changed);
+		EXPECT_EQ(CaptureAction::Release, released.capture);
+		EXPECT_EQ(VectorMode::Drag, controller.VectorClipMode());
+		ASSERT_EQ(1u, controller.DraftChanges().size());
+		EXPECT_EQ(R"({\iclip(3,m 800 800 l 880 840)}A)", controller.DraftChanges()[0].text);
+		auto displayed = controller.CaptureSnapshot({}, {});
+		ASSERT_TRUE(displayed);
+		EXPECT_TRUE(displayed->HitTest({220, 210}));
+		EXPECT_FALSE(displayed->HitTest({90, 10}));
+	}
+}
+
+TEST(visual_edit_controller, vector_remove_final_point_serializes_empty_path_and_switches_to_line_on_rebind) {
+	auto line = VectorLine(1, 0, R"({\iclip(m 10 20)\b1}A)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	controller.SetVectorClipMode(VectorMode::Remove);
+	auto removed = controller.Pointer(Input(PointerPhase::Press, {10, 20}, true));
+	EXPECT_TRUE(removed.interaction_began);
+	EXPECT_TRUE(removed.interaction_ended);
+	EXPECT_EQ(CaptureAction::None, removed.capture);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\b1\iclip()}A)", controller.DraftChanges()[0].text);
+	auto rebound = VectorLine(1, 0, controller.DraftChanges()[0].text);
+	controller.Reset({rebound}, {1}, 1, {}, Canvas());
+	EXPECT_EQ(VectorMode::Line, controller.VectorClipMode());
+}
+
+TEST(visual_edit_controller, vector_presented_path_and_mode_must_match_before_handle_or_segment_edit) {
+	auto line = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10 90 90)}A)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	auto original = controller.CaptureSnapshot({}, {});
+	ASSERT_TRUE(original);
+	auto changed = VectorLine(1, 0, R"({\clip(m 10 10 l 190 10 190 90)}A)");
+	controller.UpdateLines(std::span<Line const>(&changed, 1));
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Press, {90, 10}, true), original.get()).interaction_began);
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Press, {190, 10}, true), original.get()).interaction_began);
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	controller.SetVectorClipMode(VectorMode::Insert);
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Press, {50, 12}, true), original.get()).interaction_began);
+	auto fresh = controller.CaptureSnapshot({}, {});
+	ASSERT_TRUE(fresh);
+	auto inserted = controller.Pointer(Input(PointerPhase::Press, {100, 12}, true), fresh.get());
+	EXPECT_TRUE(inserted.interaction_began);
+	EXPECT_TRUE(inserted.interaction_ended);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\clip(m 10 10 l 100 10 190 10 190 90)}A)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, vector_snapshot_keeps_owned_geometry_style_and_hit_identity_after_owner_destruction) {
+	std::shared_ptr<VisualToolRenderSnapshot const> retained;
+	auto context = std::make_shared<VisualToolRenderContext>();
+	Style style;
+	style.line_primary = 0x00332211;
+	style.highlight_primary = 0x00665544;
+	style.highlight_secondary = 0x00998877;
+	style.shaded_alpha = .375f;
+	{
+		auto line = VectorLine(1, 0, R"({\clip(m 10 10 b 30 10 70 10 90 10 l 90 90)}A)");
+		Controller controller(Mode::VectorClip);
+		controller.Reset({line}, {1}, 1, {}, Canvas());
+		retained = controller.CaptureSnapshot(context, style);
+		ASSERT_TRUE(retained);
+		controller.SetViewport({.video_position = {30, 40}, .video_size = {320, 240}, .script_size = {640, 480}});
+		controller.Reset({}, {}, std::nullopt, {}, Canvas());
+	}
+	EXPECT_EQ(context, retained->context);
+	auto circle = retained->HitTest({90, 10});
+	auto square = retained->HitTest({30, 10});
+	ASSERT_TRUE(circle);
+	ASSERT_TRUE(square);
+	EXPECT_FALSE(circle->line_id);
+	EXPECT_EQ(3u, circle->index);
+	EXPECT_EQ(1u, square->index);
+	EXPECT_NE(circle->type, square->type);
+	EXPECT_FALSE(retained->HitTest({190, 10}));
+	TransformOverlayRecorder draw;
+	retained->Draw(draw);
+	ASSERT_EQ(2u, draw.rectangle_paints.size());
+	ASSERT_EQ(3u, draw.circle_paints.size());
+	EXPECT_EQ(agi::Color(0x11, 0x22, 0x33), draw.rectangle_paints[0].first.colour);
+	EXPECT_FLOAT_EQ(.5f, draw.rectangle_paints[0].first.alpha);
+	EXPECT_EQ(agi::Color(0x11, 0x22, 0x33), draw.circle_paints[0].second.colour);
+	EXPECT_FLOAT_EQ(.6f, draw.circle_paints[0].second.alpha);
+}
+
+TEST(visual_edit_controller, vector_nonfinite_or_unencodable_motion_preserves_last_valid_whole_batch) {
+	auto line = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10 90 90)}A)");
+	auto hidden = VectorLine(2, 5, R"({\iclip(m 200 200 l 220 220)}B)", true);
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line, hidden}, {1, 2}, 1, {}, Canvas());
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {90, 10}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {100, 20}, true));
+	ASSERT_EQ(2u, controller.DraftChanges().size());
+	auto const first = controller.DraftChanges()[0].text;
+	auto const second = controller.DraftChanges()[1].text;
+	for (auto point : {Vector2D(std::numeric_limits<float>::quiet_NaN(), 20.f),
+					   Vector2D(100.f, std::numeric_limits<float>::infinity()), Vector2D(2147483648.f, 20.f)}) {
+		EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Move, point, true)).geometry_changed);
+		ASSERT_EQ(2u, controller.DraftChanges().size());
+		EXPECT_EQ(first, controller.DraftChanges()[0].text);
+		EXPECT_EQ(second, controller.DraftChanges()[1].text);
+	}
+	auto release = controller.Pointer(Input(PointerPhase::Release, {2147483648.f, 20.f}));
+	EXPECT_EQ(CaptureAction::Release, release.capture);
+	EXPECT_TRUE(release.interaction_ended);
+	EXPECT_FALSE(controller.IsInteracting());
+	EXPECT_EQ(first, controller.DraftChanges()[0].text);
+	EXPECT_EQ(second, controller.DraftChanges()[1].text);
+}
+
+TEST(visual_edit_controller, vector_prepared_gesture_is_retired_by_selection_viewport_frame_and_reset_boundaries) {
+	auto line = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10 90 90)}A)");
+	for (int boundary = 0; boundary < 4; ++boundary) {
+		SCOPED_TRACE(boundary);
+		Controller controller(Mode::VectorClip);
+		controller.Reset({line}, {1}, 1, {}, Canvas());
+		auto snapshot = controller.CaptureSnapshot({}, {});
+		controller.Pointer(Input(PointerPhase::Press, {90, 10}, true), snapshot.get(), true);
+		switch (boundary) {
+			case 0: controller.SetSelection({}, 1); break;
+			case 1: controller.SetViewport({.video_position = {20, 30}, .video_size = {640, 480}, .script_size = {640, 480}}); break;
+			case 2: controller.SetFrame({.number = 1, .time_ms = 40}); break;
+			case 3: controller.Reset({line}, {1}, 1, {}, Canvas()); break;
+		}
+		EXPECT_FALSE(controller.BeginPreparedPress().interaction_began);
+		EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Release, {100, 20})).geometry_changed);
+		EXPECT_FALSE(controller.IsInteracting());
+		EXPECT_TRUE(controller.DraftChanges().empty());
+	}
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	controller.Pointer(Input(PointerPhase::Press, {90, 10}, true));
+	controller.Pointer(Input(PointerPhase::Move, {100, 20}, true));
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	controller.FinishInteraction();
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	EXPECT_TRUE(controller.DraftChanges().empty());
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Release, {110, 30})).geometry_changed);
+	auto snapshot = controller.CaptureSnapshot({}, {});
+	EXPECT_TRUE(snapshot->HitTest({90, 10}));
+	EXPECT_FALSE(snapshot->HitTest({100, 20}));
+}
+
+TEST(visual_edit_controller, vector_insert_targets_each_presented_subpath_closure_and_preserves_other_contours) {
+	auto line = VectorLine(1, 0, R"({\iclip(m 10 10 l 90 10 90 90 m 210 210 l 290 210 290 290)}A)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	controller.SetVectorClipMode(VectorMode::Insert);
+	auto first_snapshot = controller.CaptureSnapshot({}, {});
+	auto first = controller.Pointer(Input(PointerPhase::Press, {50, 50}, true), first_snapshot.get());
+	EXPECT_TRUE(first.interaction_ended);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\iclip(m 10 10 l 90 10 90 90 50 50 m 210 210 l 290 210 290 290)}A)", controller.DraftChanges()[0].text);
+	controller.AcceptChanges();
+	auto second_snapshot = controller.CaptureSnapshot({}, {});
+	auto second = controller.Pointer(Input(PointerPhase::Press, {250, 250}, true), second_snapshot.get());
+	EXPECT_TRUE(second.interaction_ended);
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\iclip(m 10 10 l 90 10 90 90 50 50 m 210 210 l 290 210 290 290 250 250)}A)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, vector_finish_freehand_keeps_last_valid_residual_and_late_up_cannot_publish_again) {
+	auto line = VectorLine(1, 0, R"({\clip(m 10 10 l 90 10)}A)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	controller.SetVectorClipMode(VectorMode::Freehand);
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {200, 200}, true)).interaction_began);
+	controller.Pointer(Input(PointerPhase::Move, {220, 210}, true));
+	auto finished = controller.FinishInteraction();
+	EXPECT_TRUE(finished.interaction_ended);
+	EXPECT_TRUE(finished.toolbar_changed);
+	EXPECT_EQ(CaptureAction::Release, finished.capture);
+	EXPECT_EQ(VectorMode::Drag, controller.VectorClipMode());
+	EXPECT_FALSE(controller.IsInteracting());
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(R"({\clip(m 200 200 l 220 210)}A)", controller.DraftChanges()[0].text);
+	EXPECT_FALSE(controller.FinishInteraction().interaction_ended);
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Release, {280, 280})).geometry_changed);
+	EXPECT_EQ(R"({\clip(m 200 200 l 220 210)}A)", controller.DraftChanges()[0].text);
+}
+
+TEST(visual_edit_controller, vector_finish_smooth_freehand_smooths_once_and_preserves_finalized_history_source) {
+	auto line = VectorLine(1, 0, R"({\iclip(m 10 10 l 90 10)\b1}A)");
+	Controller controller(Mode::VectorClip);
+	controller.Reset({line}, {1}, 1, {}, Canvas());
+	controller.SetVectorClipMode(VectorMode::FreehandSmooth);
+	ASSERT_TRUE(controller.Pointer(Input(PointerPhase::Press, {200, 200}, true)).interaction_began);
+	for (auto point : {Vector2D(320, 200), Vector2D(320, 320), Vector2D(200, 320), Vector2D(200, 200)})
+		controller.Pointer(Input(PointerPhase::Move, point, true));
+	auto finished = controller.FinishInteraction();
+	EXPECT_TRUE(finished.interaction_ended);
+	EXPECT_TRUE(finished.toolbar_changed);
+	EXPECT_EQ(CaptureAction::Release, finished.capture);
+	EXPECT_EQ(VectorMode::Drag, controller.VectorClipMode());
+	ASSERT_EQ(1u, controller.DraftChanges().size());
+	EXPECT_EQ(line.text, controller.DraftChanges()[0].original_text);
+	EXPECT_EQ(R"({\b1\iclip(m 200 200 b 260 200 290 170 320 200 350 230 350 290 320 320 290 350 230 350 200 320 170 290 200 260 200 200)}A)", controller.DraftChanges()[0].text);
+	auto const final = controller.DraftChanges()[0].text;
+	EXPECT_FALSE(controller.FinishInteraction().interaction_ended);
+	EXPECT_FALSE(controller.Pointer(Input(PointerPhase::Release, {230, 240})).geometry_changed);
+	EXPECT_EQ(final, controller.DraftChanges()[0].text);
+	controller.AcceptChanges();
+	EXPECT_TRUE(controller.DraftChanges().empty());
 }

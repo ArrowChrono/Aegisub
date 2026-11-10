@@ -5,6 +5,7 @@
 #include "visual_tool_render_snapshot.h"
 #include "visual_tool_scale_policy.h"
 #include "visual_tool_shear_shared.h"
+#include "visual_tool_vector_clip_shared.h"
 
 #include <cstdint>
 #include <functional>
@@ -23,7 +24,8 @@ enum class Mode : std::uint8_t { Drag,
 								 RotateXY,
 								 Scale,
 								 Cross,
-								 Shear };
+								 Shear,
+								 VectorClip };
 enum class PointerPhase : std::uint8_t { Enter,
 										 Move,
 										 Leave,
@@ -47,6 +49,13 @@ struct RectClip {
 	bool inverse = false;
 };
 
+struct VectorClip {
+	std::string drawing;
+	int scale = 1;
+	bool inverse = false;
+	bool editable = true;
+};
+
 struct Line {
 	int id = 0;
 	int row = -1;
@@ -67,6 +76,7 @@ struct Line {
 	bool static_shear = true;
 	int position_to_move_start_ms = 0;
 	int position_to_move_end_ms = 0;
+	VectorClip vector_clip;
 };
 
 struct Viewport {
@@ -151,6 +161,8 @@ class Controller final {
 	Result NormalizeScale(visual_tool_scale_policy::Axis axis);
 	[[nodiscard]] bool CanResetShear(visual_shear::Axis axis) const;
 	Result ResetShear(visual_shear::Axis axis);
+	Result SetVectorClipMode(visual_vector_clip::Mode mode);
+	[[nodiscard]] visual_vector_clip::Mode VectorClipMode() const noexcept;
 	Result FinishInteraction();
 	void AcceptChanges();
 
