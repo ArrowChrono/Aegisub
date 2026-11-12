@@ -296,8 +296,9 @@ CSRISubtitlesProvider::CSRISubtitlesProvider(std::string type, std::shared_ptr<c
 }
 
 CSRISubtitlesProvider::~CSRISubtitlesProvider() {
-#ifdef _WIN32
 	std::lock_guard<std::mutex> lock(csri_mutex);
+	instance.reset();
+#ifdef _WIN32
 	GetTransientFontRegistry().ReleaseLocked(this);
 #endif
 }
