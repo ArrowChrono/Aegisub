@@ -173,6 +173,13 @@ void AudioDisplaySlot::ApplyStateToWxDisplay() {
 	}
 }
 
+void AudioDisplaySlot::RetireSubtitleRowBorrows() noexcept {
+	if (display)
+		display->RetireSubtitleRowBorrows();
+	if (skia_display)
+		skia_display->RetireSubtitleRowBorrows();
+}
+
 void AudioDisplaySlot::SyncToCurrentAudioProvider() {
 	sync_requested = true;
 	if (display)

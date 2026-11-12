@@ -213,6 +213,7 @@ public:
 
 	/// Get the tracked dialogue line
 	AssDialogue *GetLine() const { return line; }
+	void RetireSubtitleRowBorrow() noexcept { line = nullptr; }
 
 	/// Get the time range for this line
 	operator TimeRange() const { return TimeRange(*left_marker, *right_marker); }
@@ -398,6 +399,8 @@ class AudioTimingControllerDialogue final : public AudioTimingController {
 	void OnFileChanged(int type, AssDialogue const*);
 
 public:
+	void RetireSubtitleRowBorrows() noexcept override;
+
 	// AudioMarkerProvider interface
 	void GetMarkers(const TimeRange &range, AudioMarkerVector &out_markers) const override;
 
@@ -418,9 +421,9 @@ public:
 
 	// We have no warning messages currently, maybe add the old "Modified" message back later?
 	wxString GetWarningMessage() const override { return wxString(); }
-	TimeRange GetIdealVisibleTimeRange() const override { return active_line; }
-	TimeRange GetPrimaryPlaybackRange() const override { return active_line; }
-	TimeRange GetActiveLineRange() const override { return active_line; }
+	TimeRange GetIdealVisibleTimeRange() const override { return subtitle_rows_ready ? TimeRange(active_line) : TimeRange(0, 0); }
+	TimeRange GetPrimaryPlaybackRange() const override { return subtitle_rows_ready ? TimeRange(active_line) : TimeRange(0, 0); }
+	TimeRange GetActiveLineRange() const override { return subtitle_rows_ready ? TimeRange(active_line) : TimeRange(0, 0); }
 	void Commit() override { DoCommit(true); }
 
 	/// Constructor
@@ -435,8 +438,8 @@ AudioTimingControllerDialogue::AudioTimingControllerDialogue(agi::Context *c)
 , context(c)
 , command_session(c->GetCore().ass.get())
 , commit_connection(c->GetCore().ass->AddCommitListener(&AudioTimingControllerDialogue::OnFileChanged, this))
-, inactive_line_mode_connection(OPT_SUB("Audio/Inactive Lines Display Mode", &AudioTimingControllerDialogue::RegenerateInactiveLines, this))
-, inactive_line_comment_connection(OPT_SUB("Audio/Display/Draw/Inactive Comments", &AudioTimingControllerDialogue::RegenerateInactiveLines, this))
+, inactive_line_mode_connection(OPT_SUB("Audio/Inactive Lines Display Mode", [this] { if (subtitle_rows_ready) RegenerateInactiveLines(); }))
+, inactive_line_comment_connection(OPT_SUB("Audio/Display/Draw/Inactive Comments", [this] { if (subtitle_rows_ready) RegenerateInactiveLines(); }))
 , active_line_connection(c->GetCore().selectionController->AddActiveLineListener(&AudioTimingControllerDialogue::Revert, this))
 , selection_connection(c->GetCore().selectionController->AddSelectionListener(&AudioTimingControllerDialogue::OnSelectedSetChanged, this))
 {
@@ -449,6 +452,7 @@ AudioTimingControllerDialogue::AudioTimingControllerDialogue(agi::Context *c)
 
 void AudioTimingControllerDialogue::GetMarkers(const TimeRange &range, AudioMarkerVector &out_markers) const
 {
+	if (!subtitle_rows_ready) return;
 	// The order matters here; later markers are painted on top of earlier
 	// markers, so the markers that we want to end up on top need to appear last
 
@@ -466,6 +470,7 @@ void AudioTimingControllerDialogue::GetMarkers(const TimeRange &range, AudioMark
 
 void AudioTimingControllerDialogue::OnSelectedSetChanged()
 {
+	if (!subtitle_rows_ready) return;
 	perf_trace::VideoUiDurationScope trace("grid_select.audio.selection", inactive_line_mode->GetInt());
 	RegenerateSelectedLines();
 	RegenerateInactiveLines();
@@ -477,12 +482,13 @@ void AudioTimingControllerDialogue::OnFileChanged(int type, AssDialogue const*) 
 
 	if (type & AssFile::COMMIT_DIAG_TIME)
 		Revert();
-	else if (type & AssFile::COMMIT_DIAG_ADDREM)
+	else if (subtitle_rows_ready && (type & AssFile::COMMIT_DIAG_ADDREM))
 		RegenerateInactiveLines();
 }
 
 void AudioTimingControllerDialogue::GetRenderingStyles(AudioRenderingStyleRanges &ranges) const
 {
+	if (!subtitle_rows_ready) return;
 	active_line.GetStyleRange(&ranges);
 	for (auto const& line : selected_lines)
 		line.GetStyleRange(&ranges);
@@ -492,6 +498,7 @@ void AudioTimingControllerDialogue::GetRenderingStyles(AudioRenderingStyleRanges
 
 void AudioTimingControllerDialogue::Next(NextMode mode)
 {
+	if (!subtitle_rows_ready) return;
 	perf_trace::AudioUiDurationScope trace("audio_timing.next", static_cast<int>(mode));
 	if (mode == TIMING_UNIT)
 	{
@@ -519,12 +526,14 @@ void AudioTimingControllerDialogue::Next(NextMode mode)
 
 void AudioTimingControllerDialogue::Prev()
 {
+	if (!subtitle_rows_ready) return;
 	auto core = context->GetCore();
 	core.selectionController->PrevLine();
 }
 
 void AudioTimingControllerDialogue::DoCommit(bool user_triggered)
 {
+	if (!subtitle_rows_ready) return;
 	int const modified_line_count = static_cast<int>(modified_lines.size());
 	perf_trace::AudioUiDurationScope trace(
 		"audio_timing.commit", modified_line_count, user_triggered ? 1 : 0);
@@ -554,48 +563,62 @@ void AudioTimingControllerDialogue::DoCommit(bool user_triggered)
 
 void AudioTimingControllerDialogue::Revert()
 {
-	perf_trace::VideoUiDurationScope trace("grid_select.audio.revert", inactive_line_mode->GetInt());
-	command_session.ResetCommitId();
-	auto core = context->GetCore();
+	subtitle_rows_ready = false;
+	try {
+		perf_trace::VideoUiDurationScope trace("grid_select.audio.revert", inactive_line_mode->GetInt());
+		command_session.ResetCommitId();
+		auto core = context->GetCore();
 
-	if (AssDialogue *line = core.selectionController->GetActiveLine())
-	{
-		modified_lines.clear();
-		if (active_line.SetLine(line))
-		{
-			AnnounceUpdatedPrimaryRange();
-			if (inactive_line_mode->GetInt() == 0)
-				AnnounceUpdatedStyleRanges();
+		if (AssDialogue *line = core.selectionController->GetActiveLine()) {
+			modified_lines.clear();
+			if (active_line.SetLine(line)) {
+				AnnounceUpdatedPrimaryRange();
+				if (inactive_line_mode->GetInt() == 0)
+					AnnounceUpdatedStyleRanges();
+			}
+			else {
+				modified_lines.insert(&active_line);
+			}
 		}
 		else
-		{
-			modified_lines.insert(&active_line);
-		}
-	}
+			active_line.RetireSubtitleRowBorrow();
 
-	RegenerateInactiveLines();
-	RegenerateSelectedLines();
+		RegenerateInactiveLines();
+		RegenerateSelectedLines();
+		subtitle_rows_ready = active_line.GetLine() != nullptr;
+		AnnounceUpdatedPrimaryRange();
+		AnnounceUpdatedStyleRanges();
+		AnnounceMarkerMoved();
+	}
+	catch (...) {
+		RetireSubtitleRowBorrows();
+		throw;
+	}
 }
 
 void AudioTimingControllerDialogue::AddLeadIn()
 {
+	if (!subtitle_rows_ready) return;
 	DialogueTimingMarker *m = active_line.GetLeftMarker();
 	SetMarkers({ m }, *m - OPT_GET("Audio/Lead/IN")->GetInt(), 0, true);
 }
 
 void AudioTimingControllerDialogue::AddLeadOut()
 {
+	if (!subtitle_rows_ready) return;
 	DialogueTimingMarker *m = active_line.GetRightMarker();
 	SetMarkers({ m }, *m + OPT_GET("Audio/Lead/OUT")->GetInt(), 0, true);
 }
 
 void AudioTimingControllerDialogue::ModifyLength(int delta, bool) {
+	if (!subtitle_rows_ready) return;
 	DialogueTimingMarker *m = active_line.GetRightMarker();
 	SetMarkers({ m },
 		std::max<int>(*m + delta * 10, *active_line.GetLeftMarker()), 0, true);
 }
 
 void AudioTimingControllerDialogue::ModifyStart(int delta) {
+	if (!subtitle_rows_ready) return;
 	DialogueTimingMarker *m = active_line.GetLeftMarker();
 	SetMarkers({ m },
 		std::min<int>(*m + delta * 10, *active_line.GetRightMarker()), 0, true);
@@ -603,12 +626,14 @@ void AudioTimingControllerDialogue::ModifyStart(int delta) {
 
 bool AudioTimingControllerDialogue::IsNearbyMarker(int ms, int sensitivity, bool alt_down) const
 {
+	if (!subtitle_rows_ready) return false;
 	assert(sensitivity >= 0);
 	return alt_down || active_line.ContainsMarker(TimeRange(ms-sensitivity, ms+sensitivity));
 }
 
 std::vector<AudioMarker*> AudioTimingControllerDialogue::OnLeftClick(int ms, bool ctrl_down, bool alt_down, int sensitivity, int snap_range)
 {
+	if (!subtitle_rows_ready) return {};
 	assert(sensitivity >= 0);
 	assert(snap_range >= 0);
 
@@ -666,6 +691,7 @@ std::vector<AudioMarker*> AudioTimingControllerDialogue::OnLeftClick(int ms, boo
 
 std::vector<AudioMarker*> AudioTimingControllerDialogue::OnRightClick(int ms, bool, int sensitivity, int snap_range)
 {
+	if (!subtitle_rows_ready) return {};
 	std::vector<AudioMarker*> ret = GetRightMarkers();
 	SetMarkers(ret, ms, snap_range, true);
 	return ret;
@@ -673,6 +699,7 @@ std::vector<AudioMarker*> AudioTimingControllerDialogue::OnRightClick(int ms, bo
 
 void AudioTimingControllerDialogue::OnMarkerDrag(std::vector<AudioMarker*> const& markers, int new_position, int snap_range)
 {
+	if (!subtitle_rows_ready) return;
 	SetMarkers(markers, new_position, snap_range, false);
 }
 
@@ -970,4 +997,13 @@ int AudioTimingControllerDialogue::SnapMarkers(int snap_range, std::vector<Audio
 std::unique_ptr<AudioTimingController> CreateDialogueTimingController(agi::Context *c)
 {
 	return agi::make_unique<AudioTimingControllerDialogue>(c);
+}
+
+void AudioTimingControllerDialogue::RetireSubtitleRowBorrows() noexcept {
+	subtitle_rows_ready = false;
+	modified_lines.clear();
+	markers.clear();
+	selected_lines.clear();
+	inactive_lines.clear();
+	active_line.RetireSubtitleRowBorrow();
 }

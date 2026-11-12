@@ -159,7 +159,13 @@ TEST_F(motion_track_debug_bundle, round_trip_replays_compact_and_exact_from_anal
 		ExpectSamePlan(plan, bundle.exported_plan);
 		ExpectSamePlan(plan, BuildApplyPlan(*bundle.file, bundle.targets, bundle.input));
 		std::string message;
-		ASSERT_TRUE(source.Apply(file, plan, input.timecodes, [this](auto const&) { file.Commit("apply", AssFile::COMMIT_DIAG_FULL); }, message)) << message;
+		auto prepared = source.Prepare(file, plan, input.timecodes, message);
+		ASSERT_NE(nullptr, prepared) << message;
+		int const type = prepared->Candidate().PrepareCommit(AssFile::COMMIT_DIAG_ADDREM | AssFile::COMMIT_DIAG_TEXT | AssFile::COMMIT_DIAG_TIME);
+		prepared->Finalize(input.timecodes);
+		prepared->Install();
+		int revision = -1;
+		file.PublishCommit({.message = "apply", .commit_id = &revision, .single_line = nullptr, .type = type, .changed_lines = {}}, false);
 		EXPECT_EQ(text, Export(plan));
 	}
 }

@@ -53,6 +53,8 @@ namespace aegisub::grid { class SubtitleGridRendererSlot; }
 #endif
 
 class BaseGrid final : public wxWindow {
+	friend class GuiTestWxBoundary;
+	bool row_borrows_ready = true;
 	using InputTimingClock = std::chrono::steady_clock;
 
 	struct PendingClickPaintTiming {
@@ -196,6 +198,7 @@ class BaseGrid final : public wxWindow {
 	int DisplayRow(int source_row) const;
 	int FoldColumnWidth() const;
 	void MakeRowVisible(int row);
+	void ScrollToRow(int y);
 
 	/// @brief Get dialogue by index
 	/// @param n Index to look up
@@ -203,6 +206,8 @@ class BaseGrid final : public wxWindow {
 	AssDialogue *GetDialogue(int n) const;
 
 public:
+	void RetireSubtitleRowBorrows() noexcept;
+
 	BaseGrid(wxWindow* parent, agi::Context *context);
 	~BaseGrid();
 

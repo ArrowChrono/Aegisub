@@ -109,6 +109,7 @@ void VisualToolScale::SetToolbar(wxToolBar *new_toolbar) {
 }
 
 void VisualToolScale::OnSubTool(wxCommandEvent &event) {
+	if (!SubtitleRowsReady()) return;
 	if (event.GetId() == normalize_x_button) {
 		NormalizeScale(VisualScaleAxis::X);
 		return;
@@ -147,6 +148,7 @@ bool VisualToolScale::CanNormalizeScale(VisualScaleAxis axis) {
 }
 
 bool VisualToolScale::NormalizeScale(VisualScaleAxis axis) {
+	if (!SubtitleRowsReady()) return false;
 	BeginGeometryGesture();
 	auto const fixed_axis = ToPolicyAxis(axis);
 	if (!active_line || !fixed_axis)

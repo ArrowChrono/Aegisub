@@ -114,6 +114,8 @@ class AudioTimingControllerKaraoke final : public AudioTimingController {
 	void AnnounceChanges(int syl);
 
 public:
+	void RetireSubtitleRowBorrows() noexcept override;
+
 	// AudioTimingController implementation
 	void GetMarkers(const TimeRange &range, AudioMarkerVector &out_markers) const override;
 	wxString GetWarningMessage() const override { return wxString(); }
@@ -163,6 +165,7 @@ AudioTimingControllerKaraoke::AudioTimingControllerKaraoke(agi::Context *c, AssK
 }
 
 void AudioTimingControllerKaraoke::Next(NextMode mode) {
+	if (!subtitle_rows_ready) return;
 	// Don't create new lines since it's almost never useful to k-time a line
 	// before dialogue timing it
 	if (mode != TIMING_UNIT)
@@ -184,6 +187,7 @@ void AudioTimingControllerKaraoke::Next(NextMode mode) {
 }
 
 void AudioTimingControllerKaraoke::Prev() {
+	if (!subtitle_rows_ready) return;
 	if (cur_syl == 0) {
 		AssDialogue *old_line = active_line;
 		auto core = c->GetCore();
@@ -206,18 +210,21 @@ void AudioTimingControllerKaraoke::Prev() {
 
 void AudioTimingControllerKaraoke::GetRenderingStyles(AudioRenderingStyleRanges &ranges) const
 {
+	if (!subtitle_rows_ready) return;
 	TimeRange sr = GetPrimaryPlaybackRange();
 	ranges.AddRange(sr.begin(), sr.end(), AudioStyle_Primary);
 	ranges.AddRange(start_marker, end_marker, AudioStyle_Selected);
 }
 
 TimeRange AudioTimingControllerKaraoke::GetPrimaryPlaybackRange() const {
+	if (!subtitle_rows_ready) return TimeRange(0, 0);
 	return TimeRange(
 		cur_syl > 0 ? markers[cur_syl - 1] : start_marker,
 		cur_syl < markers.size() ? markers[cur_syl] : end_marker);
 }
 
 TimeRange AudioTimingControllerKaraoke::GetActiveLineRange() const {
+	if (!subtitle_rows_ready) return TimeRange(0, 0);
 	return TimeRange(start_marker, end_marker);
 }
 
@@ -226,6 +233,7 @@ TimeRange AudioTimingControllerKaraoke::GetIdealVisibleTimeRange() const {
 }
 
 void AudioTimingControllerKaraoke::GetMarkers(TimeRange const& range, AudioMarkerVector &out) const {
+	if (!subtitle_rows_ready) return;
 	size_t i;
 	for (i = 0; i < markers.size() && markers[i] < range.begin(); ++i) ;
 	for (; i < markers.size() && markers[i] < range.end(); ++i)
@@ -239,6 +247,7 @@ void AudioTimingControllerKaraoke::GetMarkers(TimeRange const& range, AudioMarke
 }
 
 void AudioTimingControllerKaraoke::DoCommit() {
+	if (!subtitle_rows_ready) return;
 	command_session->Run(from_wx(_("karaoke timing")), AssFile::COMMIT_DIAG_TEXT, command_session->GetCommitId(), active_line, [&] {
 		active_line->Text = kara->GetText();
 	});
@@ -246,51 +255,64 @@ void AudioTimingControllerKaraoke::DoCommit() {
 }
 
 void AudioTimingControllerKaraoke::Commit() {
+	if (!subtitle_rows_ready) return;
 	if (!auto_commit && pending_changes)
 		DoCommit();
 }
 
 void AudioTimingControllerKaraoke::Revert() {
-	auto core = c->GetCore();
-	active_line = core.selectionController->GetActiveLine();
+	RetireSubtitleRowBorrows();
+	try {
+		auto core = c->GetCore();
+		active_line = core.selectionController->GetActiveLine();
+		if (!active_line) return;
 
-	cur_syl = 0;
-	command_session->ResetCommitId();
-	pending_changes = false;
+		cur_syl = 0;
+		command_session->ResetCommitId();
+		pending_changes = false;
 
-	start_marker.Move(active_line->Start);
-	end_marker.Move(active_line->End);
+		start_marker.Move(active_line->Start);
+		end_marker.Move(active_line->End);
 
-	markers.clear();
-	labels.clear();
+		markers.clear();
+		labels.clear();
 
-	markers.reserve(kara->size());
-	labels.reserve(kara->size());
+		markers.reserve(kara->size());
+		labels.reserve(kara->size());
 
-	for (auto it = kara->begin(); it != kara->end(); ++it) {
-		if (it != kara->begin())
-			markers.emplace_back(it->start_time, &separator_pen, AudioMarker::Feet_None);
-		labels.push_back(AudioLabel{to_wx(it->text), TimeRange(it->start_time, it->start_time + it->duration)});
+		for (auto it = kara->begin(); it != kara->end(); ++it) {
+			if (it != kara->begin())
+				markers.emplace_back(it->start_time, &separator_pen, AudioMarker::Feet_None);
+			labels.push_back(AudioLabel{to_wx(it->text), TimeRange(it->start_time, it->start_time + it->duration)});
+		}
+
+		subtitle_rows_ready = true;
+		AnnounceUpdatedPrimaryRange();
+		AnnounceUpdatedStyleRanges();
+		AnnounceMarkerMoved();
 	}
-
-	AnnounceUpdatedPrimaryRange();
-	AnnounceUpdatedStyleRanges();
-	AnnounceMarkerMoved();
+	catch (...) {
+		RetireSubtitleRowBorrows();
+		throw;
+	}
 }
 
 void AudioTimingControllerKaraoke::AddLeadIn() {
+	if (!subtitle_rows_ready) return;
 	start_marker.Move(start_marker - OPT_GET("Audio/Lead/IN")->GetInt());
 	labels.front().range = TimeRange(start_marker, labels.front().range.end());
 	ApplyLead(cur_syl == 0);
 }
 
 void AudioTimingControllerKaraoke::AddLeadOut() {
+	if (!subtitle_rows_ready) return;
 	end_marker.Move(end_marker + OPT_GET("Audio/Lead/OUT")->GetInt());
 	labels.back().range = TimeRange(labels.back().range.begin(), end_marker);
 	ApplyLead(cur_syl == markers.size());
 }
 
 void AudioTimingControllerKaraoke::ApplyLead(bool announce_primary) {
+	if (!subtitle_rows_ready) return;
 	active_line->Start = (int)start_marker;
 	active_line->End = (int)end_marker;
 	kara->SetLineTimes(start_marker, end_marker);
@@ -300,6 +322,7 @@ void AudioTimingControllerKaraoke::ApplyLead(bool announce_primary) {
 }
 
 void AudioTimingControllerKaraoke::ModifyLength(int delta, bool shift_following) {
+	if (!subtitle_rows_ready) return;
 	if (cur_syl == markers.size()) return;
 
 	int cur, end, step;
@@ -321,12 +344,14 @@ void AudioTimingControllerKaraoke::ModifyLength(int delta, bool shift_following)
 }
 
 void AudioTimingControllerKaraoke::ModifyStart(int delta) {
+	if (!subtitle_rows_ready) return;
 	if (cur_syl == 0) return;
 	MoveMarker(&markers[cur_syl - 1], markers[cur_syl - 1] + delta * 10);
 	AnnounceChanges(cur_syl);
 }
 
 bool AudioTimingControllerKaraoke::IsNearbyMarker(int ms, int sensitivity, bool) const {
+	if (!subtitle_rows_ready) return false;
 	TimeRange range(ms - sensitivity, ms + sensitivity);
 	return any_of(markers.begin(), markers.end(), [&](KaraokeMarker const& km) {
 		return range.contains(km);
@@ -343,6 +368,7 @@ static std::vector<Out *> copy_ptrs(In &vec, size_t start, size_t end) {
 }
 
 std::vector<AudioMarker*> AudioTimingControllerKaraoke::OnLeftClick(int ms, bool ctrl_down, bool, int sensitivity, int) {
+	if (!subtitle_rows_ready) return {};
 	TimeRange range(ms - sensitivity, ms + sensitivity);
 
 	size_t syl = distance(markers.begin(), lower_bound(markers.begin(), markers.end(), ms));
@@ -360,6 +386,7 @@ std::vector<AudioMarker*> AudioTimingControllerKaraoke::OnLeftClick(int ms, bool
 }
 
 std::vector<AudioMarker*> AudioTimingControllerKaraoke::OnRightClick(int ms, bool, int, int) {
+	if (!subtitle_rows_ready) return {};
 	cur_syl = distance(markers.begin(), lower_bound(markers.begin(), markers.end(), ms));
 
 	AnnounceUpdatedPrimaryRange();
@@ -392,6 +419,7 @@ int AudioTimingControllerKaraoke::MoveMarker(KaraokeMarker *marker, int new_posi
 }
 
 void AudioTimingControllerKaraoke::AnnounceChanges(int syl) {
+	if (!subtitle_rows_ready) return;
 	if (syl < 0) return;
 
 	if (static_cast<unsigned>(syl) == cur_syl || static_cast<unsigned>(syl) == cur_syl + 1) {
@@ -410,6 +438,7 @@ void AudioTimingControllerKaraoke::AnnounceChanges(int syl) {
 }
 
 void AudioTimingControllerKaraoke::OnMarkerDrag(std::vector<AudioMarker*> const& m, int new_position, int) {
+	if (!subtitle_rows_ready) return;
 	int old_position = m[0]->GetPosition();
 	int syl = MoveMarker(static_cast<KaraokeMarker *>(m[0]), new_position);
 	if (syl < 0) return;
@@ -425,8 +454,18 @@ void AudioTimingControllerKaraoke::OnMarkerDrag(std::vector<AudioMarker*> const&
 }
 
 void AudioTimingControllerKaraoke::GetLabels(TimeRange const& range, std::vector<AudioLabel> &out) const {
+	if (!subtitle_rows_ready) return;
 	for (auto const& label : labels) {
 		if (range.overlaps(label.range))
 			out.push_back(label);
 	}
+}
+
+void AudioTimingControllerKaraoke::RetireSubtitleRowBorrows() noexcept {
+	subtitle_rows_ready = false;
+	active_line = nullptr;
+	pending_changes = false;
+	cur_syl = 0;
+	markers.clear();
+	labels.clear();
 }

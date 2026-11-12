@@ -58,6 +58,7 @@ namespace aegisub::skia::audio { class AudioDisplaySlot; }
 /// @class AudioBox
 /// @brief Panel with audio playback and timing controls, also containing an AudioDisplay
 class AudioBox final : public wxSashWindow {
+	friend class GuiTestWxBoundary;
 	/// The controller controlling this audio box
 	AudioController *controller;
 
@@ -104,6 +105,7 @@ class AudioBox final : public wxSashWindow {
 #endif
 
 public:
+	void RetireSubtitleRowBorrows() noexcept;
 	AudioBox(wxWindow *parent, agi::Context *context);
 
 #ifdef AEGISUB_WITH_SKIA_AUDIO_DISPLAY

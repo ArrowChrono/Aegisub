@@ -1027,6 +1027,7 @@ void AudioDisplay::PaintAudio(wxDC &dc, const TimeRange updtime, const wxRect up
 
 void AudioDisplay::PaintMarkers(wxDC &dc, TimeRange updtime)
 {
+	if (!controller->GetTimingController() || !controller->GetTimingController()->IsSubtitleRowBindingReady()) return;
 	AudioMarkerVector markers;
 	controller->GetTimingController()->GetMarkers(updtime, markers);
 	if (markers.empty()) return;
@@ -1071,6 +1072,7 @@ void AudioDisplay::PaintFoot(wxDC &dc, int marker_x, int dir)
 
 void AudioDisplay::PaintLabels(wxDC &dc, TimeRange updtime)
 {
+	if (!controller->GetTimingController() || !controller->GetTimingController()->IsSubtitleRowBindingReady()) return;
 	std::vector<AudioLabelProvider::AudioLabel> labels;
 	controller->GetTimingController()->GetLabels(updtime, labels);
 	if (labels.empty()) return;
@@ -1161,7 +1163,7 @@ TimeRange AudioDisplay::TimeRangeFromAbsolutePixels(int left, int right) const
 
 bool AudioDisplay::HasLabels(TimeRange const& range) const
 {
-	if (!controller->GetTimingController() || audio_height <= 0)
+	if (!controller->GetTimingController() || !controller->GetTimingController()->IsSubtitleRowBindingReady() || audio_height <= 0)
 		return false;
 	std::vector<AudioLabelProvider::AudioLabel> labels;
 	controller->GetTimingController()->GetLabels(range, labels);
@@ -1176,7 +1178,7 @@ bool AudioDisplay::HasVisibleLabels() const
 bool AudioDisplay::AppendMarkerRects(TimeRange const& range, std::vector<wxRect> &rects) const
 {
 	constexpr size_t max_marker_rects = 96;
-	if (!controller->GetTimingController() || audio_height <= 0)
+	if (!controller->GetTimingController() || !controller->GetTimingController()->IsSubtitleRowBindingReady() || audio_height <= 0)
 		return true;
 	if (HasLabels(range))
 		return false;
@@ -1512,6 +1514,10 @@ void AudioDisplay::OnMouseCaptureLost(wxMouseCaptureLostEvent&)
 
 void AudioDisplay::OnMouseEvent(wxMouseEvent& event)
 {
+	if (auto timing = controller->GetTimingController(); timing && !timing->IsSubtitleRowBindingReady()) {
+		ForwardMouseEvent(event);
+		return;
+	}
 	if (hotkey::check("Audio", context, event))
 		return;
 
@@ -1608,6 +1614,13 @@ void AudioDisplay::OnMouseEvent(wxMouseEvent& event)
 }
 
 bool AudioDisplay::ForwardMouseEvent(wxMouseEvent &event) {
+	if (auto timing = controller->GetTimingController(); timing && !timing->IsSubtitleRowBindingReady()) {
+		if (event.ButtonUp() && !event.LeftIsDown() && !event.MiddleIsDown() && !event.RightIsDown()) {
+			if (HasCapture()) ReleaseMouse();
+			SetCursor(wxNullCursor);
+		}
+		return true;
+	}
 	// Handle any ongoing drag
 	if (dragged_object && HasCapture())
 	{
@@ -1797,6 +1810,7 @@ void AudioDisplay::OnPlaybackPosition(int ms)
 
 void AudioDisplay::OnSelectionChanged()
 {
+	if (auto timing = controller->GetTimingController(); timing && !timing->IsSubtitleRowBindingReady()) return;
 	TimeRange sel(controller->GetPrimaryPlaybackRange());
 	scrollbar->SetSelection(AbsoluteXFromTime(sel.begin()), AbsoluteXFromTime(sel.length()));
 
@@ -1826,6 +1840,7 @@ void AudioDisplay::OnSelectionChanged()
 
 void AudioDisplay::OnScrollTimer(wxTimerEvent &event)
 {
+	if (auto timing = controller->GetTimingController(); timing && !timing->IsSubtitleRowBindingReady()) return;
 	if (!audio_marker) return;
 
 	int rel_x = RelativeXFromTime(audio_marker->GetPosition());
@@ -1845,7 +1860,7 @@ void AudioDisplay::OnScrollTimer(wxTimerEvent &event)
 
 void AudioDisplay::OnStyleRangesChanged()
 {
-	if (!controller->GetTimingController()) return;
+	if (!controller->GetTimingController() || !controller->GetTimingController()->IsSubtitleRowBindingReady()) return;
 	std::vector<std::pair<int, int>> old_ranges = style_ranges;
 
 	AudioStyleRangeMerger asrm;
@@ -1864,4 +1879,13 @@ void AudioDisplay::OnMarkerMoved()
 	RefreshVisibleMarkerRects(visible_marker_rects, visible_marker_rects_precise, new_marker_rects, new_marker_rects_precise);
 	visible_marker_rects = std::move(new_marker_rects);
 	visible_marker_rects_precise = new_marker_rects_precise;
+}
+
+void AudioDisplay::RetireSubtitleRowBorrows() noexcept {
+	scroll_timer.Stop();
+	dragged_object = nullptr;
+	audio_marker.reset();
+	style_ranges.clear();
+	visible_marker_rects.clear();
+	visible_marker_rects_precise = true;
 }

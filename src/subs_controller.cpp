@@ -979,45 +979,86 @@ void SubsController::SetFileName(agi::fs::path const& path) {
 	OPT_SET("Path/Last/Subtitles")->SetString(agi::fs::PathToString(filename.parent_path()));
 }
 
+struct SubsController::PreparedMotionTrackHistory::State {
+	std::unique_ptr<SubtitleHistory::PreparedRecord> history;
+	std::shared_ptr<SaveEveryChangeState> autosave;
+	std::unique_lock<std::mutex> lock;
+
+	State(std::unique_ptr<SubtitleHistory::PreparedRecord> history,
+		  std::shared_ptr<SaveEveryChangeState> autosave)
+		: history(std::move(history)), autosave(std::move(autosave)), lock(this->autosave->mutex) {}
+};
+
+SubsController::PreparedMotionTrackHistory::PreparedMotionTrackHistory() = default;
+SubsController::PreparedMotionTrackHistory::~PreparedMotionTrackHistory() = default;
+SubsController::PreparedMotionTrackHistory::PreparedMotionTrackHistory(PreparedMotionTrackHistory&&) noexcept = default;
+SubsController::PreparedMotionTrackHistory& SubsController::PreparedMotionTrackHistory::operator=(PreparedMotionTrackHistory&&) noexcept = default;
+
+std::unique_ptr<SubsController::PreparedMotionTrackHistory> SubsController::PrepareMotionTrackHistory(
+	AssFile& candidate, AssFileCommit const& commit,
+	std::vector<AssDialogue *> const& selected, AssDialogue *active) {
+	auto previous = CaptureHistoryBookmark(context);
+	auto next = previous;
+	next.active_line_id = active ? active->Id : 0;
+	next.selected_line_ids.clear();
+	next.selected_line_ids.reserve(selected.size());
+	for (auto const *line : selected)
+		next.selected_line_ids.push_back(line->Id);
+	auto record = history.PrepareRecord(candidate, commit, [&] { return next; }, OPT_GET("Limits/Undo Levels")->GetInt(), SubtitleHistory::EmptyDialoguePolicy::Preserve, SubtitleHistory::EmptyStylePolicy::Preserve, &previous);
+	auto prepared = std::make_unique<PreparedMotionTrackHistory>();
+	prepared->state = std::make_unique<PreparedMotionTrackHistory::State>(std::move(record), save_every_change_state);
+	return prepared;
+}
+
+uint64_t SubsController::InstallMotionTrackHistory(std::unique_ptr<PreparedMotionTrackHistory> prepared) {
+	auto const generation = prepared->state->autosave->latest.BeginRevision();
+	history.InstallRecord(std::move(prepared->state->history));
+	return generation;
+}
+
+void SubsController::PublishMotionTrackAutosave(uint64_t generation) {
+	ApplyCompletedSaveEveryChangeWrites();
+	SaveOnChange(generation);
+}
+
+void SubsController::SaveOnChange(uint64_t save_generation) {
+	auto core = context->GetCore();
+	if (history.UndoDepth() <= 1 || !OPT_GET("App/Auto/Save on Every Change")->GetBool() || filename.empty())
+		return;
+
+	const SubtitleFormat *writer = nullptr;
+	try {
+		writer = SubtitleFormat::GetWriter(filename);
+		if (!writer || !writer->CanSave(core.ass.get()))
+			return;
+	}
+	catch (...) {
+		return;
+	}
+
+	// Formats which may request a frame-rate or other UI choice retain the
+	// proven synchronous path. Background-capable formats never call back to
+	// the UI, which makes queue draining during close safe.
+	if (!writer->SupportsBackgroundWriting()) {
+		Save(filename);
+		return;
+	}
+
+	std::optional<FileWatchSnapshot> expected_target;
+	if (!ConfirmOverwriteExternalChangesForAsync(filename, expected_target))
+		return;
+	QueueSaveEveryChange(save_generation, writer, expected_target);
+}
+
 void SubsController::OnCommit(AssFileCommit c) {
 	if (c.message.empty() && !history.Empty())
 		return;
 	auto const save_generation = BeginSaveEveryChangeRevision();
-
 	auto core = context->GetCore();
-	auto save_on_change = [&] {
-		if (history.UndoDepth() <= 1 || !OPT_GET("App/Auto/Save on Every Change")->GetBool() || filename.empty())
-			return;
-
-		const SubtitleFormat *writer = nullptr;
-		try {
-			writer = SubtitleFormat::GetWriter(filename);
-			if (!writer || !writer->CanSave(core.ass.get()))
-				return;
-		}
-		catch (...) {
-			return;
-		}
-
-		// Formats which may request a frame-rate or other UI choice retain the
-		// proven synchronous path. Background-capable formats never call back to
-		// the UI, which makes queue draining during close safe.
-		if (!writer->SupportsBackgroundWriting()) {
-			Save(filename);
-			return;
-		}
-
-		std::optional<FileWatchSnapshot> expected_target;
-		if (!ConfirmOverwriteExternalChangesForAsync(filename, expected_target))
-			return;
-		QueueSaveEveryChange(save_generation, writer, std::move(expected_target));
-	};
-
 	if (c.single_line && c.single_line->Group() == AssEntryGroup::DIALOGUE)
 		core.selectionController->RecordEditedLine(c.single_line);
-
 	history.Record(*core.ass, c, [this] { return CaptureHistoryBookmark(context); }, OPT_GET("Limits/Undo Levels")->GetInt());
-	save_on_change();
+	SaveOnChange(save_generation);
 }
 
 void SubsController::OnActiveLineChanged() {

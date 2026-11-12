@@ -71,8 +71,10 @@ VisualToolDrag::VisualToolDrag(VideoDisplay *parent, agi::Context *context)
 	auto core = c->GetCore();
 	connections.push_back(core.selectionController->AddSelectionListener(&VisualToolDrag::OnSelectedSetChanged, this));
 	connections.push_back(core.project->AddTimecodesListener([this](agi::vfr::Framerate const&) {
-		OnFileChanged();
-		this->parent->Render();
+		if (SubtitleRowsReady()) {
+			OnFileChanged();
+			this->parent->Render();
+		}
 	}));
 	auto const& sel_set = core.selectionController->GetSelectedSet();
 	selection = sel_set;
@@ -120,6 +122,7 @@ void VisualToolDrag::UpdateToggleButtons() {
 }
 
 void VisualToolDrag::OnSubTool(wxCommandEvent &) {
+	if (!SubtitleRowsReady()) return;
 	// Toggle \move <-> \pos
 	auto core = c->GetCore();
 	VideoController *vc = core.videoController.get();
@@ -148,6 +151,16 @@ void VisualToolDrag::OnLineChanged() {
 	UpdateToggleButtons();
 }
 
+void VisualToolDrag::RetireDerivedSubtitleRowBorrows() noexcept {
+	VisualTool<VisualToolDragDraggableFeature>::RetireDerivedSubtitleRowBorrows();
+	selection.clear();
+	primary = nullptr;
+	features.clear();
+	frame_visibility.reset();
+	frame_visibility_valid = false;
+	frame_visibility_frame = -1;
+}
+
 void VisualToolDrag::OnFileChanged() {
 	parent->ResetToolPresentation();
 	/// @todo it should be possible to preserve the selection in some cases
@@ -156,9 +169,10 @@ void VisualToolDrag::OnFileChanged() {
 	primary = nullptr;
 	active_feature = nullptr;
 
+	selection = c->GetCore().selectionController->GetSelectedSet();
 	RebuildFrameVisibility();
 	for (auto& diag : c->GetCore().ass->Events)
-		if (frame_visibility.Visible().count(&diag))
+		if (frame_visibility->Visible().count(&diag))
 			MakeFeatures(&diag);
 
 	UpdateToggleButtons();
@@ -167,7 +181,7 @@ void VisualToolDrag::OnFileChanged() {
 void VisualToolDrag::OnFrameChanged() {
 	perf_trace::VideoUiDurationScope trace(
 		"grid_select.visual.frame",
-		static_cast<int>(frame_visibility.Visible().size()),
+		frame_visibility ? static_cast<int>(frame_visibility->Visible().size()) : 0,
 		static_cast<int>(features.size()));
 
 	if (!frame_visibility_valid) {
@@ -177,7 +191,7 @@ void VisualToolDrag::OnFrameChanged() {
 
 	std::vector<AssDialogue *> entered;
 	std::vector<AssDialogue *> exited;
-	frame_visibility.Advance(frame_visibility_frame, frame_number, entered, exited);
+	frame_visibility->Advance(frame_visibility_frame, frame_number, entered, exited);
 	frame_visibility_frame = frame_number;
 	auto const changed_line_count = entered.size() + exited.size();
 	RemoveFeatures(exited);
@@ -200,7 +214,9 @@ void VisualToolDrag::RebuildFrameVisibility() {
 			&diag,
 		});
 	}
-	frame_visibility.Rebuild(intervals, frame_number);
+	if (!frame_visibility)
+		frame_visibility.emplace();
+	frame_visibility->Rebuild(intervals, frame_number);
 	frame_visibility_valid = true;
 	frame_visibility_frame = frame_number;
 }
@@ -241,6 +257,7 @@ void VisualToolDrag::AddFeatures(std::vector<AssDialogue *> lines) {
 }
 
 void VisualToolDrag::OnSelectedSetChanged() {
+	if (!SubtitleRowsReady()) return;
 	parent->ResetToolPresentation();
 	auto core = c->GetCore();
 	auto const& new_sel_set = core.selectionController->GetSelectedSet();

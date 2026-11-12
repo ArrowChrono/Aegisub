@@ -38,6 +38,7 @@ class wxToolBar;
 /// @class VisualToolDrag
 /// @brief Moveable features for the positions of each visible line
 class VisualToolDrag final : public VisualTool<VisualToolDragDraggableFeature> {
+	friend class GuiTestWxBoundary;
 	/// The subtoolbar for the move/pos conversion button
 	wxToolBar *toolbar = nullptr;
 	int move_pos_button = -1;
@@ -48,7 +49,7 @@ class VisualToolDrag final : public VisualTool<VisualToolDragDraggableFeature> {
 	Feature *primary = nullptr;
 	/// The last announced selection set
 	std::set<AssDialogue *> selection;
-	aegisub::visual_frame_visibility::Index<AssDialogue> frame_visibility;
+	std::optional<aegisub::visual_frame_visibility::Index<AssDialogue>> frame_visibility{std::in_place};
 	bool frame_visibility_valid = false;
 	int frame_visibility_frame = -1;
 
@@ -66,6 +67,7 @@ class VisualToolDrag final : public VisualTool<VisualToolDragDraggableFeature> {
 	void AddFeatures(std::vector<AssDialogue *> lines);
 
 	void OnSelectedSetChanged();
+	void RetireDerivedSubtitleRowBorrows() noexcept override;
 
 	void OnFrameChanged() override;
 	void OnFileChanged() override;

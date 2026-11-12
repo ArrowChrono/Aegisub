@@ -237,6 +237,7 @@ SubsEditBox::SubsEditBox(wxWindow *parent, agi::Context *context)
 
 	style_edit_button = new wxButton(this, -1, _("Edit"), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
 	style_edit_button->Bind(wxEVT_BUTTON, [=](wxCommandEvent&) {
+		if (!row_borrows_ready) return;
 		if (active_style) {
 			auto font_model = BuildFontFamilyCatalogUiModel();
 			DialogStyleEditor(this, active_style, c, nullptr, std::string(), font_model).ShowModal();
@@ -458,7 +459,24 @@ SubsEditBox::~SubsEditBox() {
 	c->GetCore().textSelectionController->SetControl((wxTextCtrl*)nullptr);
 }
 
+void SubsEditBox::RetireSubtitleRowBorrows() noexcept {
+	row_borrows_ready = false;
+	document_lists_dirty = true;
+	line = nullptr;
+	active_style = nullptr;
+	initial_times.clear();
+	command_session.ResetCommitId();
+	last_time_commit_type = -1;
+	undo_timer.Stop();
+	visual_tool_text_sync_timer.Stop();
+	visual_tool_text_sync_pending = false;
+	color_click_timer.Stop();
+	color_click_sequencer = {};
+	pending_color_open_command = nullptr;
+}
+
 bool SubsEditBox::CanFocusEditControl() const {
+	if (!row_borrows_ready) return false;
 #ifdef WITH_WXSTC
 	if (use_stc)
 		return aegisub::subtitle_edit_box_focus::CanFocusEditControl(
@@ -473,6 +491,7 @@ bool SubsEditBox::CanFocusEditControl() const {
 }
 
 void SubsEditBox::FocusEditControl() {
+	if (!row_borrows_ready) return;
 #ifdef WITH_WXSTC
 	if (use_stc) {
 		edit_ctrl_stc->SetFocus();
@@ -483,6 +502,7 @@ void SubsEditBox::FocusEditControl() {
 }
 
 std::string SubsEditBox::GetEditControlSelectedText() const {
+	if (!row_borrows_ready) return {};
 #ifdef WITH_WXSTC
 	if (use_stc) {
 		if (!edit_ctrl_stc)
@@ -564,6 +584,7 @@ std::optional<std::pair<int, int>> SubsEditBox::GetEditControlCaret() const {
 }
 
 void SubsEditBox::SetEditControlCaret(int character_index, bool after) {
+	if (!row_borrows_ready) return;
 	size_t character_offset = 0;
 	if (character_index > 0)
 		character_offset = static_cast<size_t>(character_index - 1) + (after ? 1 : 0);
@@ -589,6 +610,7 @@ void SubsEditBox::SetEditControlCaret(int character_index, bool after) {
 }
 
 void SubsEditBox::SetEditControlSelection(int start, int stop) {
+	if (!row_borrows_ready) return;
 	if (start > stop)
 		std::swap(start, stop);
 
@@ -633,6 +655,7 @@ wxSpinCtrl *SubsEditBox::MakeMarginCtrl(wxString const& tooltip, int margin, wxS
 	middle_left_sizer->Add(ctrl, wxSizerFlags().Expand());
 
 	auto commit = [=](wxCommandEvent&) {
+		if (!row_borrows_ready) return;
 		auto text = ctrl->GetTextValue();
 		text.Trim(true);
 		text.Trim(false);
@@ -665,9 +688,9 @@ TimeEdit *SubsEditBox::MakeTimeCtrl(wxString const& tooltip, TimeField field) {
 	ctrl->SetToolTip(tooltip);
 	ctrl->SetDisplayMode(time_display_mode);
 	Bind(wxEVT_TEXT, [=](wxCommandEvent&) {
+		if (!row_borrows_ready) return;
 		if (ctrl->ConsumeInputChanged())
-			CommitTimes(field);
-	}, ctrl->GetId());
+			CommitTimes(field); }, ctrl->GetId());
 	ctrl->Bind(wxEVT_CHAR_HOOK, time_edit_char_hook);
 	middle_left_sizer->Add(ctrl, wxSizerFlags().Expand());
 	return ctrl;
@@ -716,6 +739,7 @@ void SubsEditBox::MakeColorButton(const char *open_cmd_name, const char *pick_cm
 	// hijack two ordinary clicks whose second press landed past the system
 	// double-click rectangle (ports report that as a plain down).
 	btn->Bind(wxEVT_BUTTON, [this, open_cmd_name, pick_cmd_name](wxCommandEvent&) {
+		if (!row_borrows_ready) return;
 		if (color_click_sequencer.OnButtonClick(pick_cmd_name) !=
 			aegisub::subtitle_edit_box_color_click::Action::DeferOpen)
 			return;
@@ -723,6 +747,7 @@ void SubsEditBox::MakeColorButton(const char *open_cmd_name, const char *pick_cm
 		color_click_timer.Start(ColorDoubleClickIntervalMs(), wxTIMER_ONE_SHOT);
 	});
 	btn->Bind(wxEVT_LEFT_DCLICK, [this, pick_cmd_name](wxMouseEvent& event) {
+		if (!row_borrows_ready) return;
 		if (color_click_sequencer.OnDoublePress(pick_cmd_name) ==
 			aegisub::subtitle_edit_box_color_click::Action::RunPick) {
 			// Swallow the whole press: passing it on would run the native
@@ -739,12 +764,14 @@ void SubsEditBox::MakeColorButton(const char *open_cmd_name, const char *pick_cm
 		event.Skip();
 	});
 	btn->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& event) {
+		if (!row_borrows_ready) return;
 		color_click_sequencer.OnPlainPress();
 		event.Skip();
 	});
 }
 
 void SubsEditBox::RunPendingColorQuickPick(const char *pick_cmd_name) {
+	if (!row_borrows_ready) return;
 	pending_color_open_command = nullptr;
 	color_click_timer.Stop();
 	// Ports that hand the taken-over press back to the native button still
@@ -762,6 +789,7 @@ void SubsEditBox::RunPendingColorQuickPick(const char *pick_cmd_name) {
 }
 
 void SubsEditBox::ConfirmPendingColorClick() {
+	if (!row_borrows_ready) return;
 	if (color_click_sequencer.OnWindowExpired() !=
 		aegisub::subtitle_edit_box_color_click::Action::OpenDialog)
 		return;
@@ -824,6 +852,7 @@ bool SubsEditBox::IsVisualToolInteracting() const {
 }
 
 void SubsEditBox::QueueVisualToolTextSync() {
+	if (!row_borrows_ready) return;
 	visual_tool_text_sync_pending = true;
 	auto const text_bytes = line
 		? static_cast<int>(std::min(
@@ -844,6 +873,7 @@ void SubsEditBox::CancelVisualToolTextSync() {
 }
 
 void SubsEditBox::FlushVisualToolTextSync() {
+	if (!row_borrows_ready) return;
 	if (!visual_tool_text_sync_pending)
 		return;
 
@@ -871,8 +901,17 @@ void SubsEditBox::OnCommit(int type, AssDialogue const* changed) {
 	if (local_commit && !command_session.ShouldObserveLocalCommit())
 		return;
 
-	auto core = c->GetCore();
 	initial_times.clear();
+	if (type == AssFile::COMMIT_NEW || (type & AssFile::COMMIT_STYLES)) {
+		if (type == AssFile::COMMIT_NEW)
+			document_lists_dirty = true;
+		PopulateDocumentLists(type == AssFile::COMMIT_NEW);
+		if (type == AssFile::COMMIT_NEW)
+			document_lists_dirty = false;
+	}
+	if (!row_borrows_ready) return;
+
+	auto core = c->GetCore();
 	bool const affects_current_line =
 		type == AssFile::COMMIT_NEW
 		|| (type & (AssFile::COMMIT_STYLES | AssFile::COMMIT_ORDER | AssFile::COMMIT_DIAG_ADDREM))
@@ -889,26 +928,15 @@ void SubsEditBox::OnCommit(int type, AssDialogue const* changed) {
 			CancelVisualToolTextSync();
 	}
 
-	if (type == AssFile::COMMIT_NEW || type & AssFile::COMMIT_STYLES) {
-		wxEventBlocker blocker(this);
-		wxString style = style_box->GetValue();
-		style_box->Clear();
-		style_box->Append(to_wx(core.ass->GetStyles()));
-		style_box->Select(style_box->FindString(style));
-		active_style = line ? core.ass->GetStyle(line->Style) : nullptr;
-	}
-
-	if (type == AssFile::COMMIT_NEW) {
-		wxEventBlocker blocker(this);
-		PopulateList(effect_box, AssDialogue_Effect);
-		PopulateList(actor_box, AssDialogue_Actor);
+	if (type == AssFile::COMMIT_NEW)
 		return;
-	}
-	else if ((type & AssFile::COMMIT_STYLES) && line)
-	{
-		auto const style_index = style_box->FindString(to_wx(line->Style));
-		if (style_box->GetSelection() != style_index)
-			style_box->Select(style_index);
+	if (type & AssFile::COMMIT_STYLES) {
+		active_style = line ? core.ass->GetStyle(line->Style) : nullptr;
+		if (line) {
+			auto const style_index = style_box->FindString(to_wx(line->Style));
+			if (style_box->GetSelection() != style_index)
+				style_box->Select(style_index);
+		}
 	}
 
 	if (!(type ^ AssFile::COMMIT_ORDER) || !affects_current_line)
@@ -1076,6 +1104,18 @@ void SubsEditBox::UpdateCodeMode() {
 #endif
 }
 
+void SubsEditBox::PopulateDocumentLists(bool include_dialogue_fields) {
+	wxEventBlocker blocker(this);
+	wxString const style = style_box->GetValue();
+	style_box->Clear();
+	style_box->Append(to_wx(c->GetCore().ass->GetStyles()));
+	style_box->Select(style_box->FindString(style));
+	if (include_dialogue_fields) {
+		PopulateList(effect_box, AssDialogue_Effect);
+		PopulateList(actor_box, AssDialogue_Actor);
+	}
+}
+
 void SubsEditBox::PopulateList(wxComboBox *combo, boost::flyweight<std::string> AssDialogue::*field) {
 	auto core = c->GetCore();
 	wxEventBlocker blocker(this);
@@ -1106,13 +1146,18 @@ void SubsEditBox::PopulateList(wxComboBox *combo, boost::flyweight<std::string> 
 }
 
 void SubsEditBox::OnActiveLineChanged(AssDialogue *new_line) {
+	row_borrows_ready = false;
 	perf_trace::VideoUiDurationScope trace("grid_select.editbox");
 	wxEventBlocker blocker(this);
 	CancelVisualToolTextSync();
 	line = new_line;
 	command_session.ResetCommitId();
 
+	if (document_lists_dirty)
+		PopulateDocumentLists(true);
 	UpdateFields(AssFile::COMMIT_DIAG_FULL, false);
+	document_lists_dirty = false;
+	row_borrows_ready = line != nullptr;
 }
 
 void SubsEditBox::OnSelectedSetChanged() {
@@ -1120,6 +1165,7 @@ void SubsEditBox::OnSelectedSetChanged() {
 }
 
 void SubsEditBox::OnLineInitialTextChanged(std::string const& new_text) {
+	if (!row_borrows_ready) return;
 	if (split_box->IsChecked())
 		secondary_editor->SetValue(to_wx(new_text));
 }
@@ -1192,6 +1238,7 @@ void SubsEditBox::UpdateTimeDisplayModeFromFile(bool force_apply) {
 }
 
 void SubsEditBox::OnKeyDown(wxKeyEvent &event) {
+	if (!row_borrows_ready) return;
 #ifdef WITH_WXSTC
 	wxWindow const *editor = use_stc ? static_cast<wxWindow *>(edit_ctrl_stc) : edit_ctrl_tc;
 #else
@@ -1218,11 +1265,13 @@ void SubsEditBox::OnKeyDown(wxKeyEvent &event) {
 }
 
 void SubsEditBox::OnMouse(wxMouseEvent &event) {
+	if (!row_borrows_ready) return;
 	hotkey::check("Subtitle Edit Box", c, event);
 }
 
 #ifdef WITH_WXSTC
 void SubsEditBox::OnChangeStc(wxStyledTextEvent &event) {
+	if (!row_borrows_ready) return;
 	if (line && edit_ctrl_stc->GetTextRaw().data() != line->Text.get()) {
 		if (event.GetModificationType() & wxSTC_STARTACTION)
 			command_session.ResetCommitId();
@@ -1233,6 +1282,7 @@ void SubsEditBox::OnChangeStc(wxStyledTextEvent &event) {
 #endif
 
 void SubsEditBox::OnChangeTc(wxCommandEvent& event) {
+	if (!row_borrows_ready) return;
 	if (line && from_wx(edit_ctrl_tc->GetValue()) != line->Text.get()) {
 		CommitText(_("modify text"));
 		UpdateCharacterCount(line->Text);
@@ -1241,6 +1291,7 @@ void SubsEditBox::OnChangeTc(wxCommandEvent& event) {
 
 template<class setter>
 void SubsEditBox::SetSelectedRows(setter set, wxString const& desc, int type, bool amend) {
+	if (!row_borrows_ready) return;
 	auto const& sel = c->GetCore().selectionController->GetSelectedSet();
 	int const amend_id = amend && desc == last_commit_type ? command_session.GetCommitId() : -1;
 	command_session.Run(from_wx(desc), type, amend_id, sel.size() == 1 ? *sel.begin() : nullptr, [&] {
@@ -1264,6 +1315,7 @@ void SubsEditBox::SetSelectedRows(T AssDialogueBase::*field, wxString const& val
 }
 
 void SubsEditBox::CommitText(wxString const& desc) {
+	if (!row_borrows_ready) return;
 #ifdef WITH_WXSTC
 	if (use_stc) {
 		auto data = edit_ctrl_stc->GetTextRaw();
@@ -1278,6 +1330,7 @@ void SubsEditBox::CommitText(wxString const& desc) {
 }
 
 void SubsEditBox::CommitTimes(TimeField field) {
+	if (!row_borrows_ready) return;
 	auto core = c->GetCore();
 	auto const& sel = core.selectionController->GetSelectedSet();
 	if (field != last_time_commit_type)
@@ -1384,6 +1437,7 @@ WXLRESULT SubsEditBox::MSWWindowProc(WXUINT message, WXWPARAM wParam, WXLPARAM l
 #endif
 
 void SubsEditBox::OnFrameTimeRadio(wxCommandEvent &event) {
+	if (!row_borrows_ready) return;
 	event.Skip();
 
 	SubtitleTimeDisplayMode mode = SubtitleTimeDisplayMode::Ass;
@@ -1417,6 +1471,7 @@ void SubsEditBox::SetControlsState(bool state) {
 }
 
 void SubsEditBox::OnSplit(wxCommandEvent&) {
+	if (!row_borrows_ready) return;
 	bool show_original = split_box->IsChecked();
 	DoOnSplit(show_original);
 	OPT_SET("Subtitle/Show Original")->SetBool(show_original);
@@ -1437,21 +1492,25 @@ void SubsEditBox::DoOnSplit(bool show_original) {
 }
 
 void SubsEditBox::OnStyleChange(wxCommandEvent &evt) {
+	if (!row_borrows_ready) return;
 	SetSelectedRows(&AssDialogue::Style, new_value(style_box, evt), _("style change"), AssFile::COMMIT_DIAG_META);
 	active_style = c->GetCore().ass->GetStyle(line->Style);
 }
 
 void SubsEditBox::OnActorChange(wxCommandEvent &evt) {
+	if (!row_borrows_ready) return;
 	bool amend = evt.GetEventType() == wxEVT_TEXT;
 	SetSelectedRows(AssDialogue_Actor, new_value(actor_box, evt), _("actor change"), AssFile::COMMIT_DIAG_META, amend);
 	PopulateList(actor_box, AssDialogue_Actor);
 }
 
 void SubsEditBox::OnLayerEnter(wxCommandEvent &evt) {
+	if (!row_borrows_ready) return;
 	SetSelectedRows(&AssDialogue::Layer, evt.GetInt(), _("layer change"), AssFile::COMMIT_DIAG_META);
 }
 
 void SubsEditBox::OnEffectChange(wxCommandEvent &evt) {
+	if (!row_borrows_ready) return;
 	bool amend = evt.GetEventType() == wxEVT_TEXT;
 	SetSelectedRows(AssDialogue_Effect, new_value(effect_box, evt), _("effect change"), AssFile::COMMIT_DIAG_META, amend);
 	UpdateCodeMode();
@@ -1459,11 +1518,13 @@ void SubsEditBox::OnEffectChange(wxCommandEvent &evt) {
 }
 
 void SubsEditBox::OnCommentChange(wxCommandEvent &evt) {
+	if (!row_borrows_ready) return;
 	SetSelectedRows(&AssDialogue::Comment, !!evt.GetInt(), _("comment change"), AssFile::COMMIT_DIAG_META);
 	UpdateCodeMode();
 }
 
 void SubsEditBox::CallCommand(const char *cmd_name, bool refocus_edit_control) {
+	if (!row_borrows_ready) return;
 	cmd::call(cmd_name, c);
 	if (!refocus_edit_control)
 		return;

@@ -101,6 +101,7 @@ public:
 	void ClearFailureCallback();
 	bool HasPresentedContentFrame() const noexcept;
 	SkiaAudioDisplayViewState GetViewState() const noexcept;
+	void RetireSubtitleRowBorrows() noexcept;
 	void SyncToCurrentAudioProvider();
 	void ScrollBy(int pixel_amount);
 	void ScrollBy(int pixel_amount, int mouse_x);

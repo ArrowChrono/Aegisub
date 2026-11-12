@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+class AssFile;
 class SelectionController;
 class SubtitleFormat;
 class WatchedFile;
@@ -182,6 +183,7 @@ class SubsController {
 	void ReloadFileFromDisk(bool load_linked_files);
 
 	void OnCommit(AssFileCommit c);
+	void SaveOnChange(uint64_t generation);
 	void OnActiveLineChanged();
 	void OnSelectionChanged();
 	void OnTextSelectionChanged();
@@ -213,6 +215,25 @@ public:
 	/// Required due to that the selection controller is the subtitles grid, and
 	/// so is created long after the subtitles controller
 	void SetSelectionController(SelectionController *selection_controller);
+
+	class PreparedMotionTrackHistory {
+		friend class SubsController;
+		struct State;
+		std::unique_ptr<State> state;
+
+		public:
+		PreparedMotionTrackHistory();
+		~PreparedMotionTrackHistory();
+		PreparedMotionTrackHistory(PreparedMotionTrackHistory&&) noexcept;
+		PreparedMotionTrackHistory& operator=(PreparedMotionTrackHistory&&) noexcept;
+		PreparedMotionTrackHistory(PreparedMotionTrackHistory const&) = delete;
+		PreparedMotionTrackHistory& operator=(PreparedMotionTrackHistory const&) = delete;
+	};
+	std::unique_ptr<PreparedMotionTrackHistory> PrepareMotionTrackHistory(
+		AssFile& candidate, AssFileCommit const& commit,
+		std::vector<AssDialogue *> const& selected, AssDialogue *active);
+	uint64_t InstallMotionTrackHistory(std::unique_ptr<PreparedMotionTrackHistory> prepared);
+	void PublishMotionTrackAutosave(uint64_t generation);
 
 	/// The file's path and filename if any, or platform-appropriate "untitled"
 	agi::fs::path Filename() const;

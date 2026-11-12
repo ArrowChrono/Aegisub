@@ -63,6 +63,7 @@ namespace aegisub { class SubtitleCommandSession; }
 /// changes is on, will happen as soon as the user adjusts the timing of the
 /// new syllable).
 class AudioKaraoke final : public wxWindow {
+	friend class GuiTestWxBoundary;
 	agi::Context *c; ///< Project context
 	agi::signal::Connection file_changed; ///< File changed slot
 	agi::signal::Connection audio_opened; ///< Audio opened connection
@@ -72,6 +73,7 @@ class AudioKaraoke final : public wxWindow {
 
 	/// Currently active dialogue line
 	AssDialogue *active_line = nullptr;
+	bool subtitle_rows_ready = false;
 	/// Karaoke data
 	std::unique_ptr<AssKaraoke> kara;
 
@@ -151,6 +153,7 @@ class AudioKaraoke final : public wxWindow {
 	void OnScrollTimer(wxTimerEvent& event);
 
 public:
+	void RetireSubtitleRowBorrows() noexcept;
 	/// Constructor
 	/// @param parent Parent window
 	/// @param c Project context

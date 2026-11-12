@@ -32,6 +32,8 @@ namespace agi { struct Context; }
 namespace aegisub { class SubtitleCommandSession; }
 
 class DialogStyling final : public wxDialog {
+	friend class GuiTestWxBoundary;
+	bool row_borrows_ready = true;
 	agi::Context *c;
 	agi::signal::Connection active_line_connection;
 	std::unique_ptr<aegisub::SubtitleCommandSession> command_session;
@@ -59,6 +61,8 @@ class DialogStyling final : public wxDialog {
 	std::unique_ptr<PersistLocation> persist;
 
 public:
+	void RetireSubtitleRowBorrows() noexcept;
+
 	void Commit(bool next);
 
 	DialogStyling(agi::Context *context);

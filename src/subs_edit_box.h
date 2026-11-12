@@ -77,6 +77,9 @@ template<class Base> class Placeholder;
 ///
 /// Controls the text edit and all surrounding controls
 class SubsEditBox final : public wxPanel {
+	friend class GuiTestWxBoundary;
+	bool row_borrows_ready = true;
+	bool document_lists_dirty = false;
 	enum TimeField {
 		TIME_START = 0,
 		TIME_END,
@@ -228,6 +231,7 @@ class SubsEditBox final : public wxPanel {
 
 	/// Regenerate a dropdown list with the unique values of a dialogue field
 	void PopulateList(wxComboBox *combo, boost::flyweight<std::string> AssDialogue::*field);
+	void PopulateDocumentLists(bool include_dialogue_fields);
 
 	/// @brief Enable or disable frame timing mode
 	void UpdateFrameTiming(agi::vfr::Framerate const& fps);
@@ -255,6 +259,8 @@ class SubsEditBox final : public wxPanel {
 	wxTextCtrl *secondary_editor;
 
 public:
+	void RetireSubtitleRowBorrows() noexcept;
+
 	/// @brief Constructor
 	/// @param parent Parent window
 	SubsEditBox(wxWindow *parent, agi::Context *context);

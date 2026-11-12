@@ -294,3 +294,8 @@ int64_t AudioController::MillisecondsFromSamples(int64_t samples) const
 	if (!provider) return 0;
 	return samples * 1000 / provider->GetSampleRate();
 }
+
+void AudioController::RetireSubtitleRowBorrows() noexcept {
+	if (timing_controller)
+		timing_controller->RetireSubtitleRowBorrows();
+}

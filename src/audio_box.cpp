@@ -403,3 +403,9 @@ void AudioBox::ScrollToActiveLine() {
 	if (controller->GetTimingController())
 		audioDisplay->ScrollTimeRangeInView(controller->GetTimingController()->GetIdealVisibleTimeRange());
 }
+
+void AudioBox::RetireSubtitleRowBorrows() noexcept {
+	audioDisplay->RetireSubtitleRowBorrows();
+	context->GetCore().audioController->RetireSubtitleRowBorrows();
+	context->GetUI().karaoke->RetireSubtitleRowBorrows();
+}

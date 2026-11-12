@@ -59,6 +59,7 @@ class AudioMarkerInteractionObject;
 /// timing controller. The audio display also renders audio according to the audio controller
 /// and the timing controller, using an audio renderer instance.
 class AudioDisplay: public wxWindow {
+	friend class GuiTestWxBoundary;
 	agi::signal::Connection audio_open_connection;
 
 	std::vector<agi::signal::Connection> connections;
@@ -234,6 +235,7 @@ class AudioDisplay: public wxWindow {
 	void OnMarkerMoved();
 
 public:
+	void RetireSubtitleRowBorrows() noexcept;
 	AudioDisplay(wxWindow *parent, AudioController *controller, agi::Context *context);
 	~AudioDisplay();
 

@@ -80,8 +80,26 @@ VisualToolBase::~VisualToolBase() {
 	CancelInteraction(true);
 }
 
+void VisualToolBase::RetireSubtitleRowBorrows() noexcept {
+	subtitle_rows_ready = false;
+	active_line = nullptr;
+	ClearChangedLines();
+	geometry_snapshots.clear();
+	geometry_overrides.clear();
+	geometry_error_message.clear();
+	geometry_error_reported = false;
+	geometry_mouse_gesture = false;
+	holding = false;
+	dragging = false;
+	interaction_trace_active = false;
+	retired_interaction_pending = retired_interaction_pending || interaction_render_pacer.IsActive();
+	interaction_render_pacer.End();
+	command_session.ResetCommitId();
+	RetireDerivedSubtitleRowBorrows();
+}
+
 void VisualToolBase::OnInteractionRenderTimer() {
-	if (!IsInteracting() || !interaction_render_pacer.IsActive())
+	if (!SubtitleRowsReady() || !IsInteracting() || !interaction_render_pacer.IsActive())
 		return;
 
 	auto const now = DeadlinePacingPolicy::Clock::now();
@@ -179,17 +197,21 @@ void VisualToolBase::UpdateLayoutResolution() {
 }
 
 void VisualToolBase::OnCommit(int type, AssDialogue const* changed) {
+	bool const rebuilding = !SubtitleRowsReady();
 	bool const local_commit = command_session.IsLocalCommitInProgress();
 	if (!local_commit)
 		parent->ResetToolPresentation();
 	if (local_commit && !command_session.ShouldObserveLocalCommit())
 		return;
 
+	subtitle_rows_ready = false;
 	bool const interaction_cancelled = !local_commit && CancelInteraction(true);
 
+	if (rebuilding)
+		frame_number = c->GetCore().videoController->GetFrameN();
 	auto *new_active_line = GetActiveDialogueLine();
 	bool needs_render = false;
-	bool const coordinate_system_changed = type == AssFile::COMMIT_NEW || type & AssFile::COMMIT_SCRIPTINFO;
+	bool const coordinate_system_changed = rebuilding || type == AssFile::COMMIT_NEW || type & AssFile::COMMIT_SCRIPTINFO;
 
 	if (coordinate_system_changed) {
 		active_line = new_active_line;
@@ -221,6 +243,7 @@ void VisualToolBase::OnCommit(int type, AssDialogue const* changed) {
 		needs_render = true;
 	}
 
+	subtitle_rows_ready = true;
 	if (needs_render || interaction_cancelled) {
 		if (interaction_cancelled)
 			parent->RenderNow();
@@ -230,9 +253,11 @@ void VisualToolBase::OnCommit(int type, AssDialogue const* changed) {
 }
 
 void VisualToolBase::OnSeek(int new_frame) {
+	if (!SubtitleRowsReady()) return;
 	parent->ResetToolPresentation();
 	parent->CancelReleaseToolFeedback();
 	if (frame_number == new_frame) return;
+	subtitle_rows_ready = false;
 	perf_trace::VideoUiDurationScope trace(
 		"grid_select.visual.seek",
 		frame_number,
@@ -246,14 +271,19 @@ void VisualToolBase::OnSeek(int new_frame) {
 		bool const interaction_cancelled = CancelInteraction(true);
 		active_line = new_line;
 		OnLineChanged();
+		subtitle_rows_ready = true;
 		if (interaction_cancelled)
 			parent->RenderNow();
 	}
+	subtitle_rows_ready = true;
 }
 
 void VisualToolBase::OnMouseCaptureLost(wxMouseCaptureLostEvent &) {
+	if (!SubtitleRowsReady()) return;
+	subtitle_rows_ready = false;
 	bool const was_interacting = CancelInteraction(false);
 	OnFileChanged();
+	subtitle_rows_ready = true;
 	if (was_interacting) {
 		parent->RenderNow();
 	}
@@ -263,6 +293,8 @@ void VisualToolBase::OnMouseCaptureLost(wxMouseCaptureLostEvent &) {
 }
 
 void VisualToolBase::OnActiveLineChanged(AssDialogue *new_line) {
+	if (!SubtitleRowsReady()) return;
+	subtitle_rows_ready = false;
 	parent->ResetToolPresentation();
 	bool const displayed = IsDisplayed(new_line);
 	perf_trace::VideoUiDurationScope trace(
@@ -276,19 +308,26 @@ void VisualToolBase::OnActiveLineChanged(AssDialogue *new_line) {
 	if (new_line != active_line) {
 		active_line = new_line;
 		OnLineChanged();
+		subtitle_rows_ready = true;
 		if (interaction_cancelled)
 			parent->RenderNow();
 		else
 			parent->Render();
 	}
 	else if (interaction_cancelled) {
+		subtitle_rows_ready = true;
 		parent->RenderNow();
 	}
+	subtitle_rows_ready = true;
 }
 
 bool VisualToolBase::CancelInteraction(bool release_capture) {
 	parent->CancelReleaseToolFeedback();
-	bool const was_interacting = IsInteracting();
+	if (retired_interaction_pending) {
+		c->GetCore().videoController->EndVisualSubtitleInteraction();
+		retired_interaction_pending = false;
+	}
+	bool const was_interacting = holding || dragging;
 	holding = false;
 	dragging = false;
 	if (was_interacting) {
@@ -428,7 +467,8 @@ void VisualToolBase::SetDisplayArea(int x, int y, int w, int h) {
 	video_res = Vector2D(w, h);
 
 	bool const interaction_cancelled = CancelInteraction(true);
-	OnDisplayAreaChanged();
+	if (SubtitleRowsReady())
+		OnDisplayAreaChanged();
 	if (interaction_cancelled)
 		parent->RenderNow();
 }
@@ -454,6 +494,10 @@ bool VisualTool<FeatureType>::IgnoresMouseBoundaryEvents() const noexcept {
 
 template<class FeatureType>
 void VisualTool<FeatureType>::OnMouseEvent(wxMouseEvent &event) {
+	if (!SubtitleRowsReady()) {
+		if (parent->HasCapture()) parent->ReleaseMouse();
+		return;
+	}
 	bool const interaction_was_active = holding || dragging;
 	if ((event.Entering() || event.Leaving()) && IgnoresMouseBoundaryEvents())
 		return;
@@ -828,7 +872,7 @@ void VisualToolBase::RenderReadyInteractionFrame() {
 }
 
 void VisualToolBase::ScheduleInteractionRender() {
-	if (!IsInteracting() || !interaction_render_pacer.IsActive())
+	if (!SubtitleRowsReady() || !IsInteracting() || !interaction_render_pacer.IsActive())
 		return;
 
 	bool const allowed = interaction_render_pacer.Request(

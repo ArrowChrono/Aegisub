@@ -52,6 +52,7 @@
 #include "dialog_detached_video.h"
 #include "dialog_font_usage_inventory.h"
 #include "dialog_manager.h"
+#include "dialog_styling_assistant.h"
 #include "font_family_catalog_cache.h"
 #include "libresrc/libresrc.h"
 #include "main.h"
@@ -534,6 +535,20 @@ void FrameMain::EnableToolBar(agi::OptionValue const& opt) {
 		delete old_tb;
 		Layout();
 	}
+}
+
+void FrameMain::RetireSubtitleRowBorrows() noexcept {
+	auto ui = context->GetUI();
+	if (ui.subsGrid)
+		ui.subsGrid->RetireSubtitleRowBorrows();
+	if (ui.subsEditBox)
+		ui.subsEditBox->RetireSubtitleRowBorrows();
+	if (ui.videoDisplay)
+		ui.videoDisplay->RetireSubtitleRowBorrows();
+	if (ui.audioBox)
+		ui.audioBox->RetireSubtitleRowBorrows();
+	if (auto *styling = ui.dialog->Get<DialogStyling>())
+		styling->RetireSubtitleRowBorrows();
 }
 
 void FrameMain::InitContents() {

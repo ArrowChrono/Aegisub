@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <functional>
 #include <list>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -42,6 +43,22 @@ class SubtitleHistory {
 									 Preserve };
 	enum class EmptyStylePolicy { AddDefault,
 								  Preserve };
+
+	class PreparedRecord {
+		friend class SubtitleHistory;
+		struct State;
+		std::unique_ptr<State> state;
+
+		public:
+		PreparedRecord();
+		~PreparedRecord();
+	};
+	std::unique_ptr<PreparedRecord> PrepareRecord(AssFile& file, AssFileCommit const& commit,
+												  CaptureBookmark const& capture_bookmark, int depth,
+												  EmptyDialoguePolicy empty_dialogues = EmptyDialoguePolicy::AddDefault,
+												  EmptyStylePolicy empty_styles = EmptyStylePolicy::AddDefault,
+												  SubtitleHistoryBookmark const *previous_bookmark = nullptr);
+	void InstallRecord(std::unique_ptr<PreparedRecord> prepared);
 
 	SubtitleHistory();
 	~SubtitleHistory();

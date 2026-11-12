@@ -31,6 +31,8 @@ struct Context;
 }
 
 class DialogMotionTrack final : public wxDialog {
+	friend class GuiTestWxBoundary;
+	bool InstallApplyPlan(aegisub::motion_track::MotionTrackApplyPlan const& plan, std::string& message);
 	agi::Context *context;
 	agi::signal::Connection video_open;
 	agi::signal::Connection timecodes_loaded;

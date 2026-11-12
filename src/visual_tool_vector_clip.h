@@ -45,6 +45,11 @@ private:
 
 	std::set<Feature *> box_added;
 
+	void RetireDerivedSubtitleRowBorrows() noexcept override {
+		VisualTool<VisualToolVectorClipDraggableFeature>::RetireDerivedSubtitleRowBorrows();
+		box_added.clear();
+	}
+
 	/// @brief Set the mode
 	/// @param mode 0-8
 	void SetMode(int mode);

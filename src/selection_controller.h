@@ -77,6 +77,16 @@ public:
 		int row = -1;
 	};
 
+	struct PreparedSelection {
+		Selection selected;
+		AssDialogue *active = nullptr;
+		aegisub::selection_navigation_history::History navigation;
+		bool active_changed = false;
+	};
+	PreparedSelection PrepareSelectionAndActive(Selection selected, AssDialogue *active) const;
+	void InstallSelection(PreparedSelection& prepared) noexcept;
+	void PublishSelection(PreparedSelection const& prepared);
+
 	SelectionController(agi::Context *context);
 
 	/// Resolve a live dialogue by AssDialogue::Id, or nullptr if it is gone.

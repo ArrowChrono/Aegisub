@@ -126,6 +126,7 @@ class AudioController final : public wxEvtHandler {
 	int GetDuration() const;
 
 public:
+	void RetireSubtitleRowBorrows() noexcept;
 	AudioController(agi::Context *context);
 	~AudioController();
 

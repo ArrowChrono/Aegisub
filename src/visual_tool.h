@@ -111,6 +111,9 @@ class VisualToolBase {
 	virtual void DoRefresh() { }
 
 protected:
+bool subtitle_rows_ready = true;
+bool retired_interaction_pending = false;
+virtual void RetireDerivedSubtitleRowBorrows() noexcept {}
 bool CancelInteraction(bool release_capture);
 using GeometryEditKind = aegisub::visual_geometry::EditKind;
 std::map<AssDialogue *, aegisub::visual_geometry::Snapshot> geometry_snapshots;
@@ -257,7 +260,9 @@ public:
 	/// own cursor and hand the tool's back afterwards.
 	virtual wxStockCursor GetIdleCursor() const { return wxCURSOR_NONE; }
 	/// Whether the tool currently has an active (on-frame) dialogue line.
-	bool HasActiveLine() const { return active_line != nullptr; }
+	bool HasActiveLine() const { return subtitle_rows_ready && active_line != nullptr; }
+	bool SubtitleRowsReady() const noexcept { return subtitle_rows_ready; }
+	void RetireSubtitleRowBorrows() noexcept;
 	virtual void Draw()=0;
 	virtual std::shared_ptr<const VisualToolRenderSnapshot> CaptureRenderSnapshot(
 		std::shared_ptr<const VisualToolRenderContext> const&) const { return {}; }
@@ -266,14 +271,16 @@ public:
 	virtual void SetCanvasSize(int w, int h);
 	virtual void SetDisplayArea(int x, int y, int w, int h);
 	virtual void SetToolbar(wxToolBar *) { }
-	bool IsInteracting() const noexcept { return holding || dragging; }
+	bool IsInteracting() const noexcept { return subtitle_rows_ready && (holding || dragging); }
 	virtual ~VisualToolBase();
 };
 
 /// Visual tool base class containing all common feature-related functionality
 template<class FeatureType>
 class VisualTool : public VisualToolBase {
-protected:
+	friend class GuiTestWxBoundary;
+
+	protected:
 	typedef FeatureType Feature;
 	typedef agi::owning_intrusive_list<FeatureType> feature_list;
 
@@ -296,6 +303,14 @@ private:
 	virtual void UpdateDrag(FeatureType *feature) { }
 
 protected:
+void RetireDerivedSubtitleRowBorrows() noexcept override {
+	sel_changed = false;
+	double_click_selection.clear();
+	sel_features.clear();
+	active_feature = nullptr;
+	for (auto& feature : features)
+		feature.line = nullptr;
+}
 	std::set<FeatureType *> sel_features; ///< Currently selected visual features
 
 	/// Restore the selection captured before a completed click narrowed it.

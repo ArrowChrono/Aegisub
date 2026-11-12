@@ -26,6 +26,7 @@ class VisualToolShear final : public VisualTool<VisualDraggableFeature> {
 	void OnSelectionChanged();
 	void UpdateHandles();
 	void DoRefresh() override;
+	void RetireDerivedSubtitleRowBorrows() noexcept override;
 	bool InitializeDrag(VisualDraggableFeature *feature) override;
 	void UpdateDrag(VisualDraggableFeature *feature) override;
 	void Draw() override;

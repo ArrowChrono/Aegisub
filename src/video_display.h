@@ -331,6 +331,7 @@ public:
 		wxWindow* parent,
 		agi::Context *context);
 	~VideoDisplay();
+	void RetireSubtitleRowBorrows() noexcept;
 
 	/// @brief Render the currently visible frame
 	void Render();

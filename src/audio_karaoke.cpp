@@ -122,11 +122,15 @@ void AudioKaraoke::SyncToContextState() {
 }
 
 void AudioKaraoke::ApplyActiveLine(AssDialogue *new_line) {
+	RetireSubtitleRowBorrows();
 	active_line = new_line;
+	if (!active_line) return;
 	if (enabled) {
 		LoadFromLine();
 		split_area->Refresh(false);
 	}
+	else
+		subtitle_rows_ready = true;
 }
 
 void AudioKaraoke::OnActiveLineChanged(AssDialogue *new_line) {
@@ -134,6 +138,7 @@ void AudioKaraoke::OnActiveLineChanged(AssDialogue *new_line) {
 }
 
 void AudioKaraoke::OnFileChanged(int type, const AssDialogue *changed) {
+	if (!subtitle_rows_ready) return;
 	if (command_session->IsLocalCommitInProgress() && !command_session->ShouldObserveLocalCommit())
 		return;
 
@@ -155,6 +160,7 @@ void AudioKaraoke::OnAudioOpened(agi::AudioProvider *provider) {
 }
 
 void AudioKaraoke::SetEnabled(bool en) {
+	if (!subtitle_rows_ready) return;
 	enabled = en;
 	auto core = c->GetCore();
 
@@ -183,6 +189,7 @@ void AudioKaraoke::OnPaint(wxPaintEvent &) {
 	const int arrow_outer = split_area->FromDIP(10);
 
 	wxPaintDC dc(split_area);
+	if (!subtitle_rows_ready) return;
 	wxMemoryDC bmp_dc(rendered_line);
 
 	// Draw the text and split lines
@@ -266,6 +273,7 @@ void AudioKaraoke::AddMenuItem(wxMenu &menu, std::string const& tag, wxString co
 }
 
 void AudioKaraoke::OnContextMenu(wxContextMenuEvent&) {
+	if (!subtitle_rows_ready) return;
 	if (!enabled) return;
 
 	wxMenu context_menu(_("Karaoke tag"));
@@ -279,6 +287,7 @@ void AudioKaraoke::OnContextMenu(wxContextMenuEvent&) {
 }
 
 void AudioKaraoke::OnMouse(wxMouseEvent &event) {
+	if (!subtitle_rows_ready) return;
 	if (!enabled) return;
 
 	mouse_pos = event.GetX();
@@ -349,6 +358,7 @@ void AudioKaraoke::OnMouse(wxMouseEvent &event) {
 }
 
 void AudioKaraoke::OnScrollTimer() {
+	if (!subtitle_rows_ready) return;
 	scroll_x += scroll_dir * char_width * 3;
 
 	int max_scroll = rendered_line.GetWidth() + 20 - split_area->GetClientSize().GetWidth();
@@ -365,12 +375,21 @@ void AudioKaraoke::OnScrollTimer(wxTimerEvent&) {
 }
 
 void AudioKaraoke::LoadFromLine() {
-	scroll_x = 0;
-	scroll_timer.Stop();
-	kara->SetLine(active_line, true);
-	SetDisplayText();
-	accept_button->Enable(kara->GetText() != active_line->Text);
-	cancel_button->Enable(false);
+	subtitle_rows_ready = false;
+	if (!active_line) return;
+	try {
+		scroll_x = 0;
+		scroll_timer.Stop();
+		kara->SetLine(active_line, true);
+		SetDisplayText();
+		accept_button->Enable(kara->GetText() != active_line->Text);
+		cancel_button->Enable(false);
+		subtitle_rows_ready = true;
+	}
+	catch (...) {
+		RetireSubtitleRowBorrows();
+		throw;
+	}
 }
 
 void AudioKaraoke::SetDisplayText() {
@@ -443,11 +462,13 @@ void AudioKaraoke::SetDisplayText() {
 }
 
 void AudioKaraoke::CancelSplit() {
+	if (!subtitle_rows_ready) return;
 	LoadFromLine();
 	split_area->Refresh(false);
 }
 
 void AudioKaraoke::AcceptSplit() {
+	if (!subtitle_rows_ready) return;
 	command_session->Run(from_wx(_("karaoke split")), AssFile::COMMIT_DIAG_TEXT, -1, active_line, [&] {
 		active_line->Text = kara->GetText();
 	});
@@ -458,6 +479,20 @@ void AudioKaraoke::AcceptSplit() {
 }
 
 void AudioKaraoke::SetTagType(std::string const& new_tag) {
+	if (!subtitle_rows_ready) return;
 	kara->SetTagType(new_tag);
 	AcceptSplit();
+}
+
+void AudioKaraoke::RetireSubtitleRowBorrows() noexcept {
+	subtitle_rows_ready = false;
+	active_line = nullptr;
+	scroll_timer.Stop();
+	scroll_dir = 0;
+	click_will_remove_split = false;
+	spaced_text.clear();
+	syl_start_points.clear();
+	syl_lines.clear();
+	char_x.clear();
+	char_to_byte.clear();
 }

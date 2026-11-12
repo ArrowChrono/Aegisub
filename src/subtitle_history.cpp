@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <optional>
 #include <utility>
 
 namespace subtitle_history_detail {
@@ -82,35 +83,85 @@ void SubtitleHistory::Clear() {
 	redo_stack.clear();
 }
 
+struct SubtitleHistory::PreparedRecord::State {
+	AssFile *file = nullptr;
+	std::list<Entry> entries;
+	std::unique_ptr<AssStyle> default_style;
+	std::unique_ptr<AssDialogue> default_dialogue;
+	std::optional<SubtitleHistoryBookmark> previous_bookmark;
+	int *output_commit_id = nullptr;
+	int revision = 0;
+	int depth = 0;
+	bool replace_previous = false;
+};
+
+SubtitleHistory::PreparedRecord::PreparedRecord() : state(std::make_unique<State>()) {}
+SubtitleHistory::PreparedRecord::~PreparedRecord() = default;
+
+std::unique_ptr<SubtitleHistory::PreparedRecord> SubtitleHistory::PrepareRecord(
+	AssFile& file, AssFileCommit const& commit, CaptureBookmark const& capture_bookmark,
+	int depth, EmptyDialoguePolicy empty_dialogues, EmptyStylePolicy empty_styles,
+	SubtitleHistoryBookmark const *previous_bookmark) {
+	if (commit.message.empty() && !undo_stack.empty())
+		return {};
+	auto prepared = std::make_unique<PreparedRecord>();
+	prepared->state->file = &file;
+	prepared->state->output_commit_id = commit.commit_id;
+	prepared->state->revision = next_commit_id;
+	prepared->state->depth = std::max(depth, 2);
+	if (previous_bookmark)
+		prepared->state->previous_bookmark = *previous_bookmark;
+	prepared->state->replace_previous = next_commit_id == *commit.commit_id + 1 && redo_stack.empty() &&
+										saved_commit_id + 1 != next_commit_id && !undo_stack.empty();
+	if (prepared->state->replace_previous) {
+		bool const dialogue_only = commit.type != AssFile::COMMIT_NEW &&
+								   (commit.type & AssFile::COMMIT_DIAG_FULL) != 0 && (commit.type & ~AssFile::COMMIT_DIAG_FULL) == 0;
+		if (dialogue_only) {
+			prepared->state->entries.push_back(undo_stack.back());
+			if (subtitle_history_detail::TryAmendDialogueSnapshot(prepared->state->entries.back().events, commit.changed_lines))
+				return prepared;
+			prepared->state->entries.clear();
+		}
+	}
+	if (file.Styles.empty() && empty_styles == EmptyStylePolicy::AddDefault)
+		prepared->state->default_style = std::make_unique<AssStyle>();
+	if (file.Events.empty() && empty_dialogues == EmptyDialoguePolicy::AddDefault) {
+		prepared->state->default_dialogue = std::make_unique<AssDialogue>();
+		prepared->state->default_dialogue->Row = 0;
+	}
+	auto bookmark = capture_bookmark ? capture_bookmark() : SubtitleHistoryBookmark{};
+	prepared->state->entries.emplace_back(file, commit.message, next_commit_id, std::move(bookmark));
+	if (prepared->state->default_style)
+		prepared->state->entries.back().styles.push_back(*prepared->state->default_style);
+	if (prepared->state->default_dialogue)
+		prepared->state->entries.back().events.push_back(*prepared->state->default_dialogue);
+	return prepared;
+}
+
+void SubtitleHistory::InstallRecord(std::unique_ptr<PreparedRecord> prepared) {
+	if (!prepared)
+		return;
+	if (prepared->state->default_style)
+		prepared->state->file->Styles.push_back(*prepared->state->default_style.release());
+	if (prepared->state->default_dialogue)
+		prepared->state->file->Events.push_back(*prepared->state->default_dialogue.release());
+	if (prepared->state->previous_bookmark && !undo_stack.empty())
+		std::swap(undo_stack.back().bookmark, *prepared->state->previous_bookmark);
+	if (prepared->state->replace_previous)
+		undo_stack.pop_back();
+	redo_stack.clear();
+	undo_stack.splice(undo_stack.end(), prepared->state->entries);
+	commit_id = prepared->state->revision;
+	next_commit_id = prepared->state->revision + 1;
+	while (undo_stack.size() > static_cast<std::size_t>(prepared->state->depth))
+		undo_stack.pop_front();
+	*prepared->state->output_commit_id = commit_id;
+}
+
 void SubtitleHistory::Record(AssFile& file, AssFileCommit const& commit,
 							 CaptureBookmark const& capture_bookmark, int depth,
 							 EmptyDialoguePolicy empty_dialogues, EmptyStylePolicy empty_styles) {
-	if (commit.message.empty() && !undo_stack.empty())
-		return;
-
-	commit_id = next_commit_id++;
-	if (commit_id == *commit.commit_id + 1 && redo_stack.empty() && saved_commit_id + 1 != commit_id && !undo_stack.empty()) {
-		bool const dialogue_only = commit.type != AssFile::COMMIT_NEW && (commit.type & AssFile::COMMIT_DIAG_FULL) != 0 && (commit.type & ~AssFile::COMMIT_DIAG_FULL) == 0;
-		if (dialogue_only && subtitle_history_detail::TryAmendDialogueSnapshot(
-								 undo_stack.back().events, commit.changed_lines)) {
-			*commit.commit_id = commit_id;
-			return;
-		}
-		undo_stack.pop_back();
-	}
-
-	if (file.Styles.empty() && empty_styles == EmptyStylePolicy::AddDefault)
-		file.Styles.push_back(*new AssStyle);
-	if (file.Events.empty() && empty_dialogues == EmptyDialoguePolicy::AddDefault) {
-		file.Events.push_back(*new AssDialogue);
-		file.Events.back().Row = 0;
-	}
-	redo_stack.clear();
-	undo_stack.emplace_back(file, commit.message, commit_id,
-							capture_bookmark ? capture_bookmark() : SubtitleHistoryBookmark{});
-	while (undo_stack.size() > static_cast<std::size_t>(std::max(depth, 2)))
-		undo_stack.pop_front();
-	*commit.commit_id = commit_id;
+	InstallRecord(PrepareRecord(file, commit, capture_bookmark, depth, empty_dialogues, empty_styles));
 }
 
 bool SubtitleHistory::Undo(AssFile& file, RestoreBookmark const& restore_bookmark) {

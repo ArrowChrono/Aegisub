@@ -22,6 +22,7 @@
 #include "subs_controller.h"
 
 #include <algorithm>
+#include <type_traits>
 
 SelectionController::SelectionController(agi::Context *c) : context(c) { }
 
@@ -100,6 +101,29 @@ void SelectionController::SetActiveLine(AssDialogue *new_line) {
 		}
 		AnnounceActiveLineChanged(new_line);
 	}
+}
+
+SelectionController::PreparedSelection SelectionController::PrepareSelectionAndActive(
+	Selection selected, AssDialogue *active) const {
+	PreparedSelection prepared{.selected = std::move(selected), .active = active, .navigation = selection_history, .active_changed = active != active_line};
+	if (prepared.active_changed && !restoring_selection_history)
+		prepared.navigation.RecordTransition(active_line ? active_line->Id : 0, active ? active->Id : 0);
+	return prepared;
+}
+
+void SelectionController::InstallSelection(PreparedSelection& prepared) noexcept {
+	static_assert(std::is_nothrow_move_assignable_v<decltype(selection_history)>);
+	selection.swap(prepared.selected);
+	selection_history = std::move(prepared.navigation);
+	active_line = prepared.active;
+	if (active_line)
+		context->GetCore().ass->Properties.active_row = active_line->Row;
+}
+
+void SelectionController::PublishSelection(PreparedSelection const& prepared) {
+	AnnounceSelectedSetChanged();
+	if (prepared.active_changed && active_line == prepared.active)
+		AnnounceActiveLineChanged(active_line);
 }
 
 void SelectionController::SetSelectionAndActive(Selection new_selection, AssDialogue *new_line) {

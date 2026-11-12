@@ -64,6 +64,7 @@ public:
 	bool RuntimeRequested() const { return runtime_requested; }
 	bool SkiaWidgetRequested() const { return create_skia_widget; }
 
+	void RetireSubtitleRowBorrows() noexcept;
 	void SyncToCurrentAudioProvider();
 	void ScrollBy(int pixel_amount);
 	void ScrollBy(int pixel_amount, int mouse_x);

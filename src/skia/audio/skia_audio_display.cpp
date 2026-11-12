@@ -1807,6 +1807,15 @@ void SkiaAudioDisplay::OnStyleRangesChanged() {
 void SkiaAudioDisplay::OnMouseEvent(wxMouseEvent& event) {
 	if (!impl || impl->fallback_requested)
 		return;
+	auto *timing = impl->audio_controller ? impl->audio_controller->GetTimingController() : nullptr;
+	bool const timing_retired = timing && !timing->IsSubtitleRowBindingReady();
+	if (HasCapture() && event.ButtonUp() && !event.LeftIsDown() && !event.MiddleIsDown() && !event.RightIsDown() && (timing_retired || (impl->dragged_markers.empty() && !impl->timeline_dragging && !impl->scrollbar_dragging))) {
+		impl->timeline_dragging = false;
+		impl->scrollbar_dragging = false;
+		ReleaseMouse();
+		SetCursor(wxNullCursor);
+	}
+	if (timing_retired) return;
 	if (hotkey::check("Audio", impl->project_context, event))
 		return;
 
@@ -1832,7 +1841,6 @@ void SkiaAudioDisplay::OnMouseEvent(wxMouseEvent& event) {
 		auto const value = (impl->scroll_left + x) * AudioMillisecondsPerLogicalPixel(impl->zoom_level);
 		return static_cast<int>(std::clamp<double>(value, 0.0, std::numeric_limits<int>::max()));
 	};
-	auto *timing = impl->audio_controller ? impl->audio_controller->GetTimingController() : nullptr;
 	auto const set_middle_cursor = [&](int time_ms) {
 		impl->mouse_position_ms = time_ms;
 		impl->mouse_position_x = RelativeLogicalXFromTime(
@@ -2120,6 +2128,13 @@ void SkiaAudioDisplay::OnMouseLeave(wxMouseEvent& event) {
 		}
 	}
 	event.Skip();
+}
+
+void SkiaAudioDisplay::RetireSubtitleRowBorrows() noexcept {
+	if (!impl) return;
+	impl->dragged_markers.clear();
+	impl->dragged_button = wxMOUSE_BTN_NONE;
+	impl->marker_drag_dead_zone.Reset(0, 0);
 }
 
 void SkiaAudioDisplay::OnMouseCaptureLost(wxMouseCaptureLostEvent&) {

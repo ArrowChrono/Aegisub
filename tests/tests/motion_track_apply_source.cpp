@@ -7,8 +7,12 @@
 #include <ass_style.h>
 
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include <numbers>
+#include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -63,17 +67,25 @@ class motion_track_apply_source : public testing::Test {
 		return line;
 	}
 
-	bool Apply(MotionTrackApplyPlan const& plan, agi::vfr::Framerate const& timecodes) {
-		auto commit = [this](std::vector<AssDialogue *> const& lines) {
-			// The UI's old selection remains alive through the commit.
-			for (auto *line : selection)
-				EXPECT_FALSE(line->Text.get().empty());
-			file.Commit("apply", AssFile::COMMIT_DIAG_ADDREM | AssFile::COMMIT_DIAG_TIME | AssFile::COMMIT_DIAG_TEXT);
-			selection = lines;
-			++commits;
-		};
+	bool Apply(MotionTrackApplyPlan const& plan, agi::vfr::Framerate const& timecodes,
+			   std::function<void(AssFile&)> const& prepare = {}) {
 		std::string message;
-		return source.Apply(file, plan, timecodes, commit, message);
+		auto prepared = source.Prepare(file, plan, timecodes, message);
+		if (!prepared)
+			return false;
+		int const type = prepared->Candidate().PrepareCommit(
+			AssFile::COMMIT_DIAG_ADDREM | AssFile::COMMIT_DIAG_TIME | AssFile::COMMIT_DIAG_TEXT);
+		if (prepare)
+			prepare(prepared->Candidate());
+		prepared->Finalize(timecodes);
+		prepared->Install();
+		for (auto *line : selection)
+			EXPECT_FALSE(line->Text.get().empty());
+		selection = prepared->Outputs();
+		int revision = -1;
+		file.PublishCommit({.message = "apply", .commit_id = &revision, .single_line = nullptr, .type = type, .changed_lines = {}}, false);
+		++commits;
+		return true;
 	}
 
 	MotionTrackApplyPlan Plan(ApplyMode mode) {
@@ -87,8 +99,131 @@ class motion_track_apply_source : public testing::Test {
 			entries.push_back(line.GetEntryData());
 		return entries;
 	}
+	[[nodiscard]] std::vector<std::uintptr_t> EventIdentities() const {
+		std::vector<std::uintptr_t> identities;
+		for (auto const& line : file.Events)
+			identities.push_back(reinterpret_cast<std::uintptr_t>(&line));
+		return identities;
+	}
+
+	void ExpectSourceSnapshot(MotionTrackSourceSnapshot const& expected) const {
+		auto const& actual = source.Snapshot();
+		EXPECT_EQ(expected.file_identity, actual.file_identity);
+		EXPECT_EQ(expected.script_info_entries, actual.script_info_entries);
+		EXPECT_EQ(expected.video_frame_count, actual.video_frame_count);
+		ASSERT_EQ(expected.timecodes.IsLoaded(), actual.timecodes.IsLoaded());
+		for (int frame = 0; frame <= expected.video_frame_count; ++frame)
+			EXPECT_EQ(expected.timecodes.TimeAtFrame(frame), actual.timecodes.TimeAtFrame(frame)) << frame;
+		ASSERT_EQ(expected.lines.size(), actual.lines.size());
+		auto fields = [](MotionTrackLineFingerprint const& line) {
+			return std::tie(line.identity, line.id, line.row, line.comment, line.layer, line.margins,
+							line.start_ms, line.end_ms, line.style, line.actor, line.effect,
+							line.extradata_ids, line.text, line.style_entry);
+		};
+		for (std::size_t index = 0; index < expected.lines.size(); ++index)
+			EXPECT_EQ(fields(expected.lines[index]), fields(actual.lines[index])) << index;
+	}
 };
 } // namespace
+
+TEST_F(motion_track_apply_source, exact_preparation_exception_preserves_original_source_and_allows_retry) {
+	auto const plan = Plan(ApplyMode::Exact);
+	ASSERT_TRUE(plan.has_mutations()) << plan.message;
+	ASSERT_EQ(2u, plan.lines.size());
+	ASSERT_EQ(40u, plan.event_count);
+	auto const entries = Entries();
+	auto const identities = EventIdentities();
+	auto const selected = selection;
+	auto const snapshot = source.Snapshot();
+	auto const baseline_targets = source.Targets();
+	int attempts = 0;
+	auto reject_preparation = [&](AssFile& candidate) {
+		++attempts;
+		EXPECT_NE(&file, &candidate);
+		EXPECT_EQ(41u, candidate.Events.size());
+		throw std::runtime_error("candidate preparation failed");
+	};
+
+	EXPECT_THROW(Apply(plan, input.timecodes, reject_preparation), std::runtime_error);
+	EXPECT_EQ(1, attempts);
+	EXPECT_EQ(0, commits);
+	EXPECT_EQ(entries, Entries());
+	ExpectSourceSnapshot(snapshot);
+	ASSERT_EQ(identities, EventIdentities());
+	EXPECT_EQ(selected, selection);
+	EXPECT_EQ(baseline_targets, source.Targets());
+	EXPECT_EQ(1, untouched->Row);
+	EXPECT_EQ("unselected", untouched->Text.get());
+	EXPECT_TRUE(MotionTrackSourceIsCurrent(file, snapshot, input.timecodes));
+	EXPECT_TRUE(source.ContinueTargetsMatch(selection));
+
+	ASSERT_TRUE(Apply(plan, input.timecodes));
+	EXPECT_EQ(1, commits);
+	ASSERT_EQ(40u, selection.size());
+	EXPECT_EQ(41u, Entries().size());
+	EXPECT_EQ(20, untouched->Row);
+	EXPECT_EQ("unselected", untouched->Text.get());
+	std::size_t selected_index = 0;
+	for (auto const& line : plan.lines)
+		for (auto const& part : line.parts) {
+			auto const *output = selection[selected_index++];
+			EXPECT_EQ(part.text, output->Text.get());
+			EXPECT_EQ(part.start_ms, output->Start);
+			EXPECT_EQ(part.end_ms, output->End);
+		}
+	EXPECT_TRUE(MotionTrackSourceIsCurrent(file, source.Snapshot(), input.timecodes));
+	EXPECT_FALSE(source.ContinueTargetsMatch(selection));
+}
+
+TEST_F(motion_track_apply_source, reapply_preparation_exception_preserves_last_apply_and_allows_retry) {
+	ASSERT_TRUE(Apply(Plan(ApplyMode::Exact), input.timecodes));
+	ASSERT_EQ(40u, selection.size());
+	auto const plan = Plan(ApplyMode::Compact);
+	ASSERT_TRUE(plan.has_mutations()) << plan.message;
+	ASSERT_EQ(2u, plan.lines.size());
+	ASSERT_EQ(2u, plan.event_count);
+	auto const entries = Entries();
+	auto const identities = EventIdentities();
+	auto const selected = selection;
+	auto const snapshot = source.Snapshot();
+	auto const baseline_targets = source.Targets();
+	int attempts = 0;
+	auto reject_preparation = [&](AssFile& candidate) {
+		++attempts;
+		EXPECT_NE(&file, &candidate);
+		EXPECT_EQ(3u, candidate.Events.size());
+		throw std::runtime_error("candidate reapply preparation failed");
+	};
+
+	EXPECT_THROW(Apply(plan, input.timecodes, reject_preparation), std::runtime_error);
+	EXPECT_EQ(1, attempts);
+	EXPECT_EQ(1, commits);
+	EXPECT_EQ(entries, Entries());
+	ExpectSourceSnapshot(snapshot);
+	ASSERT_EQ(identities, EventIdentities());
+	EXPECT_EQ(selected, selection);
+	EXPECT_EQ(baseline_targets, source.Targets());
+	EXPECT_EQ(20, untouched->Row);
+	EXPECT_EQ("unselected", untouched->Text.get());
+	EXPECT_TRUE(MotionTrackSourceIsCurrent(file, snapshot, input.timecodes));
+	EXPECT_FALSE(source.ContinueTargetsMatch(selection));
+
+	ASSERT_TRUE(Apply(plan, input.timecodes));
+	EXPECT_EQ(2, commits);
+	ASSERT_EQ(2u, selection.size());
+	EXPECT_EQ(3u, Entries().size());
+	EXPECT_EQ(1, untouched->Row);
+	EXPECT_EQ("unselected", untouched->Text.get());
+	for (std::size_t index = 0; index < plan.lines.size(); ++index) {
+		ASSERT_EQ(1u, plan.lines[index].parts.size());
+		auto const& part = plan.lines[index].parts.front();
+		EXPECT_EQ(part.text, selection[index]->Text.get());
+		EXPECT_EQ(part.start_ms, selection[index]->Start);
+		EXPECT_EQ(part.end_ms, selection[index]->End);
+	}
+	EXPECT_TRUE(MotionTrackSourceIsCurrent(file, source.Snapshot(), input.timecodes));
+	EXPECT_FALSE(source.ContinueTargetsMatch(selection));
+}
 
 TEST_F(motion_track_apply_source, compact_exact_round_trip_reuses_baseline_and_preserves_other_lines) {
 	auto compact = Plan(ApplyMode::Compact);

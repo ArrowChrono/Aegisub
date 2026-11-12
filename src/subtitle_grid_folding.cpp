@@ -101,6 +101,13 @@ void WriteBoundary(AssFile& file, AssDialogue& line, uint64_t id, bool end, bool
 }
 }
 
+void SubtitleGridFolding::RemapPreparedRows(std::function<AssDialogue *(AssDialogue *)> const& resolve) {
+	for (auto *& row : rows)
+		row = resolve(row);
+	for (auto& row : display_rows)
+		row.dialogue = resolve(row.dialogue);
+}
+
 void SubtitleGridFolding::Rebuild(AssFile& file, bool reset_temporary) {
 	rows.clear();
 	row_ids.clear();

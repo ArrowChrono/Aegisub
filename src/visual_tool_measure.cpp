@@ -100,13 +100,15 @@ VisualToolMeasure::VisualToolMeasure(VideoDisplay *parent, agi::Context *context
 	  perspective_shape_tolerance(OPT_GET(kPerspectiveShapeToleranceOption)->GetDouble()),
 	  invalid_line_color_opt(OPT_GET("Colour/Visual Tools/Perspective Invalid Line")), invalid_handle_color_opt(OPT_GET("Colour/Visual Tools/Perspective Invalid Handle")) {
 	auto core = c->GetCore();
-	connections.push_back(core.project->AddVideoProviderListener([this](AsyncVideoProvider*) {
+	connections.push_back(core.project->AddVideoProviderListener([this](AsyncVideoProvider *) {
+		if (!SubtitleRowsReady()) return;
 		CancelInteraction(false);
 		if (submode == SubMode::PerspectiveQuad)
 			RebindPerspective();
 		this->parent->Render();
 	}));
 	connections.push_back(core.project->AddTimecodesListener([this](agi::vfr::Framerate const&) {
+		if (!SubtitleRowsReady()) return;
 		CancelInteraction(false);
 		if (submode == SubMode::PerspectiveQuad)
 			RebindPerspective();
@@ -666,6 +668,7 @@ bool VisualToolMeasure::CanApplyPerspective() const {
 }
 
 void VisualToolMeasure::ApplyPerspective() {
+	if (!SubtitleRowsReady()) return;
 	command_session.ResetCommitId();
 	auto reset_commit_id = agi::make_scope_exit(
 		[this] { command_session.ResetCommitId(); });
@@ -1108,6 +1111,7 @@ void VisualToolMeasure::DrawOverlay(VideoOverlayDrawContext& context) {
 }
 
 void VisualToolMeasure::OnSubTool(wxCommandEvent& event) {
+	if (!SubtitleRowsReady()) return;
 	if (event.GetId() == segment_button) {
 		SetSubMode(static_cast<int>(SubMode::Segment));
 		return;
@@ -1292,6 +1296,7 @@ bool VisualToolMeasure::SetSubMode(int mode) {
 }
 
 void VisualToolMeasure::RefreshAfterSolverOptionChange() {
+	if (!SubtitleRowsReady()) return;
 	toolbar_helps_valid = false;
 	if (perspective_diagnostic_depends_on_solver_options) {
 		perspective_diagnostic.clear();
@@ -1423,6 +1428,7 @@ void VisualToolMeasure::OnDisplayAreaChanged() {
 }
 
 void VisualToolMeasure::OnMouseCaptureLost(wxMouseCaptureLostEvent& event) {
+	if (!SubtitleRowsReady()) return;
 	CancelInteraction(false);
 	CancelPerspectiveInteraction(false);
 	VisualToolBase::OnMouseCaptureLost(event);

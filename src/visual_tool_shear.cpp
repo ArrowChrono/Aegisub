@@ -21,7 +21,16 @@ VisualToolShear::VisualToolShear(VideoDisplay *parent, agi::Context *context)
 
 VisualToolShear::~VisualToolShear() = default;
 
+void VisualToolShear::RetireDerivedSubtitleRowBorrows() noexcept {
+	VisualTool<VisualDraggableFeature>::RetireDerivedSubtitleRowBorrows();
+	initial_values.clear();
+	fax_handle = fay_handle = nullptr;
+	features.clear();
+	diagnostic.clear();
+}
+
 void VisualToolShear::OnSelectionChanged() {
+	if (!SubtitleRowsReady()) return;
 	bool const cancelled = CancelInteraction(true);
 	active_feature = nullptr;
 	initial_values.clear();
@@ -71,7 +80,7 @@ void VisualToolShear::DoRefresh() {
 }
 
 bool VisualToolShear::InitializeDrag(VisualDraggableFeature *feature) {
-	if (!active_line || !ValidateSelection().empty()) return false;
+	if (!SubtitleRowsReady() || !active_line || !ValidateSelection().empty()) return false;
 	command_session.ResetCommitId();
 	drag_axis = feature == fax_handle ? VisualShearAxis::X : VisualShearAxis::Y;
 	sel_features = {feature};
@@ -96,7 +105,7 @@ void VisualToolShear::UpdateDrag(VisualDraggableFeature *) {
 }
 
 bool VisualToolShear::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) {
-	if (IsInteracting() || !active_line || !ValidateSelection().empty()) return false;
+	if (!SubtitleRowsReady() || IsInteracting() || !active_line || !ValidateSelection().empty()) return false;
 	VisualShearAxis const axis = aegisub::visual_shear::NudgeAxis(direction);
 	auto const step = static_cast<float>(GetNudgeStep(
 		"Tool/Visual/Nudge/Shear Step", "Tool/Visual/Nudge/Shear Step Large", magnitude));
@@ -112,7 +121,7 @@ bool VisualToolShear::Nudge(Vector2D direction, VisualNudgeMagnitude magnitude) 
 }
 
 bool VisualToolShear::CanReset(VisualShearAxis) const {
-	return !IsInteracting() && active_line && ValidateSelection().empty();
+	return SubtitleRowsReady() && !IsInteracting() && active_line && ValidateSelection().empty();
 }
 
 bool VisualToolShear::Reset(VisualShearAxis axis) {

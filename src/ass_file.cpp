@@ -299,11 +299,9 @@ int AssFile::Commit(std::string const& desc, int type, int amend_id, AssDialogue
 	return Commit(desc, type, amend_id, single_line, changed_lines);
 }
 
-int AssFile::Commit(std::string const& desc, int type, int amend_id, AssDialogue *single_line,
-	AssDialogueCommitSpan changed_lines) {
-	// Exact changed-lines metadata is authoritative when supplied.
-	single_line = changed_lines.size() == 1 && single_line == changed_lines.front() ? single_line : nullptr;
-
+int AssFile::PrepareCommit(int type, bool *folding_changed) {
+	if (folding_changed)
+		*folding_changed = false;
 	if (type == COMMIT_NEW || (type & COMMIT_DIAG_ADDREM) || (type & COMMIT_ORDER)) {
 		int i = 0;
 		for (auto& event : Events)
@@ -313,17 +311,43 @@ int AssFile::Commit(std::string const& desc, int type, int amend_id, AssDialogue
 	if (type == COMMIT_NEW || (type & (COMMIT_DIAG_ADDREM | COMMIT_ORDER | COMMIT_EXTRADATA))) {
 		if (Folding().PrepareCommit(*this, type)) {
 			type |= COMMIT_FOLD;
-			single_line = nullptr;
-			changed_lines = {};
+			if (folding_changed)
+				*folding_changed = true;
 		}
 	}
 
-	PushState({desc, &amend_id, single_line, type, changed_lines});
+	return type;
+}
 
-	AnnounceCommitDetails({type, single_line, changed_lines});
-	AnnounceCommit(type, single_line);
+int AssFile::PublishCommit(AssFileCommit const& commit, bool record_history) {
+	if (record_history)
+		PushState(commit);
+	AnnounceCommitDetails({.type = commit.type, .single_line = commit.single_line, .changed_lines = commit.changed_lines});
+	AnnounceCommit(commit.type, commit.single_line);
+	return *commit.commit_id;
+}
 
-	return amend_id;
+void AssFile::InheritFoldingView(AssFile const& original) {
+	if (original.folding)
+		folding = std::make_unique<SubtitleGridFolding>(*original.folding);
+}
+
+void AssFile::InstallMotionTrackMetadata(AssFile& prepared) {
+	Extradata.swap(prepared.Extradata);
+	std::swap(next_extradata_id, prepared.next_extradata_id);
+	folding.swap(prepared.folding);
+}
+
+int AssFile::Commit(std::string const& desc, int type, int amend_id, AssDialogue *single_line,
+					AssDialogueCommitSpan changed_lines) {
+	single_line = changed_lines.size() == 1 && single_line == changed_lines.front() ? single_line : nullptr;
+	bool folding_changed = false;
+	int const prepared_type = PrepareCommit(type, &folding_changed);
+	if (folding_changed) {
+		single_line = nullptr;
+		changed_lines = {};
+	}
+	return PublishCommit({.message = desc, .commit_id = &amend_id, .single_line = single_line, .type = prepared_type, .changed_lines = changed_lines});
 }
 
 bool AssFile::CompStart(AssDialogue const& lft, AssDialogue const& rgt) {

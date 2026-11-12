@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <unordered_set>
 #include <vector>
 
@@ -42,6 +43,7 @@ class SubtitleGridFolding {
 
 	public:
 	void Rebuild(AssFile& file, bool reset_temporary = false);
+	void RemapPreparedRows(std::function<AssDialogue *(AssDialogue *)> const& resolve);
 	/// Repair before the undo snapshot is recorded; returns whether markers changed.
 	bool PrepareCommit(AssFile& file, int type);
 

@@ -157,7 +157,14 @@ DialogStyling::DialogStyling(agi::Context *context)
 DialogStyling::~DialogStyling () {
 }
 
+void DialogStyling::RetireSubtitleRowBorrows() noexcept {
+	row_borrows_ready = false;
+	active_line = nullptr;
+}
+
 void DialogStyling::OnActiveLineChanged(AssDialogue *new_line) {
+	row_borrows_ready = false;
+	active_line = nullptr;
 	if (!new_line) return;
 	active_line = new_line;
 
@@ -170,9 +177,11 @@ void DialogStyling::OnActiveLineChanged(AssDialogue *new_line) {
 
 	if (auto_seek->IsChecked() && IsActive())
 		c->GetCore().videoController->JumpToTime(active_line->Start);
+	row_borrows_ready = true;
 }
 
 void DialogStyling::Commit(bool next) {
+	if (!row_borrows_ready || !active_line) return;
 	auto core = c->GetCore();
 	if (!core.ass->GetStyle(from_wx(style_name->GetValue()))) return;
 
@@ -184,6 +193,7 @@ void DialogStyling::Commit(bool next) {
 }
 
 void DialogStyling::OnActivate(wxActivateEvent &) {
+	if (!row_borrows_ready || !active_line) return;
 	if (!IsActive()) return;
 
 	auto core = c->GetCore();
@@ -199,6 +209,7 @@ void DialogStyling::OnActivate(wxActivateEvent &) {
 }
 
 void DialogStyling::OnStyleBoxModified(wxCommandEvent &) {
+	if (!row_borrows_ready || !active_line) return;
 	long from, to;
 	style_name->GetSelection(&from, &to);
 	wxString prefix = style_name->GetValue().Left(from).Lower();
@@ -226,32 +237,38 @@ void DialogStyling::OnStyleBoxModified(wxCommandEvent &) {
 }
 
 void DialogStyling::OnListClicked(wxCommandEvent &evt) {
+	if (!row_borrows_ready || !active_line) return;
 	style_name->ChangeValue(style_list->GetString(evt.GetInt()));
 	Commit(false);
 	style_name->SetFocus();
 }
 
 void DialogStyling::OnListDoubleClicked(wxCommandEvent &evt) {
+	if (!row_borrows_ready || !active_line) return;
 	style_name->ChangeValue(style_list->GetString(evt.GetInt()));
 	Commit(true);
 	style_name->SetFocus();
 }
 
 void DialogStyling::OnPlayVideoButton(wxCommandEvent &) {
+	if (!row_borrows_ready || !active_line) return;
 	c->GetCore().videoController->PlayLine();
 	style_name->SetFocus();
 }
 
 void DialogStyling::OnPlayAudioButton(wxCommandEvent &) {
+	if (!row_borrows_ready || !active_line) return;
 	cmd::call("audio/play/selection", c);
 	style_name->SetFocus();
 }
 
 void DialogStyling::OnCharHook(wxKeyEvent &evt) {
+	if (!row_borrows_ready || !active_line) return;
 	hotkey::check("Styling Assistant", c, evt);
 }
 
 void DialogStyling::OnKeyDown(wxKeyEvent &evt) {
+	if (!row_borrows_ready || !active_line) return;
 	// Move the beginning of the selection back one character so that backspace
 	// actually does something
 	if (evt.GetKeyCode() == WXK_BACK && !evt.GetModifiers()) {

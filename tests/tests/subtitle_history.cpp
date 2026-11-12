@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -219,6 +220,110 @@ TEST_F(subtitle_history, non_dialogue_merge_replaces_complete_snapshot) {
 	EXPECT_EQ("coalesced title", file.Info.front().Value());
 	EXPECT_EQ("Coalesced Font", file.Styles.front().font);
 	EXPECT_EQ("coalesced text", file.Events.front().Text.get());
+	EXPECT_EQ(17, bookmark.insertion_point);
+}
+
+TEST_F(subtitle_history, bookmark_capture_exception_preserves_revisions_and_redo_entries) {
+	bookmark.insertion_point = 7;
+	int const saved = Edit("saved edit", -1, "saved entry");
+	history.MarkSaved(saved);
+	bookmark.insertion_point = 11;
+	int const middle = Edit("middle edit", -1, "middle entry");
+	bookmark.insertion_point = 19;
+	int const latest = Edit("latest edit", -1, "latest entry");
+	ASSERT_TRUE(Undo());
+	ASSERT_TRUE(Undo());
+	ASSERT_EQ(saved, history.CurrentRevision());
+	ASSERT_FALSE(history.IsModified());
+	ASSERT_EQ(2u, history.UndoDepth());
+
+	file.Events.front().Text = "failed branch";
+	int attempted_revision = -1;
+	int attempts = 0;
+	EXPECT_THROW(history.Record(file, {.message = "new branch", .commit_id = &attempted_revision, .single_line = nullptr, .type = AssFile::COMMIT_DIAG_TEXT, .changed_lines = {}}, [&]() -> SubtitleHistoryBookmark {
+						 ++attempts;
+						 throw std::runtime_error("bookmark capture failed"); }, depth), std::runtime_error);
+	EXPECT_EQ(1, attempts);
+	EXPECT_EQ(-1, attempted_revision);
+	EXPECT_EQ(saved, history.CurrentRevision());
+	EXPECT_EQ(saved, history.SavedRevision());
+	EXPECT_FALSE(history.IsModified());
+	EXPECT_EQ(2u, history.UndoDepth());
+	EXPECT_EQ("saved entry", history.UndoDescription());
+	EXPECT_EQ("middle entry", history.RedoDescription());
+	ASSERT_TRUE(Redo());
+	EXPECT_EQ(middle, history.CurrentRevision());
+	EXPECT_EQ("middle edit", file.Events.front().Text.get());
+	EXPECT_EQ(11, bookmark.insertion_point);
+	EXPECT_EQ("latest entry", history.RedoDescription());
+	ASSERT_TRUE(Redo());
+	EXPECT_EQ(latest, history.CurrentRevision());
+	EXPECT_EQ("latest edit", file.Events.front().Text.get());
+	EXPECT_EQ(19, bookmark.insertion_point);
+	EXPECT_FALSE(history.CanRedo());
+	ASSERT_TRUE(Undo());
+	ASSERT_TRUE(Undo());
+	EXPECT_EQ("saved edit", file.Events.front().Text.get());
+	EXPECT_EQ(7, bookmark.insertion_point);
+	EXPECT_FALSE(history.IsModified());
+
+	file.Events.front().Text = "successful branch";
+	bookmark.insertion_point = 23;
+	history.Record(file, {.message = "new branch", .commit_id = &attempted_revision, .single_line = nullptr, .type = AssFile::COMMIT_DIAG_TEXT, .changed_lines = {}}, [this] { return bookmark; }, depth);
+	EXPECT_EQ(latest + 1, attempted_revision);
+	EXPECT_EQ(attempted_revision, history.CurrentRevision());
+	EXPECT_EQ(saved, history.SavedRevision());
+	EXPECT_TRUE(history.IsModified());
+	EXPECT_FALSE(history.CanRedo());
+	ASSERT_TRUE(Undo());
+	EXPECT_EQ("saved edit", file.Events.front().Text.get());
+	EXPECT_FALSE(history.IsModified());
+	ASSERT_TRUE(Redo());
+	EXPECT_EQ("successful branch", file.Events.front().Text.get());
+	EXPECT_EQ(23, bookmark.insertion_point);
+}
+
+TEST_F(subtitle_history, bookmark_capture_exception_preserves_coalesced_entry_and_retry_revision) {
+	bookmark.insertion_point = 7;
+	int const previous = Edit("first part", -1, "previous entry");
+	int const saved = history.SavedRevision();
+	file.Styles.front().font = "Coalesced Font";
+	file.Events.front().Text = "coalesced text";
+	int attempted_revision = previous;
+	int attempts = 0;
+	EXPECT_THROW(history.Record(file, {.message = "combined edit", .commit_id = &attempted_revision, .single_line = nullptr, .type = AssFile::COMMIT_STYLES | AssFile::COMMIT_DIAG_TEXT, .changed_lines = {}}, [&]() -> SubtitleHistoryBookmark {
+						 ++attempts;
+						 throw std::runtime_error("bookmark capture failed"); }, depth), std::runtime_error);
+	EXPECT_EQ(1, attempts);
+	EXPECT_EQ(previous, attempted_revision);
+	EXPECT_EQ(previous, history.CurrentRevision());
+	EXPECT_EQ(saved, history.SavedRevision());
+	EXPECT_TRUE(history.IsModified());
+	EXPECT_EQ(2u, history.UndoDepth());
+	EXPECT_EQ("previous entry", history.UndoDescription());
+	EXPECT_FALSE(history.CanRedo());
+	ASSERT_TRUE(Undo());
+	EXPECT_EQ("original first", file.Events.front().Text.get());
+	EXPECT_FALSE(history.IsModified());
+	ASSERT_TRUE(Redo());
+	EXPECT_EQ(previous, history.CurrentRevision());
+	EXPECT_EQ("first part", file.Events.front().Text.get());
+	EXPECT_EQ("Original Font", file.Styles.front().font);
+	EXPECT_EQ(7, bookmark.insertion_point);
+
+	file.Styles.front().font = "Coalesced Font";
+	file.Events.front().Text = "coalesced text";
+	bookmark.insertion_point = 17;
+	history.Record(file, {.message = "combined edit", .commit_id = &attempted_revision, .single_line = nullptr, .type = AssFile::COMMIT_STYLES | AssFile::COMMIT_DIAG_TEXT, .changed_lines = {}}, [this] { return bookmark; }, depth);
+	EXPECT_EQ(previous + 1, attempted_revision);
+	EXPECT_EQ(2u, history.UndoDepth());
+	EXPECT_EQ("combined edit", history.UndoDescription());
+	ASSERT_TRUE(Undo());
+	EXPECT_EQ("original first", file.Events.front().Text.get());
+	EXPECT_EQ("Original Font", file.Styles.front().font);
+	ASSERT_TRUE(Redo());
+	EXPECT_EQ("coalesced text", file.Events.front().Text.get());
+	EXPECT_EQ("Coalesced Font", file.Styles.front().font);
 	EXPECT_EQ(17, bookmark.insertion_point);
 }
 

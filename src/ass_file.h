@@ -226,6 +226,10 @@ public:
 	/// @param commitId    Commit to amend rather than pushing a new commit
 	/// @param single_line Line which was changed, if only one line was
 	/// @return Unique identifier for the new undo group
+	int PrepareCommit(int type, bool *folding_changed = nullptr);
+	int PublishCommit(AssFileCommit const& commit, bool record_history = true);
+	void InheritFoldingView(AssFile const& original);
+	void InstallMotionTrackMetadata(AssFile& prepared);
 	int Commit(std::string const& desc, int type, int commitId = -1, AssDialogue *single_line = nullptr);
 
 	/// Commit with an exact set of changed dialogue lines. The span is consumed

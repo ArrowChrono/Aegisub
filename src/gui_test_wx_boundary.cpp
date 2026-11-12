@@ -7,6 +7,20 @@
 #include "app_launch_plan.h"
 #include "ass_dialogue.h"
 #include "ass_file.h"
+#include "audio_karaoke.h"
+#include "audio_box.h"
+#include "audio_display.h"
+#include "audio_controller.h"
+#include "audio_timing.h"
+#include "base_grid.h"
+#include "command/command.h"
+#include "dialog_motion_track.h"
+#include "dialog_manager.h"
+#include "dialog_styling_assistant.h"
+#include "project.h"
+#include "placeholder_ctrl.h"
+#include "options.h"
+#include "subs_edit_box.h"
 #include "compat.h"
 #include "frame_main.h"
 #include "include/aegisub/context.h"
@@ -18,6 +32,7 @@
 #include "video_display.h"
 #include "visual_guide_overlay.h"
 #include "visual_tool.h"
+#include "visual_tool_drag.h"
 
 #include <libaegisub/cajun/reader.h>
 #include <libaegisub/cajun/writer.h>
@@ -27,6 +42,7 @@
 #include <wx/eventfilter.h>
 #include <wx/filename.h>
 #include <wx/menu.h>
+#include <wx/textctrl.h>
 #include <wx/weakref.h>
 #include <commctrl.h>
 #include <windowsx.h>
@@ -276,6 +292,208 @@ class GuiTestWxBoundary final : public wxEventFilter {
 		return state;
 	}
 
+	static json::Object MotionBorrowState(agi::Context& context, VideoDisplay& display) {
+		auto core = context.GetCore();
+		auto ui = context.GetUI();
+		auto *styling = ui.dialog->Get<DialogStyling>();
+		if (!styling || !ui.subsEditBox->edit_ctrl_tc)
+			throw std::runtime_error("Motion Apply native probe requires Styling Assistant and native text editor");
+		json::Object result;
+		auto live = [&](AssDialogue const *borrowed) {
+			return !borrowed || std::ranges::any_of(core.ass->Events, [&](auto const& row) { return &row == borrowed; });
+		};
+		bool grid_live = true;
+		for (int i = 0; i < ui.subsGrid->GetRows(); ++i)
+			grid_live = grid_live && live(ui.subsGrid->GetDialogue(i));
+		result["grid_borrows_live"] = grid_live;
+		result["edit_borrow_live"] = live(ui.subsEditBox->line);
+		result["edit_can_focus"] = ui.subsEditBox->CanFocusEditControl();
+		result["pending_text_after"] = ui.subsEditBox->visual_tool_text_sync_pending;
+		result["styling_borrow_live"] = live(styling->active_line);
+		result["visual_borrow_live"] = live(display.tool->active_line);
+		result["karaoke_present"] = ui.karaoke != nullptr;
+		result["karaoke_borrow_live"] = !ui.karaoke || live(ui.karaoke->active_line);
+		result["row_count"] = static_cast<int64_t>(core.ass->Events.size());
+		result["undo_available"] = !core.subsController->IsUndoStackEmpty();
+		result["all_borrows_live"] = grid_live && live(ui.subsEditBox->line) && live(styling->active_line) && live(display.tool->active_line) && (!ui.karaoke || live(ui.karaoke->active_line));
+#ifdef AEGISUB_WITH_SKIA_AUDIO_DISPLAY
+		auto *audio = dynamic_cast<AudioDisplay *>(ui.audioBox->GetAudioDisplayWindow());
+#else
+		auto *audio = ui.audioBox->audioDisplay;
+#endif
+		if (!audio)
+			throw std::runtime_error("Motion Apply native probe requires wx AudioDisplay");
+		result["karaoke_timing_enabled"] = ui.karaoke->IsEnabled();
+		result["audio_marker_present"] = static_cast<bool>(audio->audio_marker);
+		result["audio_dragged_present"] = audio->dragged_object != nullptr;
+		result["audio_scroll_timer"] = audio->scroll_timer.IsRunning();
+		result["audio_capture"] = audio->HasCapture();
+		result["audio_hwnd"] = static_cast<int64_t>(reinterpret_cast<uintptr_t>(audio->GetHandle()));
+		auto *timing = core.audioController->GetTimingController();
+		AudioMarkerVector markers;
+		timing->GetMarkers(TimeRange(0, 2000), markers);
+		result["audio_marker_count"] = static_cast<int64_t>(markers.size());
+		result["audio_timing_ready"] = timing->IsSubtitleRowBindingReady();
+		result["visual_ready"] = display.tool->SubtitleRowsReady();
+		result["styling_ready"] = styling->row_borrows_ready;
+		result["grid_ready"] = ui.subsGrid->row_borrows_ready;
+		result["grid_font_size"] = ui.subsGrid->font.GetPointSize();
+		result["grid_line_height"] = ui.subsGrid->lineHeight;
+		result["grid_background"] = static_cast<int64_t>(ui.subsGrid->row_colors.Default.GetColour().GetRGB());
+		result["requested_grid_font_size"] = static_cast<int64_t>(OPT_GET("Subtitle/Grid/Font Size")->GetInt());
+		result["requested_grid_background"] = static_cast<int64_t>(to_wx(OPT_GET("Colour/Subtitle Grid/Background/Background")->GetColor()).GetRGB());
+		auto *drag = dynamic_cast<VisualToolDrag *>(display.tool.get());
+		if (!drag)
+			throw std::runtime_error("Motion Apply native probe requires Drag");
+		auto feature_live = [&](VisualToolDragDraggableFeature const *borrowed) {
+			return !borrowed || std::ranges::any_of(drag->features, [&](auto const& feature) { return &feature == borrowed && live(feature.line); });
+		};
+		bool drag_live = feature_live(drag->primary) && feature_live(drag->active_feature);
+		for (auto const& feature : drag->features) drag_live = drag_live && live(feature.line);
+		for (auto const *feature : drag->sel_features) drag_live = drag_live && feature_live(feature);
+		for (auto const *line : drag->selection) drag_live = drag_live && live(line);
+		for (auto const *line : drag->double_click_selection) drag_live = drag_live && live(line);
+		if (drag->frame_visibility)
+			for (auto const *line : drag->frame_visibility->Visible()) drag_live = drag_live && live(line);
+		result["drag_borrows_live"] = drag_live;
+		result["drag_features"] = static_cast<int64_t>(drag->features.size());
+		result["drag_selected_features"] = static_cast<int64_t>(drag->sel_features.size());
+		result["drag_cached_selection"] = static_cast<int64_t>(drag->selection.size());
+		result["drag_visibility_present"] = static_cast<bool>(drag->frame_visibility);
+		result["drag_primary_present"] = drag->primary != nullptr;
+		result["all_borrows_live"] = static_cast<json::Boolean const&>(result.at("all_borrows_live")) && drag_live;
+		result["grid_capture"] = ui.subsGrid->HasCapture();
+		result["edit_ready"] = ui.subsEditBox->row_borrows_ready;
+		result["edit_hwnd"] = static_cast<int64_t>(reinterpret_cast<uintptr_t>(ui.subsEditBox->edit_ctrl_tc->GetHandle()));
+		result["styling_hwnd"] = static_cast<int64_t>(reinterpret_cast<uintptr_t>(styling->style_name->GetHandle()));
+		result["edit_text"] = from_wx(ui.subsEditBox->edit_ctrl_tc->GetValue());
+		result["styling_text"] = from_wx(styling->style_name->GetValue());
+		auto combo_state = [](auto *combo) {
+			json::Object state;
+			json::Array candidates;
+			for (auto const& value : combo->GetStrings()) candidates.push_back(from_wx(value));
+			state["candidates"] = std::move(candidates);
+			state["value"] = from_wx(combo->GetValue());
+			return state;
+		};
+		result["style_combo"] = combo_state(ui.subsEditBox->style_box);
+		result["actor_combo"] = combo_state(ui.subsEditBox->actor_box);
+		result["effect_combo"] = combo_state(ui.subsEditBox->effect_box);
+		return result;
+	}
+
+	static json::Object MotionApplyFault(agi::Context& context, VideoDisplay& display, bool selection_fault, bool karaoke_timing, bool grid_capture) {
+		using namespace aegisub::motion_track;
+		auto core = context.GetCore();
+		auto ui = context.GetUI();
+		if (!ui.subsGrid || !ui.subsEditBox || !display.tool)
+			throw std::runtime_error("Motion Apply fault probe requires real grid, edit box and visual tool");
+		auto *styling = ui.dialog->ShowOnce<DialogStyling>(&context);
+		if (!styling)
+			throw std::runtime_error("Motion Apply fault probe could not create Styling Assistant");
+		DialogMotionTrack dialog(&context);
+		cmd::call("video/tool/drag", &context);
+		ApplyPlanInput input;
+		input.timecodes = core.project->Timecodes();
+		if (!input.timecodes.IsLoaded())
+			throw std::runtime_error("Motion Apply fault probe requires loaded video timecodes");
+		input.storage_width = input.script_width = 640;
+		input.storage_height = input.script_height = 480;
+		input.video_frame_count = 20;
+		input.decode_interval = input.direction_domain = {.first = 0, .last = 19};
+		input.options.compact_epsilon = 100;
+		for (int frame = 0; frame < 20; ++frame) {
+			TrackSample sample;
+			sample.frame = frame;
+			sample.status = TrackStatus::Ok;
+			sample.center_x = frame * 2;
+			sample.transform.matrix[2] = frame * 2;
+			input.samples.push_back(sample);
+		}
+		auto targets = core.selectionController->GetSortedSelection();
+		if (targets.empty())
+			throw std::runtime_error("Motion Apply fault probe requires selected lines");
+		dialog.apply_source_.Capture(*core.ass, targets, input.timecodes, input.video_frame_count);
+		std::string message;
+		auto apply = [&](ApplyMode mode) {
+			input.options.mode = mode;
+			auto plan = BuildApplyPlan(*core.ass, dialog.apply_source_.Targets(), input);
+			if (!plan.has_mutations())
+				throw std::runtime_error("Motion Apply fault probe plan failed: " + plan.message);
+			if (!dialog.InstallApplyPlan(plan, message))
+				throw std::runtime_error("Motion Apply fault probe setup failed: " + message);
+		};
+		json::Object result;
+		if (karaoke_timing)
+			ui.karaoke->SetEnabled(true);
+		if (selection_fault) {
+			apply(ApplyMode::Exact);
+			auto state = MotionBorrowState(context, display);
+			result["initial_exact_all_ready"] = static_cast<json::Boolean const&>(state.at("grid_ready")) && static_cast<json::Boolean const&>(state.at("edit_ready")) && static_cast<json::Boolean const&>(state.at("styling_ready")) && static_cast<json::Boolean const&>(state.at("visual_ready")) && static_cast<json::Boolean const&>(state.at("audio_timing_ready"));
+		}
+		auto drag_state = MotionBorrowState(context, display);
+		result["drag_features_before"] = std::move(drag_state.at("drag_features"));
+		result["drag_selected_features_before"] = std::move(drag_state.at("drag_selected_features"));
+		result["drag_cached_selection_before"] = std::move(drag_state.at("drag_cached_selection"));
+		result["drag_visibility_before"] = std::move(drag_state.at("drag_visibility_present"));
+#ifdef AEGISUB_WITH_SKIA_AUDIO_DISPLAY
+		auto *audio = dynamic_cast<AudioDisplay *>(ui.audioBox->GetAudioDisplayWindow());
+#else
+		auto *audio = ui.audioBox->audioDisplay;
+#endif
+		if (!audio)
+			throw std::runtime_error("Motion Apply fault probe requires wx AudioDisplay");
+		auto *timing = core.audioController->GetTimingController();
+		AudioMarkerVector markers;
+		timing->GetMarkers(TimeRange(0, 2000), markers);
+		auto marker = std::ranges::find_if(markers, [&](auto const *item) { return timing->IsNearbyMarker(item->GetPosition(), 1, false); });
+		if (marker == markers.end())
+			throw std::runtime_error("Motion Apply native probe requires a draggable timing marker");
+		auto const marker_time = (*marker)->GetPosition();
+		audio->ScrollTimeRangeInView(TimeRange(std::max(0, marker_time - 100), marker_time + 100));
+		auto const marker_x = audio->RelativeXFromTime(marker_time);
+		auto const marker_y = audio->audio_top + audio->audio_height / 2;
+		if (!audio->GetClientRect().Contains(marker_x, marker_y))
+			throw std::runtime_error("Motion Apply native audio marker is outside its client");
+		if (grid_capture) {
+			auto *grid = ui.subsGrid;
+			auto const point = MAKELPARAM(grid->GetClientSize().x / 2, grid->lineHeight + grid->lineHeight / 2);
+			::SendMessage(grid->GetHandle(), WM_LBUTTONDOWN, MK_LBUTTON, point);
+			result["capture_owner_hwnd"] = static_cast<int64_t>(reinterpret_cast<uintptr_t>(grid->GetHandle()));
+			result["capture_owner_point"] = static_cast<int64_t>(point);
+		}
+		else {
+			::SendMessage(audio->GetHandle(), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(marker_x, marker_y));
+			result["capture_owner_hwnd"] = static_cast<int64_t>(reinterpret_cast<uintptr_t>(audio->GetHandle()));
+			result["capture_owner_point"] = static_cast<int64_t>(MAKELPARAM(marker_x, marker_y));
+		}
+		result["grid_capture_before"] = ui.subsGrid->HasCapture();
+		result["audio_marker_point"] = static_cast<int64_t>(MAKELPARAM(marker_x, marker_y));
+		result["audio_marker_before"] = static_cast<bool>(audio->audio_marker);
+		result["audio_dragged_before"] = audio->dragged_object != nullptr;
+		ui.subsEditBox->QueueVisualToolTextSync();
+		result["pending_text_before"] = ui.subsEditBox->visual_tool_text_sync_pending;
+		result["styling_borrow_before"] = styling->active_line != nullptr;
+		result["visual_borrow_before"] = display.tool->active_line != nullptr;
+		int fault_count = 0;
+		agi::signal::Connection fault = selection_fault
+											? core.selectionController->AddSelectionListener([&] { ++fault_count; throw std::runtime_error("injected Motion Apply selection fault"); })
+											: core.ass->AddCommitListener([&] { ++fault_count; throw std::runtime_error("injected Motion Apply early commit fault"); });
+		bool publication_failed = false;
+		try {
+			apply(selection_fault ? ApplyMode::Compact : ApplyMode::Exact);
+		}
+		catch (MotionTrackApplyPublicationError const&) {
+			publication_failed = true;
+		}
+		fault.Disconnect();
+		result["publication_failed"] = publication_failed;
+		result["fault_count"] = fault_count;
+		for (auto& [key, value] : MotionBorrowState(context, display))
+			result[key] = std::move(value);
+		return result;
+	}
+
 	static json::Array EventSlice(json::Array const& source, size_t first) {
 		json::Array result;
 		for (size_t i = first; i < source.size(); ++i) {
@@ -446,8 +664,27 @@ class GuiTestWxBoundary final : public wxEventFilter {
 						frame.Move(*saved_position);
 						saved_position.reset();
 					}
+					else if (kind == "motion-apply-load-rebind") {
+						context.GetCore().project->LoadSubtitles(artifacts / "rebind.ass", "UTF-8", false);
+						reply["motion_apply"] = MotionBorrowState(context, *display);
+					}
+					else if (kind == "motion-apply-retired-style") {
+						if (context.GetUI().subsGrid->row_borrows_ready)
+							throw std::runtime_error("Grid style recovery probe requires retired row borrows");
+						OPT_SET("Subtitle/Grid/Font Size")->SetInt(OPT_GET("Subtitle/Grid/Font Size")->GetInt() + 5);
+						auto const previous = OPT_GET("Colour/Subtitle Grid/Background/Background")->GetColor();
+						OPT_SET("Colour/Subtitle Grid/Background/Background")->SetColor(agi::Color(255 - previous.r, 255 - previous.g, 255 - previous.b));
+						reply["motion_apply"] = MotionBorrowState(context, *display);
+					}
+					else if (kind == "motion-apply-inspect") {
+						reply["motion_apply"] = MotionBorrowState(context, *display);
+					}
+					else if (kind == "motion-apply-early" || kind == "motion-apply-selection" || kind == "motion-apply-early-karaoke" || kind == "motion-apply-selection-karaoke" || kind == "motion-apply-early-grid" || kind == "motion-apply-selection-grid") {
+						reply["motion_apply"] = MotionApplyFault(context, *display, kind == "motion-apply-selection" || kind == "motion-apply-selection-karaoke" || kind == "motion-apply-selection-grid", kind == "motion-apply-early-karaoke" || kind == "motion-apply-selection-karaoke", kind == "motion-apply-early-grid" || kind == "motion-apply-selection-grid");
+					}
 					else if (kind == "enter" || kind == "leave" || kind == "motion") {
-						wxMouseEvent event(kind == "enter" ? wxEVT_ENTER_WINDOW : kind == "leave" ? wxEVT_LEAVE_WINDOW : wxEVT_MOTION);
+						wxMouseEvent event(kind == "enter" ? wxEVT_ENTER_WINDOW : kind == "leave" ? wxEVT_LEAVE_WINDOW
+																								  : wxEVT_MOTION);
 						event.SetPosition(wxPoint(static_cast<int>(x), static_cast<int>(y)));
 						event.SetLeftDown(boolean("left_down"));
 						event.SetShiftDown(boolean("shift_down"));

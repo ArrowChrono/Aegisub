@@ -58,7 +58,11 @@ protected:
 	/// One or more rendering style ranges have changed in the timing controller.
 	agi::signal::Signal<> AnnounceUpdatedStyleRanges;
 
+	bool subtitle_rows_ready = false;
+
 public:
+	virtual void RetireSubtitleRowBorrows() noexcept = 0;
+	bool IsSubtitleRowBindingReady() const noexcept { return subtitle_rows_ready; }
 	/// @brief Get any warning message to show in the audio display
 	/// @return The warning message to show, may be empty if there is none
 	virtual wxString GetWarningMessage() const = 0;

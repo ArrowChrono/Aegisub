@@ -1020,7 +1020,7 @@ void VideoDisplay::ResetToolPresentation() {
 }
 
 std::shared_ptr<const VisualToolRenderSnapshot> VideoDisplay::GetToolPresentationSnapshot() const {
-	if (!has_displayed_packet || con->GetUI().videoDisplay != this || con->videoController->IsPlaying())
+	if (!tool || !tool->SubtitleRowsReady() || !has_displayed_packet || con->GetUI().videoDisplay != this || con->videoController->IsPlaying())
 		return {};
 	return tool_presentation.Select(displayed_packet.visual_tool_snapshot);
 }
@@ -1037,7 +1037,7 @@ bool VideoDisplay::NeedsInteractionRender() const {
 }
 
 void VideoDisplay::BeginToolPresentation(std::uint64_t interaction_id) {
-	if (!tool || !has_displayed_packet || con->GetUI().videoDisplay != this || con->videoController->IsPlaying())
+	if (!tool || !tool->SubtitleRowsReady() || !has_displayed_packet || con->GetUI().videoDisplay != this || con->videoController->IsPlaying())
 		return;
 	auto baseline = tool_presentation.Select(displayed_packet.visual_tool_snapshot);
 	if (!baseline && tool_presentation.Matches(displayed_packet.visual_tool_snapshot))
@@ -1053,7 +1053,7 @@ void VideoDisplay::BeginToolPresentation(std::uint64_t interaction_id) {
 }
 
 void VideoDisplay::PrepareToolPresentation(VideoSubtitleUpdateOptions& options) {
-	if (con->GetUI().videoDisplay != this || !tool || con->videoController->IsPlaying())
+	if (con->GetUI().videoDisplay != this || !tool || !tool->SubtitleRowsReady() || con->videoController->IsPlaying())
 		return;
 	if (!tool_presentation.IsActive() || options.visual_interaction_id != tool_presentation.InteractionId())
 		return;
@@ -1604,7 +1604,7 @@ void VideoDisplay::DrawLegacyOverlayPass(wxSize const& client_size) {
 		DrawVisualGuides(guide_context);
 	}
 
-	if ((mouse_pos || !autohideTools->GetBool()) && tool) {
+	if ((mouse_pos || !autohideTools->GetBool()) && tool && tool->SubtitleRowsReady()) {
 		OpenGLWindowOverlayPass pass(canvas, true, maximum_clip_planes);
 		if (tool_presentation.IsActive() && (con->GetUI().videoDisplay != this || con->videoController->IsPlaying()))
 			ResetToolPresentation();
@@ -2273,8 +2273,10 @@ void VideoDisplay::OnMouseEvent(wxMouseEvent& event) {
 		last_mouse_pos = mouse_pos = current_pos;
 
 	bool const interaction_was_active = IsVisualToolInteracting();
-	if (tool)
+	if (tool && tool->SubtitleRowsReady())
 		tool->OnMouseEvent(event);
+	else if (tool && HasCapture())
+		ReleaseMouse();
 	if (interaction_was_active && !IsVisualToolInteracting())
 		FlushVisualToolEditBoxSync();
 }
@@ -2284,8 +2286,10 @@ void VideoDisplay::OnMouseLeave(wxMouseEvent& event) {
 		mouse_pos = Vector2D();
 	if (zoom_preview)
 		zoom_preview->UpdateAt(std::nullopt, wxPoint());
-	if (tool)
+	if (tool && tool->SubtitleRowsReady())
 		tool->OnMouseEvent(event);
+	else if (tool && HasCapture())
+		ReleaseMouse();
 }
 
 void VideoDisplay::OnMouseWheel(wxMouseEvent& event) {
@@ -2363,17 +2367,17 @@ void VideoDisplay::OnKeyDown(wxKeyEvent &event) {
 		FinishPointSelection(true, true);
 		return;
 	}
-	if (tool && tool->OnKeyDown(event))
+	if (tool && tool->SubtitleRowsReady() && tool->OnKeyDown(event))
 		return;
 	// Tool-owned context is exact-match only so Default frame-step bindings
 	// cannot steal arrow keys while a nudge-capable tool is active.
-	if (tool && hotkey::check_exact(tool->GetHotkeyContext(), con, event))
+	if (tool && tool->SubtitleRowsReady() && hotkey::check_exact(tool->GetHotkeyContext(), con, event))
 		return;
 	hotkey::check("Video", con, event);
 }
 
 void VideoDisplay::OnCapturedKeyDown(wxKeyEvent& event) {
-	if (event.GetKeyCode() == WXK_ESCAPE && HasCapture() && tool && tool->OnKeyDown(event))
+	if (event.GetKeyCode() == WXK_ESCAPE && HasCapture() && tool && tool->SubtitleRowsReady() && tool->OnKeyDown(event))
 		return;
 	event.Skip();
 }
@@ -2469,7 +2473,7 @@ void VideoDisplay::RefreshCursor() {
 		SetCursor(point_selection->cursor);
 		return;
 	}
-	auto const idle = tool ? tool->GetIdleCursor() : wxCURSOR_NONE;
+	auto const idle = tool && tool->SubtitleRowsReady() ? tool->GetIdleCursor() : wxCURSOR_NONE;
 	SetCursor(idle == wxCURSOR_NONE ? wxNullCursor : wxCursor(idle));
 }
 
@@ -2564,8 +2568,15 @@ void VideoDisplay::SetTool(std::unique_ptr<VisualToolBase> new_tool) {
 	}
 }
 
+void VideoDisplay::RetireSubtitleRowBorrows() noexcept {
+	if (tool)
+		tool->RetireSubtitleRowBorrows();
+	tool_feedback_dirty = false;
+	release_tool_feedback.Cancel();
+}
+
 bool VideoDisplay::IsVisualToolInteracting() const noexcept {
-	return tool && tool->IsInteracting();
+	return tool && tool->SubtitleRowsReady() && tool->IsInteracting();
 }
 
 void VideoDisplay::FlushVisualToolEditBoxSync() {
@@ -2649,59 +2660,59 @@ bool VideoDisplay::ToolIsType(std::type_info const& type) const {
 }
 
 bool VideoDisplay::CanNudgeTool() const {
-	return tool && tool->SupportsNudge() && tool->HasActiveLine();
+	return tool && tool->SubtitleRowsReady() && tool->SupportsNudge() && tool->HasActiveLine();
 }
 
 bool VideoDisplay::NudgeTool(Vector2D direction, VisualNudgeMagnitude magnitude) {
-	return tool && tool->Nudge(direction, magnitude);
+	return tool && tool->SubtitleRowsReady() && tool->Nudge(direction, magnitude);
 }
 
 bool VideoDisplay::CanNormalizeScaleTool(VisualScaleAxis axis) const {
-	auto *scale_tool = dynamic_cast<VisualToolScale *>(tool.get());
+	auto *scale_tool = dynamic_cast<VisualToolScale *>(tool && tool->SubtitleRowsReady() ? tool.get() : nullptr);
 	return scale_tool && scale_tool->CanNormalizeScale(axis);
 }
 
 bool VideoDisplay::NormalizeScaleTool(VisualScaleAxis axis) {
-	auto *scale_tool = dynamic_cast<VisualToolScale *>(tool.get());
+	auto *scale_tool = dynamic_cast<VisualToolScale *>(tool && tool->SubtitleRowsReady() ? tool.get() : nullptr);
 	return scale_tool && scale_tool->NormalizeScale(axis);
 }
 
 bool VideoDisplay::CanResetShearTool(VisualShearAxis axis) const {
-	auto *shear_tool = dynamic_cast<VisualToolShear const *>(tool.get());
+	auto *shear_tool = dynamic_cast<VisualToolShear const *>(tool && tool->SubtitleRowsReady() ? tool.get() : nullptr);
 	return shear_tool && shear_tool->CanReset(axis);
 }
 
 bool VideoDisplay::ResetShearTool(VisualShearAxis axis) {
-	auto *shear_tool = dynamic_cast<VisualToolShear *>(tool.get());
+	auto *shear_tool = dynamic_cast<VisualToolShear *>(tool && tool->SubtitleRowsReady() ? tool.get() : nullptr);
 	return shear_tool && shear_tool->Reset(axis);
 }
 
 bool VideoDisplay::CanApplyMeasurePerspective() const {
-	auto *measure_tool = dynamic_cast<VisualToolMeasure const *>(tool.get());
+	auto *measure_tool = dynamic_cast<VisualToolMeasure const *>(tool && tool->SubtitleRowsReady() ? tool.get() : nullptr);
 	return measure_tool && measure_tool->CanApplyPerspective();
 }
 
 void VideoDisplay::ApplyMeasurePerspective() {
-	if (auto *measure_tool = dynamic_cast<VisualToolMeasure *>(tool.get()))
+	if (auto *measure_tool = dynamic_cast<VisualToolMeasure *>(tool && tool->SubtitleRowsReady() ? tool.get() : nullptr))
 		measure_tool->ApplyPerspective();
 }
 
 bool VideoDisplay::CanRemoveMeasureGuide() const {
-	auto *measure_tool = dynamic_cast<VisualToolMeasure const *>(tool.get());
+	auto *measure_tool = dynamic_cast<VisualToolMeasure const *>(tool && tool->SubtitleRowsReady() ? tool.get() : nullptr);
 	return measure_tool && measure_tool->GetSubMode() == 0;
 }
 
 void VideoDisplay::RemoveMeasureGuide() {
-	if (auto *measure_tool = dynamic_cast<VisualToolMeasure *>(tool.get()))
+	if (auto *measure_tool = dynamic_cast<VisualToolMeasure *>(tool && tool->SubtitleRowsReady() ? tool.get() : nullptr))
 		measure_tool->RemoveSelectedGuide();
 }
 
 bool VideoDisplay::SetToolSubMode(int mode) {
-	return tool && tool->SetSubMode(mode);
+	return tool && tool->SubtitleRowsReady() && tool->SetSubMode(mode);
 }
 
 int VideoDisplay::GetToolSubMode() const {
-	return tool ? tool->GetSubMode() : -1;
+	return tool && tool->SubtitleRowsReady() ? tool->GetSubMode() : -1;
 }
 
 Vector2D VideoDisplay::GetMousePosition() const {

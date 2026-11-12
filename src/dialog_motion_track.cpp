@@ -8,6 +8,7 @@
 //  - Close destroys the session along with the window.
 
 #include "dialog_motion_track.h"
+#include "frame_main.h"
 
 #include "ass_dialogue.h"
 #include "ass_file.h"
@@ -31,6 +32,7 @@
 #include "visual_tool_cross.h"
 #include "visual_tool_motion_track.h"
 #include "selection_controller.h"
+#include "subs_controller.h"
 #include "video_controller.h"
 #include "video_display.h"
 #include "version.h"
@@ -38,6 +40,7 @@
 #include <libaegisub/ass/time.h>
 #include <libaegisub/fs.h>
 #include <libaegisub/io.h>
+#include <libaegisub/log.h>
 #include <libaegisub/vfr.h>
 
 #include <wx/button.h>
@@ -809,23 +812,69 @@ void DialogMotionTrack::OnApply(wxCommandEvent&) {
 			return;
 	}
 
-	auto commit = [&](std::vector<AssDialogue *> const& lines) {
-		ass.Commit(from_wx(_("Apply motion track")),
-				   AssFile::COMMIT_DIAG_TEXT | AssFile::COMMIT_DIAG_ADDREM |
-					   AssFile::COMMIT_DIAG_TIME);
-		Selection selected(lines.begin(), lines.end());
-		core.selectionController->SetSelectionAndActive(std::move(selected), lines.front());
-	};
 	std::string message;
-	bool const applied = apply_source_.Apply(ass, plan, core.project->Timecodes(), commit, message);
-	if (!applied) {
-		wxMessageBox(to_wx(message), _("Motion Track"), wxOK | wxICON_ERROR, this);
-		return;
+	try {
+		if (!InstallApplyPlan(plan, message))
+			wxMessageBox(to_wx(message), _("Motion Track"), wxOK | wxICON_ERROR, this);
 	}
+	catch (MotionTrackApplyPublicationError const& error) {
+		try {
+			std::rethrow_exception(error.Cause());
+		}
+		catch (std::exception const& cause) {
+			LOG_E("motion_track/apply") << error.what() << ": " << cause.what();
+		}
+		catch (...) {
+			LOG_E("motion_track/apply") << error.what() << ": non-standard observer exception";
+		}
+		wxMessageBox(_("Motion tracking was applied, but a notification or display update failed. "
+					   "The subtitle changes and undo history were committed. Do not retry Apply to recover from this error; "
+					   "review the subtitles or use Undo."),
+					 _("Motion Track"), wxOK | wxICON_ERROR, this);
+	}
+}
+
+bool DialogMotionTrack::InstallApplyPlan(MotionTrackApplyPlan const& plan, std::string& message) {
+	auto core = context->GetCore();
+	auto& ass = *core.ass;
+	auto prepared = apply_source_.Prepare(ass, plan, core.project->Timecodes(), message);
+	if (!prepared)
+		return false;
+	auto& candidate = prepared->Candidate();
+	int const type = candidate.PrepareCommit(AssFile::COMMIT_DIAG_TEXT |
+											 AssFile::COMMIT_DIAG_ADDREM | AssFile::COMMIT_DIAG_TIME);
+	auto const& lines = prepared->Outputs();
+	Selection selected;
+	for (auto *line : lines)
+		selected.insert(prepared->LiveLine(line));
+	auto selection = core.selectionController->PrepareSelectionAndActive(
+		std::move(selected), prepared->LiveLine(lines.front()));
+	std::string const description = from_wx(_("Apply motion track"));
+	int commit_id = -1;
+	AssFileCommit const commit{.message = description, .commit_id = &commit_id, .single_line = nullptr, .type = type, .changed_lines = {}};
+	candidate.Properties.active_row = lines.front()->Row;
+	auto history = core.subsController->PrepareMotionTrackHistory(candidate, commit, lines, lines.front());
+	prepared->Finalize(core.project->Timecodes());
+	auto *frame = context->GetUI().frame;
+	if (!frame)
+		throw std::logic_error("Motion Apply requires its wx row-borrow owner");
+	frame->RetireSubtitleRowBorrows();
+	prepared->Install();
+	core.selectionController->InstallSelection(selection);
+	auto const save_generation = core.subsController->InstallMotionTrackHistory(std::move(history));
 	plan_preview_.reset();
-	preview->SetValue(false);
-	RefreshReadonlyStats();
-	RefreshVideoDisplay();
+	try {
+		preview->SetValue(false);
+		ass.PublishCommit(commit, false);
+		core.selectionController->PublishSelection(selection);
+		core.subsController->PublishMotionTrackAutosave(save_generation);
+		RefreshReadonlyStats();
+		RefreshVideoDisplay();
+	}
+	catch (...) {
+		throw MotionTrackApplyPublicationError(std::current_exception());
+	}
+	return true;
 }
 
 void DialogMotionTrack::OnExportDebug(wxCommandEvent&) {

@@ -145,7 +145,8 @@ BaseGrid::BaseGrid(wxWindow* parent, agi::Context *context)
 		core.ass->AddCommitListener(&BaseGrid::OnSubtitlesCommit, this),
 
 		core.selectionController->AddActiveLineListener(&BaseGrid::OnActiveLineChanged, this),
-		core.selectionController->AddSelectionListener([&]{
+		core.selectionController->AddSelectionListener([&] {
+			if (!row_borrows_ready) return;
 			perf_trace::VideoUiDurationScope trace("grid_select.grid.selection", GetRows());
 			bool const cancelled_preview = drag_selection_preview_active
 				&& !committing_drag_selection_preview
@@ -186,6 +187,7 @@ BaseGrid::BaseGrid(wxWindow* parent, agi::Context *context)
 		OPT_SUB("Subtitle/Grid/Highlight Subtitles in Frame", &BaseGrid::OnHighlightVisibleChange, this),
 		OPT_SUB("Subtitle/Grid/Hide Overrides", [&](agi::OptionValue const&) { Refresh(false); }),
 		OPT_SUB("Subtitle/Grid/Show Folding Column", [this] {
+			if (!row_borrows_ready) return;
 			SetColumnWidths();
 			Refresh(false);
 		}),
@@ -197,6 +199,35 @@ BaseGrid::BaseGrid(wxWindow* parent, agi::Context *context)
 }
 
 BaseGrid::~BaseGrid() { }
+
+void BaseGrid::RetireSubtitleRowBorrows() noexcept {
+	row_borrows_ready = false;
+	index_line_map.clear();
+	projection_line_map.clear();
+	display_line_ids.clear();
+	visible_rows.clear();
+	selected_rows.clear();
+	text_refresh_rects.clear();
+	subtitle_rows_refresh_on_idle.clear();
+	refresh_on_idle = false;
+	full_refresh_on_idle = false;
+	pending_click_paint_timing = {};
+	holding = false;
+	last_drag_row = -1;
+	last_drag_modifiers = -1;
+	last_drag_revision = 0;
+	drag_selection_preview_active = false;
+	drag_selection_preview_active_row = -1;
+	drag_selection_preview_first_row = -1;
+	drag_selection_preview_last_row = -1;
+	drag_selection_preview_add_base = false;
+	committing_drag_selection_preview = false;
+	handling_mouse_selection = false;
+	drag_selection_base_rows.clear();
+	active_row = -1;
+	extendRow = -1;
+	reveal_active_after_commit = false;
+}
 
 #ifdef AEGISUB_WITH_SKIA_SUBTITLE_GRID
 bool BaseGrid::CanUseSkiaRenderer() const noexcept {
@@ -219,6 +250,20 @@ BEGIN_EVENT_TABLE(BaseGrid,wxWindow)
 END_EVENT_TABLE()
 
 void BaseGrid::OnSubtitlesCommit(int type, const AssDialogue *single_line) {
+	if (!row_borrows_ready) {
+		UpdateMaps(true, false);
+		auto const *active = context->GetCore().selectionController->GetActiveLine();
+		for (auto const& line : context->GetCore().ass->Events) {
+			if (&line == active) {
+				extendRow = active_row = line.Row;
+				MakeRowVisible(line.Row);
+				break;
+			}
+		}
+		row_borrows_ready = true;
+		return;
+	}
+	row_borrows_ready = false;
 	if (type == AssFile::COMMIT_NEW || (type & AssFile::COMMIT_ORDER) || (type & AssFile::COMMIT_DIAG_ADDREM) || (type & AssFile::COMMIT_EXTRADATA))
 		ClearDragSelectionPreview(true);
 
@@ -261,12 +306,14 @@ void BaseGrid::OnSubtitlesCommit(int type, const AssDialogue *single_line) {
 			}
 		}
 		reveal_active_after_commit = false;
+		row_borrows_ready = true;
 		return;
 	}
 
 	if (diff.requires_full_refresh && (type & AssFile::COMMIT_DIAG_META)) {
 		SetColumnWidths();
 		Refresh(false);
+		row_borrows_ready = true;
 		return;
 	}
 	if (diff.kind == aegisub::presentation::SubtitleGridDiffKind::RowsChanged && (type & AssFile::COMMIT_DIAG_TIME)) {
@@ -291,15 +338,18 @@ void BaseGrid::OnSubtitlesCommit(int type, const AssDialogue *single_line) {
 	else if (diff.kind == aegisub::presentation::SubtitleGridDiffKind::RowsChanged && (type & AssFile::COMMIT_DIAG_TEXT)) {
 		if (!diff.upserted_rows.empty()) {
 			RefreshSubtitleGridRow(diff.upserted_rows.front().row_index);
+			row_borrows_ready = true;
 			return;
 		}
 
 		for (auto const& rect : text_refresh_rects)
 			RefreshRect(rect, false);
 	}
+	row_borrows_ready = true;
 }
 
 void BaseGrid::OnShowColMenu(wxCommandEvent &event) {
+	if (!row_borrows_ready) return;
 	int item = event.GetId() - MENU_SHOW_COL;
 	bool new_value = !columns_visible[item];
 
@@ -361,6 +411,7 @@ void BaseGrid::UpdateStyle() {
 	row_colors.SelectedComment.SetColour(to_wx(OPT_GET("Colour/Subtitle Grid/Background/Selected Comment")->GetColor()));
 	row_colors.LeftCol.SetColour(to_wx(OPT_GET("Colour/Subtitle Grid/Left Column")->GetColor()));
 
+	if (!row_borrows_ready) return;
 	SetColumnWidths();
 
 	AdjustScrollbar();
@@ -435,6 +486,9 @@ void BaseGrid::UpdateDisplayMap(bool preserve_anchor) {
 }
 
 void BaseGrid::OnActiveLineChanged(AssDialogue *new_active) {
+	if (!row_borrows_ready)
+		UpdateMaps(true, false);
+	row_borrows_ready = false;
 	perf_trace::VideoUiDurationScope trace("grid_select.grid.active", GetRows());
 	bool const cancelled_preview = drag_selection_preview_active
 		&& !committing_drag_selection_preview
@@ -458,6 +512,7 @@ void BaseGrid::OnActiveLineChanged(AssDialogue *new_active) {
 		if (cancelled_preview)
 			Refresh(false);
 	}
+	row_borrows_ready = true;
 }
 
 void BaseGrid::MakeRowVisible(int row) {
@@ -480,12 +535,13 @@ void BaseGrid::MakeRowVisible(int row) {
 	int h = GetClientSize().GetHeight();
 
 	if (row < yPos + 1)
-		ScrollTo(row - 1);
+		ScrollToRow(row - 1);
 	else if (row > yPos + h/lineHeight - 3)
-		ScrollTo(row - h/lineHeight + 3);
+		ScrollToRow(row - h / lineHeight + 3);
 }
 
 void BaseGrid::OnCurrentFrameChanged(int frame_number) {
+	if (!row_borrows_ready) return;
 	current_frame = frame_number;
 	++grid_revision;
 	auto new_visible_rows = GetRowsDisplayedAtCurrentFrame();
@@ -504,6 +560,7 @@ void BaseGrid::OnVideoProviderChanged() {
 }
 
 void BaseGrid::OnIdle(wxIdleEvent&) {
+	if (!row_borrows_ready) return;
 	if (refresh_on_idle) {
 		refresh_on_idle = false;
 		if (full_refresh_on_idle) {
@@ -518,6 +575,10 @@ void BaseGrid::OnIdle(wxIdleEvent&) {
 }
 
 void BaseGrid::OnPaint(wxPaintEvent &) {
+	if (!row_borrows_ready) {
+		wxPaintDC dc(this);
+		return;
+	}
 	auto const grid_paint_started = InputTimingClock::now();
 	auto click_timing = pending_click_paint_timing;
 	pending_click_paint_timing.pending = false;
@@ -839,6 +900,7 @@ void BaseGrid::NotifyTextRasterPolicyChanged() {
 }
 
 void BaseGrid::OnSize(wxSizeEvent &) {
+	if (!row_borrows_ready) return;
 	auto const size = GetClientSize();
 	auto const previous = last_client_size;
 	last_client_size = size;
@@ -864,6 +926,7 @@ void BaseGrid::OnSize(wxSizeEvent &) {
 }
 
 void BaseGrid::OnScroll(wxScrollEvent &event) {
+	if (!row_borrows_ready) return;
 	int newPos = event.GetPosition();
 	if (yPos != newPos) {
 		int old_y_pos = yPos;
@@ -876,6 +939,11 @@ void BaseGrid::OnScroll(wxScrollEvent &event) {
 }
 
 void BaseGrid::OnMouseEvent(wxMouseEvent &event) {
+	if ((!row_borrows_ready || !holding) && event.ButtonUp() && !event.LeftIsDown() && !event.MiddleIsDown() && !event.RightIsDown() && HasCapture()) {
+		ReleaseMouse();
+		return;
+	}
+	if (!row_borrows_ready) return;
 	auto const trace_left_click =
 		perf_trace::IsCategoryEnabled(perf_trace::Category::Log)
 		&& (event.LeftDown() || event.LeftDClick());
@@ -1130,6 +1198,7 @@ void BaseGrid::OnMouseEvent(wxMouseEvent &event) {
 }
 
 void BaseGrid::OnMouseCaptureLost(wxMouseCaptureLostEvent &) {
+	if (!row_borrows_ready) return;
 	holding = false;
 	last_drag_row = -1;
 	last_drag_modifiers = -1;
@@ -1137,6 +1206,7 @@ void BaseGrid::OnMouseCaptureLost(wxMouseCaptureLostEvent &) {
 }
 
 void BaseGrid::ApplyDragSelectionPreview(int active_row, int anchor_row, bool add_base) {
+	if (!row_borrows_ready) return;
 	perf_trace::VideoUiDurationScope trace(
 		"grid_select.mouse.preview",
 		std::abs(active_row - anchor_row) + 1,
@@ -1171,6 +1241,7 @@ void BaseGrid::ApplyDragSelectionPreview(int active_row, int anchor_row, bool ad
 }
 
 void BaseGrid::CommitDragSelectionPreview() {
+	if (!row_borrows_ready) return;
 	if (!drag_selection_preview_active)
 		return;
 
@@ -1228,6 +1299,7 @@ void BaseGrid::ClearDragSelectionPreview(bool cancel_drag) {
 }
 
 void BaseGrid::OnContextMenu(wxContextMenuEvent &evt) {
+	if (!row_borrows_ready) return;
 	wxPoint pos = evt.GetPosition();
 	if (pos == wxDefaultPosition || ScreenToClient(pos).y > lineHeight) {
 		if (!context_menu) context_menu = menu::GetMenu("grid_context", (wxID_HIGHEST + 1) + 8000, context);
@@ -1248,6 +1320,7 @@ void BaseGrid::OnContextMenu(wxContextMenuEvent &evt) {
 }
 
 void BaseGrid::RestoreScrollPosition(int source_row) {
+	if (!row_borrows_ready) return;
 	auto const& folding = context->GetCore().ass->Folding();
 	int display = folding.SourceToDisplay(source_row);
 	if (display < 0) {
@@ -1260,6 +1333,11 @@ void BaseGrid::RestoreScrollPosition(int source_row) {
 }
 
 void BaseGrid::ScrollTo(int y) {
+	if (!row_borrows_ready) return;
+	ScrollToRow(y);
+}
+
+void BaseGrid::ScrollToRow(int y) {
 	int nextY = mid(0, y, std::max(0, GetDisplayRows() - 1));
 	if (yPos != nextY) {
 		int old_y_pos = yPos;
@@ -1623,6 +1701,7 @@ bool BaseGrid::IsDisplayed(const AssDialogue *line) const {
 }
 
 void BaseGrid::OnCharHook(wxKeyEvent &event) {
+	if (!row_borrows_ready) return;
 	int const key = event.GetKeyCode();
 	bool const modifier_only = key == WXK_SHIFT || key == WXK_CONTROL || key == WXK_ALT;
 	if (!holding || !modifier_only)
@@ -1642,6 +1721,7 @@ void BaseGrid::OnCharHook(wxKeyEvent &event) {
 }
 
 void BaseGrid::OnKeyDown(wxKeyEvent &event) {
+	if (!row_borrows_ready) return;
 	int const key = event.GetKeyCode();
 	bool const modifier_only = key == WXK_SHIFT || key == WXK_CONTROL || key == WXK_ALT;
 	if (!holding || !modifier_only)
@@ -1728,6 +1808,7 @@ void BaseGrid::OnKeyDown(wxKeyEvent &event) {
 }
 
 void BaseGrid::NextVisibleLine(int direction) {
+	if (!row_borrows_ready) return;
 	auto core = context->GetCore();
 	auto const *active = core.selectionController->GetActiveLine();
 	if (!active || !GetDisplayRows())
@@ -1743,6 +1824,7 @@ void BaseGrid::SetByFrame(bool state) {
 }
 
 void BaseGrid::SetDisplayMode(SubtitleTimeDisplayMode mode) {
+	if (!row_borrows_ready) return;
 	if (display_mode == mode)
 		return;
 

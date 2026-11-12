@@ -126,6 +126,7 @@ class FrameMain : public wxFrame {
 public:
 	FrameMain();
 	~FrameMain();
+	void RetireSubtitleRowBorrows() noexcept;
 
 #ifdef _WIN32
 	WXLRESULT MSWWindowProc(WXUINT message, WXWPARAM wParam, WXLPARAM lParam) override;
