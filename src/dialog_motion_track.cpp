@@ -137,7 +137,7 @@ DialogMotionTrack::DialogMotionTrack(agi::Context *c)
 	// per-mode availability (growth needs Similarity + Exact) reads as part
 	// of the layout instead of a surprise.
 	auto *track_box = new wxStaticBox(this, -1, _("Tracking"));
-	auto *track_grid = new wxFlexGridSizer(2, 2, 5, 5);
+	auto *track_grid = new wxFlexGridSizer(0, 2, 5, 5);
 	track_grid->Add(new wxStaticText(track_box, -1, _("Direction")),
 					0, wxALIGN_CENTRE_VERTICAL);
 	direction = new wxComboBox(track_box, -1, _("Both directions"),
@@ -175,7 +175,7 @@ DialogMotionTrack::DialogMotionTrack(agi::Context *c)
 	root->Add(track_sizer, 0, wxALL | wxEXPAND, 5);
 
 	auto *apply_box = new wxStaticBox(this, -1, _("Apply"));
-	auto *apply_grid = new wxFlexGridSizer(2, 2, 5, 5);
+	auto *apply_grid = new wxFlexGridSizer(0, 2, 5, 5);
 	apply_grid->Add(new wxStaticText(apply_box, -1, _("Apply mode")),
 					0, wxALIGN_CENTRE_VERTICAL);
 	apply_mode = new wxComboBox(apply_box, -1, _("Compact"),
