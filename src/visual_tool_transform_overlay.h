@@ -12,7 +12,7 @@
 namespace aegisub::visual_transform {
 constexpr float deg2rad = std::numbers::pi_v<float> / 180.f;
 
-inline void DrawProjectedAnnulus(VideoOverlayDrawContext& context, Vector2D origin, Vector2D scale, float rx, float ry, float outer_radius, float inner_radius, float start_deg, float end_deg, float perspective_z_scale) {
+inline void DrawProjectedAnnulus(VideoOverlayDrawContext& context, Vector2D origin, Vector2D scale, float rx, float ry, float outer_radius, float inner_radius, float start_deg, float end_deg, float perspective_z_scale, agi::Color const& line_colour) {
 	bool const full_circle = std::abs(end_deg - start_deg) < 0.001f;
 	float arc_start = start_deg * deg2rad;
 	float arc_end = full_circle ? (start_deg + 360.0f) * deg2rad : end_deg * deg2rad;
@@ -32,6 +32,8 @@ inline void DrawProjectedAnnulus(VideoOverlayDrawContext& context, Vector2D orig
 		inner_points.push_back(video_overlay_helpers::ProjectScaledRotatedPoint(dir * inner_radius, origin, scale, rx, ry, 0.0f, perspective_z_scale));
 	}
 
+	// Tessellation edges belong to the fill, not to the visible ring contour.
+	context.SetLineColour(line_colour, 0.f, 1);
 	for (int i = 0; i < steps; ++i) {
 		Vector2D const quad[] = {
 			outer_points[i],
@@ -40,6 +42,13 @@ inline void DrawProjectedAnnulus(VideoOverlayDrawContext& context, Vector2D orig
 			inner_points[i],
 		};
 		context.DrawPolygon(quad, 4);
+	}
+	context.SetLineColour(line_colour, 1.f, 1);
+	context.DrawLineStrip(outer_points.data(), outer_points.size());
+	context.DrawLineStrip(inner_points.data(), inner_points.size());
+	if (!full_circle) {
+		context.DrawLine(outer_points.front(), inner_points.front());
+		context.DrawLine(outer_points.back(), inner_points.back());
 	}
 }
 
@@ -133,6 +142,7 @@ struct RotateZOverlayState {
 	agi::Color primary_colour;
 	agi::Color secondary_colour;
 	agi::Color highlight_colour;
+	agi::Color feature_fill_colour;
 };
 
 inline void DrawRotateZOverlay(VideoOverlayDrawContext& context, RotateZOverlayState const& state) {
@@ -148,14 +158,14 @@ inline void DrawRotateZOverlay(VideoOverlayDrawContext& context, RotateZOverlayS
 
 	context.SetLineColour(line_color_secondary, 1.0f, 1);
 	context.SetFillColour(highlight_color, 0.3f);
-	DrawProjectedAnnulus(context, state.origin, state.scale, state.rotation_x, state.rotation_y, radius + 4, radius - 4, 0.0f, 0.0f, perspective_z_scale);
+	DrawProjectedAnnulus(context, state.origin, state.scale, state.rotation_x, state.rotation_y, radius + 4, radius - 4, 0.0f, 0.0f, perspective_z_scale, line_color_secondary);
 
 	int const markers = 6;
 	float const mark_start = -90.0f / markers;
 	float const mark_end = mark_start + (180.0f / markers);
 	for (int i = 0; i < markers; ++i) {
 		float const marker_angle = i * (360.0f / markers);
-		DrawProjectedAnnulus(context, state.origin, state.scale, state.rotation_x, state.rotation_y, radius + 30, radius + 12, marker_angle + mark_start, marker_angle + mark_end, perspective_z_scale);
+		DrawProjectedAnnulus(context, state.origin, state.scale, state.rotation_x, state.rotation_y, radius + 30, radius + 12, marker_angle + mark_start, marker_angle + mark_end, perspective_z_scale, line_color_secondary);
 	}
 
 	Vector2D const angle_vec = Vector2D::FromAngle(state.angle * deg2rad);

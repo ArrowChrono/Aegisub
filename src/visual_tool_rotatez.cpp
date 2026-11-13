@@ -28,6 +28,7 @@
 #include "options.h"
 #include "selection_controller.h"
 #include "video_overlay_draw_context.h"
+#include "video_overlay_draw_context_opengl.h"
 #include "video_overlay_helpers.h"
 #include "visual_ass_edit.h"
 #include "visual_tool_render_snapshot.h"
@@ -36,68 +37,19 @@
 
 #include <libaegisub/format.h>
 
-#include <cmath>
 #include <wx/colour.h>
 
-static const float deg2rad = 3.1415926536f / 180.f;
-
 namespace {
-struct RotateZState {
-	Vector2D origin;
-	Vector2D pos;
-	Vector2D scale;
-	float rotation_x;
-	float rotation_y;
-	float angle;
-	float perspective_z_scale;
-	unsigned long primary_colour;
-	unsigned long secondary_colour;
-	unsigned long highlight_colour;
-	unsigned long feature_fill_colour;
-};
+using RotateZState = aegisub::visual_transform::RotateZOverlayState;
 
 void DrawRotateZGeometry(OpenGLWrapper& gl, RotateZState const& state) {
-	float radius = (state.pos - state.origin).Len();
-	float const original_radius = radius;
-	if (radius < 50)
-		radius = 50;
-
-	gl.SetOrigin(state.origin);
-	gl.SetRotation(state.rotation_x, state.rotation_y, 0, state.perspective_z_scale);
-	gl.SetScale(state.scale);
-
-	gl.SetLineColour(wxColour(state.secondary_colour));
-	gl.SetFillColour(wxColour(state.highlight_colour), 0.3f);
-	gl.DrawRing(Vector2D(0, 0), radius + 4, radius - 4);
-
-	int const markers = 6;
-	float const mark_start = -90.f / markers;
-	float const mark_end = mark_start + (180.f / markers);
-	for (int i = 0; i < markers; ++i) {
-		float const marker_angle = i * (360.f / markers);
-		gl.DrawRing(Vector2D(0, 0), radius + 30, radius + 12, 1.0, marker_angle + mark_start, marker_angle + mark_end);
-	}
-
-	Vector2D const angle_vec(Vector2D::FromAngle(state.angle * deg2rad));
-	gl.SetLineColour(wxColour(state.primary_colour), 1, 2);
-	gl.DrawLine(angle_vec * -radius, angle_vec * radius);
-
-	if (state.origin != state.pos) {
-		Vector2D const rotated_pos = Vector2D::FromAngle(state.angle * deg2rad - (state.pos - state.origin).Angle()) * original_radius;
-		gl.DrawLine(Vector2D(), rotated_pos);
-		gl.DrawLine(rotated_pos - angle_vec * 20, rotated_pos + angle_vec * 20);
-	}
-
-	gl.SetLineColour(wxColour(state.secondary_colour), 1.f, 1);
-	gl.SetFillColour(wxColour(state.highlight_colour), 0.3f);
-	gl.DrawCircle(angle_vec * radius, 4);
-	gl.DrawCircle(angle_vec * -radius, 4);
-	gl.ResetTransform();
+	OpenGLVideoOverlayDrawContext context(gl);
+	aegisub::visual_transform::DrawRotateZOverlay(context, state);
 }
 
-void DrawRotateZMouseGuide(OpenGLWrapper& gl, Vector2D origin, Vector2D mouse_pos, unsigned long line_colour) {
+void DrawRotateZMouseGuide(OpenGLWrapper& gl, Vector2D origin, Vector2D mouse_pos, agi::Color const& line_colour) {
 	if (mouse_pos && (mouse_pos - origin).SquareLen() > 100) {
-		gl.SetLineColour(wxColour(line_colour));
+		gl.SetLineColour(line_colour);
 		gl.DrawLine(origin, mouse_pos);
 	}
 }
@@ -118,15 +70,14 @@ public:
 		return {};
 	}
 
-	void Draw(VideoOverlayDrawContext&) const override {
-		OpenGLWrapper gl;
-		gl.SetLineColour(wxColour(state.secondary_colour), 1.f, 1);
-		gl.SetFillColour(wxColour(state.feature_fill_colour), 0.3f);
+	void Draw(VideoOverlayDrawContext& context) const override {
+		context.SetLineColour(state.secondary_colour, 1.f, 1);
+		context.SetFillColour(state.feature_fill_colour, 0.3f);
 		VisualDraggableFeature feature;
 		feature.type = DRAG_BIG_TRIANGLE;
 		feature.pos = state.origin;
-		feature.Draw(gl);
-		DrawRotateZGeometry(gl, state);
+		feature.Draw(context);
+		aegisub::visual_transform::DrawRotateZOverlay(context, state);
 	}
 
 	void DrawLiveFeedback(Vector2D const& mouse_pos) const override {
@@ -158,10 +109,10 @@ void VisualToolRotateZ::Draw() {
 		.rotation_y = rotation_y,
 		.angle = angle,
 		.perspective_z_scale = video_overlay_helpers::GetLayoutResAdjustedPerspectiveZScale(script_res, layout_res),
-		.primary_colour = to_wx(line_color_primary_opt->GetColor()).GetRGB(),
-		.secondary_colour = to_wx(line_color_secondary_opt->GetColor()).GetRGB(),
-		.highlight_colour = to_wx(highlight_color_primary_opt->GetColor()).GetRGB(),
-		.feature_fill_colour = 0,
+		.primary_colour = line_color_primary_opt->GetColor(),
+		.secondary_colour = line_color_secondary_opt->GetColor(),
+		.highlight_colour = highlight_color_primary_opt->GetColor(),
+		.feature_fill_colour = {},
 	};
 	DrawRotateZGeometry(gl, state);
 	DrawRotateZMouseGuide(gl, state.origin, mouse_pos, state.secondary_colour);
@@ -187,10 +138,10 @@ std::shared_ptr<const VisualToolRenderSnapshot> VisualToolRotateZ::CaptureRender
 		.rotation_y = rotation_y,
 		.angle = angle,
 		.perspective_z_scale = video_overlay_helpers::GetLayoutResAdjustedPerspectiveZScale(script_res, layout_res),
-		.primary_colour = primary,
-		.secondary_colour = secondary,
-		.highlight_colour = highlight,
-		.feature_fill_colour = feature_fill,
+		.primary_colour = VideoOverlayColourFromRgb(primary),
+		.secondary_colour = VideoOverlayColourFromRgb(secondary),
+		.highlight_colour = VideoOverlayColourFromRgb(highlight),
+		.feature_fill_colour = VideoOverlayColourFromRgb(feature_fill),
 	};
 	return std::make_shared<RotateZRenderSnapshot>(context, state);
 }

@@ -32,6 +32,8 @@ class TransformOverlayRecorder final : public VideoOverlayDrawContext {
 	Paint fill_paint;
 	std::vector<std::pair<Vector2D, Vector2D>> lines;
 	std::vector<Paint> line_paints;
+	std::vector<std::vector<Vector2D>> line_strips;
+	std::vector<Paint> line_strip_paints;
 	std::vector<std::pair<Paint, Paint>> polygon_paints;
 	std::vector<std::pair<Paint, Paint>> circle_paints;
 	std::vector<std::pair<Paint, Paint>> rectangle_paints;
@@ -77,7 +79,10 @@ class TransformOverlayRecorder final : public VideoOverlayDrawContext {
 		line_paints.push_back(line_paint);
 	}
 	void DrawLines(size_t, float const *, size_t) override {}
-	void DrawLineStrip(Vector2D const *, size_t) override {}
+	void DrawLineStrip(Vector2D const *points, size_t count) override {
+		line_strips.emplace_back(points, points + count);
+		line_strip_paints.push_back(line_paint);
+	}
 	void DrawRectangle(Vector2D, Vector2D) override { rectangle_paints.emplace_back(line_paint, fill_paint); }
 	void DrawPolygon(Vector2D const *, size_t) override { polygon_paints.emplace_back(line_paint, fill_paint); }
 	void DrawMultiPolygon(std::vector<float> const&, std::vector<int> const&, std::vector<int> const&, Vector2D, Vector2D, bool) override {}
@@ -672,7 +677,9 @@ TEST(visual_edit_controller, transform_active_outside_selection_tracks_preview_w
 		auto preview = controller.CaptureSnapshot(context, {});
 		TransformOverlayRecorder drawn;
 		preview->Draw(drawn);
-		size_t const axis = mode == Mode::RotateZ ? 3 : 0;
+		auto const first_axis = std::ranges::find_if(drawn.line_paints, [](auto const& paint) { return paint.width == 2; });
+		ASSERT_NE(drawn.line_paints.end(), first_axis);
+		auto const axis = static_cast<size_t>(std::distance(drawn.line_paints.begin(), first_axis));
 		ASSERT_GT(drawn.lines.size(), axis);
 		if (mode == Mode::RotateZ) {
 			EXPECT_EQ(R"({\b1\frz120}Selected)", controller.DraftChanges()[0].text);
@@ -1217,6 +1224,51 @@ TEST(visual_transform_overlay, rotate_xy_preserves_transparency_and_independent_
 	}
 }
 
+TEST(visual_transform_overlay, rotate_z_annuli_draw_only_contours_and_sector_end_caps) {
+	aegisub::visual_transform::RotateZOverlayState const state{
+		.origin = {100, 100},
+		.pos = {100, 100},
+		.scale = {100, 100},
+		.rotation_x = 0,
+		.rotation_y = 0,
+		.angle = 0,
+		.perspective_z_scale = 8,
+		.primary_colour = {255, 0, 0},
+		.secondary_colour = {0, 255, 0},
+		.highlight_colour = {0, 0, 255},
+	};
+	TransformOverlayRecorder drawn;
+	aegisub::visual_transform::DrawRotateZOverlay(drawn, state);
+	ASSERT_FALSE(drawn.polygon_paints.empty());
+	EXPECT_TRUE(std::ranges::all_of(drawn.polygon_paints, [](auto const& paint) { return paint.first.alpha == 0.f; }))
+		<< "Fill tessellation must not expose radial seams";
+	ASSERT_EQ(14u, drawn.line_strips.size());
+	ASSERT_EQ(13u, drawn.lines.size());
+	for (size_t ring = 0; ring < 7; ++ring) {
+		auto const& outer = drawn.line_strips[2 * ring];
+		auto const& inner = drawn.line_strips[2 * ring + 1];
+		ASSERT_GE(outer.size(), 2u);
+		ASSERT_EQ(outer.size(), inner.size());
+		for (auto point : outer)
+			EXPECT_NEAR(ring == 0 ? 54.f : 80.f, (point - state.origin).Len(), .001f);
+		for (auto point : inner)
+			EXPECT_NEAR(ring == 0 ? 46.f : 62.f, (point - state.origin).Len(), .001f);
+		if (ring == 0) {
+			EXPECT_LT((outer.front() - outer.back()).Len(), .001f);
+			EXPECT_LT((inner.front() - inner.back()).Len(), .001f);
+		}
+		else {
+			EXPECT_EQ(std::make_pair(outer.front(), inner.front()), drawn.lines[2 * (ring - 1)]);
+			EXPECT_EQ(std::make_pair(outer.back(), inner.back()), drawn.lines[2 * (ring - 1) + 1]);
+		}
+	}
+	for (auto const& paint : drawn.line_strip_paints) {
+		EXPECT_EQ(state.secondary_colour, paint.colour);
+		EXPECT_EQ(1.f, paint.alpha);
+		EXPECT_EQ(1, paint.width);
+	}
+}
+
 TEST(visual_transform_overlay, rotate_z_preserves_transparency_for_lines_and_highlight_fill) {
 	agi::Color const primary{17, 34, 51, 73};
 	agi::Color const secondary{68, 85, 102, 149};
@@ -1238,13 +1290,25 @@ TEST(visual_transform_overlay, rotate_z_preserves_transparency_for_lines_and_hig
 	ASSERT_FALSE(drawn.polygon_paints.empty());
 	for (auto const& [stroke, fill] : drawn.polygon_paints) {
 		EXPECT_EQ(secondary, stroke.colour);
-		EXPECT_EQ(1.f, stroke.alpha);
+		EXPECT_EQ(0.f, stroke.alpha);
 		EXPECT_EQ(1, stroke.width);
 		EXPECT_EQ(highlight, fill.colour);
 		EXPECT_EQ(.3f, fill.alpha);
 	}
-	ASSERT_EQ(3u, drawn.line_paints.size());
-	for (auto const& stroke : drawn.line_paints) {
+	ASSERT_EQ(14u, drawn.line_strip_paints.size());
+	for (auto const& stroke : drawn.line_strip_paints) {
+		EXPECT_EQ(secondary, stroke.colour);
+		EXPECT_EQ(1.f, stroke.alpha);
+		EXPECT_EQ(1, stroke.width);
+	}
+	ASSERT_EQ(15u, drawn.line_paints.size());
+	for (size_t i = 0; i < 12; ++i) {
+		EXPECT_EQ(secondary, drawn.line_paints[i].colour);
+		EXPECT_EQ(1.f, drawn.line_paints[i].alpha);
+		EXPECT_EQ(1, drawn.line_paints[i].width);
+	}
+	for (size_t i = 12; i < drawn.line_paints.size(); ++i) {
+		auto const& stroke = drawn.line_paints[i];
 		EXPECT_EQ(primary, stroke.colour);
 		EXPECT_EQ(1.f, stroke.alpha);
 		EXPECT_EQ(2, stroke.width);

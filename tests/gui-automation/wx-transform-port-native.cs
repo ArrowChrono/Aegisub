@@ -37,9 +37,10 @@ sealed class TransformPortScenario(string[] args, PrivateDesktop desktop)
         new("RotateXYReturnNormalization", "XY", Return: true),
     ];
     static readonly string[] Poses = ["Neutral", "NormalXYZShear", "EdgeOn", "NearCamera"];
+    static readonly string[] ZAppearancePoses = ["Neutral", "NormalXYZShear"];
     readonly string artifacts = Path.GetFullPath(args[1]);
     readonly string executable = Path.GetFullPath(args[0]);
-    readonly Dictionary<string, CaseResult> results = new[] { "HostAndFoldSetup" }.Concat(Gestures.Select(g => g.Name)).Concat(Poses.Select(p => "XYDraw" + p)).Append("RuntimeAndTraceEvidence")
+    readonly Dictionary<string, CaseResult> results = new[] { "HostAndFoldSetup" }.Concat(Gestures.Select(g => g.Name)).Concat(Poses.Select(p => "XYDraw" + p)).Concat(ZAppearancePoses.Select(p => "ZPressAppearance" + p)).Append("RuntimeAndTraceEvidence")
         .ToDictionary(name => name, _ => new CaseResult("not-run", 0, null));
     readonly List<Cohort> cohorts = [];
     readonly long deadline = Stopwatch.GetTimestamp() + 150 * Stopwatch.Frequency;
@@ -56,6 +57,7 @@ sealed class TransformPortScenario(string[] args, PrivateDesktop desktop)
         dpi.RecordActivation();
         desktop.RecordDriver();
         using var log = new StreamWriter(Path.Combine(artifacts, "driver.log")) { AutoFlush = true };
+        var previousOut = Console.Out; var previousError = Console.Error;
         Console.SetOut(log); Console.SetError(log);
         using var watchdog = new Timer(_ =>
         {
@@ -73,6 +75,7 @@ sealed class TransformPortScenario(string[] args, PrivateDesktop desktop)
                 Command("Fold Sources"); Wait(() => Folded(State()), "Actual collapsed source projection"); Save("initial-normalized");
             });
             foreach (var gesture in Gestures) Case(gesture.Name, () => Gesture(gesture));
+            foreach (var pose in ZAppearancePoses) Case("ZPressAppearance" + pose, () => ZPressAppearance(pose));
             foreach (var pose in Poses) Case("XYDraw" + pose, () => DrawCohort(pose));
             Case("RuntimeAndTraceEvidence", () =>
             {
@@ -99,7 +102,11 @@ sealed class TransformPortScenario(string[] args, PrivateDesktop desktop)
             }, Json));
             WriteReports(failure.ToString()); Console.Error.WriteLine(failure); return 1;
         }
-        finally { if (app is not null) { desktop.Stop(app); app.Dispose(); } }
+        finally
+        {
+            try { if (app is not null) { desktop.Stop(app); app.Dispose(); } }
+            finally { Console.SetOut(previousOut); Console.SetError(previousError); }
+        }
     }
 
     void Prepare()
@@ -181,6 +188,42 @@ sealed class TransformPortScenario(string[] args, PrivateDesktop desktop)
             physical_extent_matches = physicalMatch
         }, Json));
         Require(physicalMatch, "Driver-thread physical native client extent exactly matches the C++ viewport capture before input");
+    }
+
+    void ZPressAppearance(string pose)
+    {
+        Macro("Visual Port Pose " + pose); Macro("Visual Port Select Active Source"); Command("Z");
+        Save("ZPressAppearance" + pose + "-pose");
+        var origin = Pixel(State(), 220, 180);
+        // Start a rotation hold outside the origin handle but inside the mouse-guide dead zone.
+        // Native synthetic hover can generate Leave on a private, non-input desktop.
+        var point = new Point(origin.X + 9, origin.Y);
+        Mouse(0x200, point, 0);
+        Wait(() => !State().GetProperty("presentation_snapshot_available").GetBoolean(), "Idle Z uses the live overlay");
+        var label = "ZPressAppearance" + pose;
+        Capture(label + "-idle");
+        Mouse(0x201, point, 1);
+        var pressed = State();
+        Require(pressed.GetProperty("native_capture").GetBoolean() && pressed.GetProperty("visual_interacting").GetBoolean()
+            && pressed.GetProperty("presentation_snapshot_available").GetBoolean(), "Z press uses a paired snapshot with native capture");
+        Capture(label + "-pressed");
+        Mouse(0x202, point, 0);
+        Wait(() => !State().GetProperty("presentation_snapshot_available").GetBoolean(), "Released Z retires the paired snapshot");
+        Require(!lastState.GetProperty("native_capture").GetBoolean() && !lastState.GetProperty("visual_interacting").GetBoolean(), "Z release retires native capture");
+        Capture(label + "-released");
+        // The viewport encoder is deterministic. Comparing its lossless PNG output also avoids
+        // WPF image decoding changing the process-wide DPI context during a native input test.
+        var idle = File.ReadAllBytes(Path.Combine(artifacts, label + "-idle.png"));
+        foreach (var suffix in new[] { "-pressed", "-released" })
+        {
+            var actual = File.ReadAllBytes(Path.Combine(artifacts, label + suffix + ".png"));
+            var identical = idle.AsSpan().SequenceEqual(actual);
+            File.WriteAllText(Path.Combine(artifacts, label + suffix + "-comparison.json"), JsonSerializer.Serialize(new
+            {
+                pose, phase = suffix, identical_png_bytes = identical, expected_identical_png_bytes = true
+            }, Json));
+            Require(identical, "Unchanged Z pose must have identical lossless viewport captures in live and paired-snapshot presentation: " + suffix);
+        }
     }
 
     void Gesture(TransformCase test)
@@ -277,11 +320,23 @@ sealed class TransformPortScenario(string[] args, PrivateDesktop desktop)
         Check(); desktop.VerifyWindow(canvas, app!);
         if (WxNative.InvalidateRect(canvas, 0, 0) == 0) throw new Win32Exception(Marshal.GetLastPInvokeError(), "InvalidateRect"); Send(canvas, 0xF, 0, 0);
     }
+    JsonDocument ReadPublishedJson(string path)
+    {
+        JsonDocument? document = null;
+        Wait(() =>
+        {
+            if (!File.Exists(path)) return false;
+            try { document = JsonDocument.Parse(File.ReadAllText(path)); return true; }
+            // Published observer files can briefly remain locked on Windows.
+            catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33) { return false; }
+        }, "Readonly observer publication completed");
+        return document!;
+    }
     JsonElement State()
     {
         var path = Path.Combine(host, "visual-state-" + (++stateSequence) + ".json"); Require(!File.Exists(path), "Readonly state request has a fresh sequence");
-        RequestObserver(0x7FFD, stateSequence); Wait(() => File.Exists(path), "Readonly state publication");
-        using var doc = JsonDocument.Parse(File.ReadAllText(path)); lastState = doc.RootElement.Clone();
+        RequestObserver(0x7FFD, stateSequence);
+        using var doc = ReadPublishedJson(path); lastState = doc.RootElement.Clone();
         Require(lastState.GetProperty("sequence").GetInt32() == stateSequence, "Readonly state response matches this request"); return lastState;
     }
     void Capture(string label)
@@ -289,8 +344,8 @@ sealed class TransformPortScenario(string[] args, PrivateDesktop desktop)
         for (var attempt = 0; attempt < 10; ++attempt)
         {
             var path = Path.Combine(host, "viewport-" + (++captureSequence) + ".json"); Require(!File.Exists(path), "Viewport capture request has a fresh sequence");
-            RequestObserver(0x7FFE, captureSequence); Wait(() => File.Exists(path), "Normal viewport capture publication");
-            using var json = JsonDocument.Parse(File.ReadAllText(path)); var receipt = json.RootElement;
+            RequestObserver(0x7FFE, captureSequence);
+            using var json = ReadPublishedJson(path); var receipt = json.RootElement;
             Require(receipt.GetProperty("sequence").GetInt32() == captureSequence, "Viewport capture receipt matches this request");
             if (!receipt.GetProperty("current").GetBoolean())
             {

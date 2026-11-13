@@ -20,6 +20,11 @@ aegisub.register_macro("Visual Port Select Sources", "Select real sources before
   return ids, ids[1]
 end)
 
+aegisub.register_macro("Visual Port Select Active Source", "Select one source for unchanged-pose pixel comparisons", function(subs)
+  local id = sources(subs)[1]
+  return { id }, id
+end)
+
 for _, pose in ipairs({
   { "Neutral", 0, 0, 0, 0, 0, 480 },
   { "NormalXYZShear", 15, 25, 30, 0.2, -0.1, 480 },
