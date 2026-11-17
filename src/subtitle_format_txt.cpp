@@ -99,7 +99,7 @@ void TXTSubtitleFormat::ReadFile(AssFile *target, agi::fs::path const& filename,
 				if (pos != agi::util::strings::npos) {
 					actor = value.substr(0, pos);
 					agi::util::strings::trim_inplace(actor);
-					value.erase(0, pos + 1);
+					value.erase(0, pos + separator.size());
 				}
 			}
 		}

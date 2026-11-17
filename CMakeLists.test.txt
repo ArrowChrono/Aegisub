@@ -362,6 +362,7 @@ if(GTEST_FOUND)
         tests/tests/subtitle_fps_choice.cpp
         tests/tests/subtitle_format_microdvd.cpp
         tests/tests/subtitle_format_ttxt.cpp
+        tests/tests/subtitle_format_txt.cpp
         tests/tests/subtitle_grid_query_service.cpp
         tests/tests/subtitle_edit_ops.cpp
         tests/tests/override_position.cpp
@@ -423,7 +424,6 @@ if(GTEST_FOUND)
         tests/support/main.cpp
         tests/support/font_family_catalog_platform_stub.cpp
         tests/support/src_config_stubs.cpp
-        tests/support/subtitle_format_test_stubs.cpp
         tests/support/util.cpp
         src/subtitle_format_ttxt.cpp
         src/subtitle_fps_choice.cpp
