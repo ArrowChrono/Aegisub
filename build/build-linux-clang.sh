@@ -46,7 +46,7 @@ if [[ "$mode" == configure || "$mode" == all ]]; then
         -DCMAKE_C_COMPILER="${CC:-clang}" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \
         -DCMAKE_BUILD_TYPE="$build_type" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=OFF \
-        -DCLANG_TIDY:FILEPATH= -DCMAKE_CXX_CLANG_TIDY= \
+        -DCMAKE_CXX_CLANG_TIDY= \
         -DWITH_AVISYNTH=OFF -DWITH_LIBPLACEBO=OFF -DWITH_TEST=ON -DBUILD_TESTING=ON \
         "${stringzilla_args[@]}" "$@"
 fi

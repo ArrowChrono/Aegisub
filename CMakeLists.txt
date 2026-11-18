@@ -48,18 +48,20 @@ endif()
 
 # ------------------------------------------------------------------
 # Code quality: clang-tidy static analysis
-# Automatically enabled when clang-tidy is found in PATH.
-# Install LLVM/clang-tools and ensure clang-tidy is on PATH.
+# Auto-detect clang-tidy when CMAKE_CXX_CLANG_TIDY is unset.
+# An explicit empty value disables linting.
 # ------------------------------------------------------------------
-find_program(CLANG_TIDY clang-tidy)
-if(CLANG_TIDY)
-    if(NOT TARGET clang-tidy-custom-target)
-        add_custom_target(clang-tidy-custom-target)
+if(NOT DEFINED CMAKE_CXX_CLANG_TIDY)
+    find_program(CLANG_TIDY clang-tidy)
+    if(CLANG_TIDY)
+        if(NOT TARGET clang-tidy-custom-target)
+            add_custom_target(clang-tidy-custom-target)
+        endif()
+        set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY}"
+            --extra-arg=-Wno-unknown-warning-option
+        )
+        message(STATUS "Found clang-tidy: ${CLANG_TIDY}")
     endif()
-    set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY}"
-        --extra-arg=-Wno-unknown-warning-option
-    )
-    message(STATUS "Found clang-tidy: ${CLANG_TIDY}")
 endif()
 
 ## Build bundled LuaJIT with aegisub specific patches

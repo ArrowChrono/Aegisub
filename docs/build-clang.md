@@ -93,9 +93,8 @@ Additional configure options can be passed from PowerShell:
 - Skia drawing, audio and grid enabled.
 - Release IPO/LTO disabled. CMake checks Release IPO even when configuring
   another build type; it must not become an accidental toolchain prerequisite.
-- `CLANG_TIDY` and `CMAKE_CXX_CLANG_TIDY` empty. This project automatically enables
-  tidy when `CLANG_TIDY` is found, so clearing only `CMAKE_CXX_CLANG_TIDY` is not
-  sufficient. Use a separate analysis directory for static analysis.
+- `CMAKE_CXX_CLANG_TIDY` is set to an empty value to disable automatic linting.
+  Use a separate build directory for static analysis.
 - No `/MP`; Ninja owns compilation parallelism. `CMAKE_EXPORT_COMPILE_COMMANDS`
   is now enabled for inspection and separate clang-tidy runs.
 - `CMAKE_NINJA_CMCLDEPS_RC=0` and the direct `rc.exe` rule are applied to both
@@ -257,7 +256,7 @@ cmake -S . -B build-dir-linux-clang -G Ninja \
     -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWITH_TEST=ON -DBUILD_TESTING=ON \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=OFF \
-    -DCLANG_TIDY:FILEPATH= -DCMAKE_CXX_CLANG_TIDY= \
+    -DCMAKE_CXX_CLANG_TIDY= \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DSTRINGZILLA_INCLUDE_DIRS="$PWD/include" \
     -DWITH_AVISYNTH=OFF -DWITH_LIBPLACEBO=OFF \
