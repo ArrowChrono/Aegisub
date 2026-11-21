@@ -5657,11 +5657,11 @@ msgstr "双向"
 
 #: ../src/dialog_motion_track.cpp:142
 msgid "Forward"
-msgstr "向前"
+msgstr "前进"
 
 #: ../src/dialog_motion_track.cpp:143
 msgid "Backward"
-msgstr "向后"
+msgstr "后退"
 
 #: ../src/dialog_motion_track.cpp:149
 msgid "Model"
@@ -5715,7 +5715,7 @@ msgstr "紧凑误差（1/100 视频像素）"
 
 #: ../src/dialog_motion_track.cpp:199
 msgid "Position decimals"
-msgstr "位置小数位"
+msgstr "小数点后位数"
 
 #: ../src/dialog_motion_track.cpp:207
 msgid "Smooth (frames)"
