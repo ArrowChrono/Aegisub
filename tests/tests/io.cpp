@@ -21,6 +21,7 @@
 #include <libaegisub/fs.h>
 #include <libaegisub/io.h>
 #include <libaegisub/scope_exit.h>
+#include <libaegisub/scoped_ptr.h>
 #include <libaegisub/util.h>
 
 #include <algorithm>
@@ -419,6 +420,35 @@ TEST(lagi_io, temp_file_mapping_writes_and_removes_long_windows_paths) {
 		});
 		EXPECT_FALSE(std::filesystem::exists(native_target));
 	}
+}
+
+TEST(lagi_io, temp_file_mapping_unlinks_long_path_with_shared_reader) {
+	LongWindowsTestDirectory directory;
+	auto const absolute_target = directory.Target(300, ".tmp");
+	auto const native_target = std::filesystem::path(L"\\\\?\\" + absolute_target.native());
+	std::string const contents = "temporary mapping contents";
+	agi::scoped_holder<HANDLE, decltype(&CloseHandle)> reader(nullptr, CloseHandle);
+	{
+		agi::temp_file_mapping mapping(absolute_target, contents.size());
+		std::ranges::copy(contents, mapping.write(0, contents.size()));
+		ASSERT_EQ(contents, std::string(mapping.read(0, contents.size()), contents.size()));
+
+		auto const handle = CreateFileW(native_target.c_str(), GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+		ASSERT_NE(INVALID_HANDLE_VALUE, handle) << GetLastError();
+		reader = handle;
+		DWORD volume_flags = 0;
+		ASSERT_TRUE(GetVolumeInformationByHandleW(reader, nullptr, 0, nullptr, nullptr, &volume_flags, nullptr, 0)) << GetLastError();
+		if (!(volume_flags & FILE_SUPPORTS_POSIX_UNLINK_RENAME))
+			GTEST_SKIP() << "The test volume does not support POSIX unlink";
+	}
+
+	EXPECT_NO_THROW({ EXPECT_FALSE(std::filesystem::exists(native_target)); });
+	std::string readback(contents.size(), '\0');
+	DWORD read = 0;
+	ASSERT_TRUE(ReadFile(reader, readback.data(), static_cast<DWORD>(readback.size()), &read, nullptr)) << GetLastError();
+	EXPECT_EQ(contents.size(), read);
+	EXPECT_EQ(contents, readback);
 }
 
 TEST(lagi_io, copy_long_windows_paths_preserves_bytes_and_overwrites) {

@@ -19,6 +19,7 @@
 #include "libaegisub/fs.h"
 #include "libaegisub/fs_native.h"
 #include "libaegisub/make_unique.h"
+#include "libaegisub/scope_exit.h"
 #include "libaegisub/util.h"
 
 #include <filesystem>
@@ -85,7 +86,7 @@ file_mapping::file_mapping(fs::path const& filename, bool temporary)
 	if (ec)
 		throw fs::FileSystemUnknownError(ec.message());
 	handle = CreateFileW(native.c_str(),
-						 temporary ? read_write : read_only,
+						 temporary ? read_write | DELETE : read_only,
 						 temporary ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : FILE_SHARE_READ,
 						 nullptr,
 						 temporary ? OPEN_ALWAYS : OPEN_EXISTING,
@@ -101,6 +102,18 @@ file_mapping::file_mapping(fs::path const& filename, bool temporary)
 			default:
 				throw fs::FileSystemUnknownError(util::ErrorString(error));
 		}
+	}
+	if (temporary) {
+		auto close_on_failure = make_scope_exit([this] { ipcdetail::close_file(handle); });
+		// Unlink when our last handle closes, even if an independent open still uses the file.
+		FILE_DISPOSITION_INFO_EX disposition{FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_ON_CLOSE};
+		if (!SetFileInformationByHandle(handle, FileDispositionInfoEx, &disposition, sizeof(disposition))) {
+			auto const error = GetLastError();
+			// The original delete-on-close flag covers older Windows versions and filesystems.
+			if (error != ERROR_INVALID_PARAMETER && error != ERROR_INVALID_FUNCTION && error != ERROR_NOT_SUPPORTED)
+				throw fs::FileSystemUnknownError("Could not set temporary file disposition. " + util::ErrorString(error));
+		}
+		close_on_failure.release();
 	}
 #else
 : handle([&filename, temporary] {
