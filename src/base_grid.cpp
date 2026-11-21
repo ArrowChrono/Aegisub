@@ -132,9 +132,9 @@ BaseGrid::BaseGrid(wxWindow* parent, agi::Context *context)
 
 	SetBackgroundStyle(wxBG_STYLE_PAINT);
 
-	for (size_t i : agi::util::range(std::min(columns_visible.size(), columns.size()))) {
-		if (!columns_visible[i])
-			columns[i]->SetVisible(false);
+	columns_visible.resize(columns.size(), true);
+	for (size_t i : agi::util::range(columns.size())) {
+		columns[i]->SetVisible(columns_visible[i]);
 	}
 
 	UpdateStyle();
@@ -352,8 +352,6 @@ void BaseGrid::OnShowColMenu(wxCommandEvent &event) {
 	if (!row_borrows_ready) return;
 	int item = event.GetId() - MENU_SHOW_COL;
 	bool new_value = !columns_visible[item];
-
-	columns_visible.resize(columns.size(), true);
 	columns_visible[item] = new_value;
 	OPT_SET("Subtitle/Grid/Column")->SetListBool(columns_visible);
 	columns[item]->SetVisible(new_value);
