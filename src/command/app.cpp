@@ -418,12 +418,20 @@ struct app_character_markers_show_all final : public Command {
 	}
 };
 
-#ifdef __WXMAC__
+bool CanControlProjectWindow(FrameMain const *frame) {
+	return frame && frame->IsShown() && frame->IsEnabled() && !frame->IsIconized() && !frame->IsBeingDeleted();
+}
+
 struct app_minimize final : public Command {
 	CMD_NAME("app/minimize")
 	STR_MENU("Minimize")
 	STR_DISP("Minimize")
 	STR_HELP("Minimize the active window")
+	CMD_TYPE(COMMAND_VALIDATE)
+
+	bool Validate(const agi::Context *c) override {
+		return c && CanControlProjectWindow(c->GetUI().frame);
+	}
 
 	void operator()(agi::Context *c) override {
 		c->GetUI().frame->Iconize();
@@ -432,9 +440,19 @@ struct app_minimize final : public Command {
 
 struct app_maximize final : public Command {
 	CMD_NAME("app/maximize")
+#ifdef __WXMAC__
 	STR_MENU("Zoom")
 	STR_DISP("Zoom")
+#else
+	STR_MENU("Maximize")
+	STR_DISP("Maximize")
+#endif
 	STR_HELP("Maximize the active window")
+	CMD_TYPE(COMMAND_VALIDATE)
+
+	bool Validate(const agi::Context *c) override {
+		return c && CanControlProjectWindow(c->GetUI().frame);
+	}
 
 	void operator()(agi::Context *c) override {
 		auto frame = c->GetUI().frame;
@@ -447,12 +465,27 @@ struct app_bring_to_front final : public Command {
 	STR_MENU("Bring All to Front")
 	STR_DISP("Bring All to Front")
 	STR_HELP("Bring forward all open documents to the front")
+	CMD_TYPE(COMMAND_VALIDATE)
 
-	void operator()(agi::Context *) override {
+	bool Validate(const agi::Context *c) override {
+		return c && CanControlProjectWindow(c->GetUI().frame);
+	}
+
+	void operator()([[maybe_unused]] agi::Context *c) override {
+#ifdef __WXMAC__
 		osx::bring_to_front();
+#else
+		auto *active = c->GetUI().frame;
+		for (auto *window : wxTopLevelWindows) {
+			auto *frame = dynamic_cast<FrameMain *>(window);
+			if (frame != active && CanControlProjectWindow(frame))
+				frame->Raise();
+		}
+		// Raise the invoking document last so another project does not take its focus.
+		active->Raise();
+#endif
 	}
 };
-#endif
 
 }
 
@@ -477,11 +510,9 @@ namespace cmd {
 		reg(agi::make_unique<app_character_markers_control>());
 		reg(agi::make_unique<app_character_markers_invisible>());
 		reg(agi::make_unique<app_character_markers_show_all>());
-#ifdef __WXMAC__
 		reg(agi::make_unique<app_minimize>());
 		reg(agi::make_unique<app_maximize>());
 		reg(agi::make_unique<app_bring_to_front>());
-#endif
 #ifdef WITH_UPDATE_CHECKER
 		reg(agi::make_unique<app_updates>());
 #endif

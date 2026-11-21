@@ -24,6 +24,22 @@
     {
       "action": "command",
       "id": "app/display/subs"
+    },
+    {
+      "action": "command",
+      "id": "app/maximize"
+    },
+    {
+      "action": "command",
+      "id": "app/maximize"
+    },
+    {
+      "action": "command",
+      "id": "app/bring_to_front"
+    },
+    {
+      "action": "command",
+      "id": "app/minimize"
     }
   ]
 }
