@@ -243,6 +243,12 @@ class GuiTestWxBoundary final : public wxEventFilter {
 		state["redo_description"] = core.subsController->GetRedoDescription();
 		state["active_id"] = static_cast<int64_t>(active_line ? active_line->Id : -1);
 		state["video_frame"] = static_cast<int64_t>(core.videoController->GetFrameN());
+		if (auto const *edit_box = context.GetUI().subsEditBox) {
+			if (auto const caret = edit_box->GetEditControlCaret()) {
+				state["editor_selection_start"] = caret->first;
+				state["editor_selection_end"] = caret->second;
+			}
+		}
 		json::Array selected_ids, rows, groups;
 		for (auto const *line : selected)
 			selected_ids.emplace_back(static_cast<int64_t>(line->Id));

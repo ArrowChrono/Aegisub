@@ -559,7 +559,7 @@ DialogStyleEditor::DialogStyleEditor(wxWindow *parent, AssStyle *style, agi::Con
 			auto const next = FontFamilyCatalog::JoinVerticalPrefix(
 				BoxVertical->IsChecked(), bare);
 			if (next != current && !bare.empty())
-				FontName->ChangeValue(to_wx(next));
+				FontName->SetExplicitSelection(to_wx(next), FontName->SelectedFamilyId().value_or(0));
 			CommitFontFamilyChange();
 		});
 		SyncVerticalControl();
@@ -813,7 +813,7 @@ void DialogStyleEditor::CommitFontFamilyChange() {
 		auto bare = FontFamilyCatalog::SplitVerticalPrefix(current).second;
 		auto const next = FontFamilyCatalog::JoinVerticalPrefix(true, bare);
 		if (next != current && !bare.empty()) {
-			FontName->ChangeValue(to_wx(next));
+			FontName->SetExplicitSelection(to_wx(next), current_id);
 			current = next;
 		}
 	}

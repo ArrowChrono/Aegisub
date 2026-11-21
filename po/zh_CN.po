@@ -4606,6 +4606,86 @@ msgstr "全部复制"
 msgid "Selected Font Information"
 msgstr "所选字体信息"
 
+#: ../src/dialog_font_face.cpp
+msgid "Show only favorite fonts"
+msgstr "仅显示收藏字体"
+
+#: ../src/dialog_font_face.cpp
+msgid "Scale and Spacing"
+msgstr "缩放和间距"
+
+#: ../src/dialog_font_face.cpp
+msgid "Horizontal scale"
+msgstr "水平缩放"
+
+#: ../src/dialog_font_face.cpp
+msgid "Vertical scale"
+msgstr "垂直缩放"
+
+#: ../src/dialog_font_face.cpp
+msgid "Character spacing"
+msgstr "字间距"
+
+#: ../src/dialog_font_face.cpp
+msgid "Quick Font Selection"
+msgstr "快速选字"
+
+#: ../src/dialog_font_face.cpp
+msgid "Recent Fonts"
+msgstr "最近使用"
+
+#: ../src/dialog_font_face.cpp
+msgid "Favorite Fonts"
+msgstr "收藏字体"
+
+#: ../src/dialog_font_face.cpp
+msgid "Add to Favorites"
+msgstr "添加到收藏"
+
+#: ../src/dialog_font_face.cpp
+msgid "Remove from Favorites"
+msgstr "取消收藏"
+
+#: ../src/dialog_font_face.cpp
+msgid "Add to Favorites by name"
+msgstr "按名称收藏"
+
+#: ../src/dialog_font_face.cpp
+msgid "Remove literal name from Favorites"
+msgstr "按名称取消收藏"
+
+#: ../src/dialog_font_face.cpp
+msgid "Clear Recent Fonts"
+msgstr "清空最近字体"
+
+#: ../src/dialog_font_face.cpp
+msgid "No favorite fonts"
+msgstr "暂无收藏字体"
+
+#: ../src/dialog_font_face.cpp
+msgid "No recent fonts"
+msgstr "暂无最近使用的字体"
+
+#: ../src/dialog_font_face.cpp
+#, c-format
+msgid "Could not save font lists: %s"
+msgstr "无法保存字体列表：%s"
+
+#: ../src/dialog_font_face.cpp
+#, c-format
+msgid "Horizontal scale cannot be edited for %d selected line(s) because it is animated in an earlier block. Edit it in the block with the animation."
+msgstr "有 %d 行字幕的水平缩放使用了前面的覆盖块中的动画。请到动画所在的覆盖块编辑。"
+
+#: ../src/dialog_font_face.cpp
+#, c-format
+msgid "Vertical scale cannot be edited for %d selected line(s) because it is animated in an earlier block. Edit it in the block with the animation."
+msgstr "有 %d 行字幕的垂直缩放使用了前面的覆盖块中的动画。请到动画所在的覆盖块编辑。"
+
+#: ../src/dialog_font_face.cpp
+#, c-format
+msgid "Character spacing cannot be edited for %d selected line(s) because it is animated in an earlier block. Edit it in the block with the animation."
+msgstr "有 %d 行字幕的字间距使用了前面的覆盖块中的动画。请到动画所在的覆盖块编辑。"
+
 #: ../src/dialog_font_portability_audit.cpp:61
 msgid "No match"
 msgstr "无匹配"
@@ -8167,6 +8247,14 @@ msgstr "撤销的最大次数"
 #: ../src/preferences.cpp:438
 msgid "Recently Used Lists"
 msgstr "最近使用过的列表"
+
+#: ../src/preferences.cpp
+msgid "Fonts"
+msgstr "字体"
+
+#: ../src/preferences.cpp
+msgid "Set to 0 to clear the recent fonts list and pause recording."
+msgstr "设为 0 可清空最近字体列表并暂停记录。"
 
 #: ../src/preferences.cpp:440
 msgid "Find/Replace"

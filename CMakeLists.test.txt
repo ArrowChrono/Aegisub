@@ -124,9 +124,11 @@ if(GTEST_FOUND)
         tests/tests/dispatch.cpp
         tests/tests/export_framerate_transform.cpp
         tests/tests/ass_font_state.cpp
+        tests/tests/font_face_selection.cpp
         tests/tests/font_family_catalog.cpp
         tests/tests/font_family_catalog_cache.cpp
         tests/tests/font_name_combo_box.cpp
+        tests/tests/font_quick_lists.cpp
         tests/tests/font_name_normalization.cpp
         tests/tests/font_portability_audit.cpp
         tests/tests/font_matching_libass.cpp
@@ -188,6 +190,7 @@ if(GTEST_FOUND)
         src/core_host_context.cpp
         src/export_framerate_transform.cpp
         src/font_face_selection.cpp
+        src/font_quick_lists.cpp
         src/font_family_catalog.cpp
         src/font_family_catalog_source.cpp
         src/font_family_selection_model.cpp

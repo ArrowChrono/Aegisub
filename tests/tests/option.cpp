@@ -20,6 +20,7 @@
 #include <util.h>
 
 #include <fstream>
+#include <sstream>
 
 static const char default_opt[] = "{\"Valid\" : \"This is valid\"}";
 static const char all_types[] = R"raw({
@@ -211,9 +212,69 @@ TEST_F(lagi_option, user_int_coerces_onto_default_double) {
 	EXPECT_DOUBLE_EQ(3.0, opt.Get("step")->GetDouble());
 }
 
-struct empty_arr_options : public agi::Options {
-	empty_arr_options() : agi::Options("", "{ \"arr\" : [] }", agi::Options::FLUSH_SKIP) { }
-};
+TEST_F(lagi_option, empty_lists_survive_a_disk_round_trip) {
+	const auto path = "data/options/empty-lists-round-trip.json";
+	{
+		agi::Options opt(path, all_types, agi::Options::FLUSH_SKIP);
+		opt.Get("Array/String")->SetListString({});
+		opt.Get("Array/Integer")->SetListInt({});
+		opt.Get("Array/Double")->SetListDouble({});
+		opt.Get("Array/Boolean")->SetListBool({});
+		opt.Get("Array/Color")->SetListColor({});
+		opt.Flush();
+	}
+
+	agi::Options opt(path, all_types, agi::Options::FLUSH_SKIP);
+	opt.ConfigUser();
+	EXPECT_TRUE(opt.Get("Array/String")->GetListString().empty());
+	EXPECT_TRUE(opt.Get("Array/Integer")->GetListInt().empty());
+	EXPECT_TRUE(opt.Get("Array/Double")->GetListDouble().empty());
+	EXPECT_TRUE(opt.Get("Array/Boolean")->GetListBool().empty());
+	EXPECT_TRUE(opt.Get("Array/Color")->GetListColor().empty());
+	agi::fs::Remove(path);
+}
+
+TEST_F(lagi_option, empty_arrays_require_a_user_list_with_a_known_type) {
+	const char path[] = "data/options/empty-arrays.json";
+	const char empty[] = R"({"Valid":[],"Unknown":[]})";
+	EXPECT_THROW(agi::Options("", empty, agi::Options::FLUSH_SKIP), agi::Exception);
+	{
+		std::ofstream out(path);
+		ASSERT_TRUE(out);
+		out << empty;
+	}
+
+	agi::Options opt(path, default_opt, agi::Options::FLUSH_SKIP);
+	std::istringstream next(empty);
+	EXPECT_THROW(opt.ConfigNext(next), agi::Exception);
+	opt.ConfigUser();
+	EXPECT_EQ("This is valid", opt.Get("Valid")->GetString());
+	EXPECT_THROW(opt.Get("Unknown"), agi::InternalError);
+	agi::fs::Remove(path);
+}
+
+TEST_F(lagi_option, commands_load_an_empty_list_and_migrate_a_legacy_string) {
+	const char path[] = "data/options/empty-commands.json";
+	const char key[] = "Subtitle/Edit Box/Command Buttons/Commands";
+	const char defaults[] = R"({"Subtitle":{"Edit Box":{"Command Buttons":{"Commands":[{"string":"edit/font"}]}}}})";
+	{
+		std::ofstream out(path);
+		ASSERT_TRUE(out);
+		out << R"({"Subtitle":{"Edit Box":{"Command Buttons":{"Commands":"edit/font,edit/line/copy"}}}})";
+	}
+	{
+		agi::Options opt(path, defaults, agi::Options::FLUSH_SKIP);
+		opt.ConfigUser();
+		EXPECT_EQ((std::vector<std::string>{"edit/font", "edit/line/copy"}), opt.Get(key)->GetListString());
+		opt.Get(key)->SetListString({});
+		opt.Flush();
+	}
+
+	agi::Options opt(path, defaults, agi::Options::FLUSH_SKIP);
+	opt.ConfigUser();
+	EXPECT_TRUE(opt.Get(key)->GetListString().empty());
+	agi::fs::Remove(path);
+}
 
 #define CHECK_TYPE(str, type) \
 	do { \

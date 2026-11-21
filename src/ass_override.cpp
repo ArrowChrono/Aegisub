@@ -448,11 +448,11 @@ void AssDialogueBlockOverride::AddTag(std::string const& tag) {
 }
 
 std::string AssDialogueBlockOverride::GetText() {
-	text = "{";
+	std::string serialized = "{";
 	for (auto const& tag : Tags)
-		text += static_cast<std::string>(tag);
-	text += "}";
-	return text;
+		serialized += static_cast<std::string>(tag);
+	serialized += "}";
+	return serialized;
 }
 
 void AssDialogueBlockOverride::ProcessParameters(ProcessParametersCallback callback, void *userData) {

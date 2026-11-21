@@ -457,7 +457,10 @@
 			"Prefer Localized Family Names" : true,
 			"Use Contains Matching" : false,
 			"Auto Expand List On Input" : false,
-			"Compact Vertical Font List" : false
+			"Compact Vertical Font List" : false,
+			"Recent" : [{"string": ""}],
+			"Recent Limit" : 16,
+			"Favorites" : [{"string": ""}]
 		},
 		"Edit Box" : {
 			"Character Markers" : {

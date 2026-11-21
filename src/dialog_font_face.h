@@ -1,9 +1,12 @@
 #pragma once
 
-#include <functional>
+#include "font_face_selection.h"
+
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 
 struct FontFamilySelectionModel;
 class wxWindow;
@@ -14,6 +17,7 @@ struct FontFaceDialogSelection {
 	/// duplicate display aliases without serializing an implementation token.
 	std::optional<std::uint32_t> selected_family_id;
 	int point_size = 10;
+	FontGeometry geometry;
 	int charset = 1;
 	/// Effective ASS/GDI weight. Values other than 400/700 are retained until
 	/// the user explicitly changes the variant controls.
@@ -24,13 +28,23 @@ struct FontFaceDialogSelection {
 	bool has_explicit_weight = false;
 	bool has_explicit_italic = false;
 	bool face_modified = false;
+	bool point_size_modified = false;
+	bool underline_modified = false;
+	bool scale_x_modified = false;
+	bool scale_y_modified = false;
+	bool spacing_modified = false;
 	bool variant_modified = false;
 	bool weight_modified = false;
 	bool italic_modified = false;
 	bool implicit_variant_pinned = false;
 	bool allow_replace_explicit = false;
 	bool from_native_dialog = false;
+};
 
+struct FontAnimatedLineCounts {
+	int scale_x = 0;
+	int scale_y = 0;
+	int spacing = 0;
 };
 
 /// Callbacks that let the dialog drive a live, revertible edit of the document
@@ -47,14 +61,15 @@ struct FontFaceDialogHooks {
 	/// implementation may commit and re-render without extra throttling.
 	std::function<void(FontFaceDialogSelection const&)> on_preview;
 
-	/// Make the current preview permanent (OK). Any deferred preview
-	/// is flushed first; this is where the caller creates the single undo entry.
+	/// Apply the finalized controls and create the single undo entry.
 	std::function<void(FontFaceDialogSelection const&)> on_commit;
 
 	/// Discard everything previewed since the last `on_commit`. Only called
 	/// when at least one `on_preview` was emitted.
 	std::function<void()> on_revert;
 };
+
+void RecordRecentFont(wxWindow *parent, std::string_view name);
 
 /// Show Aegisub's custom selector using localized or English catalog names as
 /// configured. If the catalog is empty, the selector uses enumerated fallback
@@ -68,4 +83,5 @@ std::optional<FontFaceDialogSelection> ShowFontFaceDialog(
 	wxWindow *parent,
 	FontFaceDialogSelection const& initial,
 	FontFamilySelectionModel const& font_model,
-	FontFaceDialogHooks hooks = {});
+	FontFaceDialogHooks hooks = {},
+	FontAnimatedLineCounts animated = {});

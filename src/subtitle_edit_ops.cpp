@@ -1089,6 +1089,13 @@ AssStyle const *ParsedLine::reset_target(
 	if (!tag.Params.empty() && !tag.Params.front().omitted &&
 		!tag.Params.front().empty)
 		name = tag.Params.front().Get<std::string>();
+	return reset_target(std::string_view{name}, event_style, resolve_reset);
+}
+
+AssStyle const *ParsedLine::reset_target(
+	std::string_view name,
+	AssStyle const& event_style,
+	ResetStyleResolver const& resolve_reset) {
 	if (name.empty() || !resolve_reset)
 		return &event_style;
 	if (auto const *rs = resolve_reset(name))
@@ -1156,13 +1163,8 @@ int ParsedLine::block_at_pos(int pos) const {
 	return n - in_block;
 }
 
-int ParsedLine::set_tag(
-	std::string const& tag,
-	std::string const& value,
-	int norm_pos,
-	int orig_pos,
-	int *written_block) {
-	int blockn = block_at_pos(norm_pos);
+ParsedLine::TagWriteTarget ParsedLine::tag_write_target(int norm_pos, int orig_pos) const {
+	int blockn = std::min(block_at_pos(norm_pos), static_cast<int>(blocks.size()) - 1);
 
 	if (orig_pos >= 0 && !text_rewritten) {
 		int const raw_blockn = block_for_read(orig_pos);
@@ -1173,33 +1175,34 @@ int ParsedLine::set_tag(
 			blockn = raw_blockn;
 	}
 
-	AssDialogueBlockPlain *plain = nullptr;
-	AssDialogueBlockOverride *ovr = nullptr;
-	while (blockn >= 0 && !plain && !ovr) {
-		AssDialogueBlock *block = blocks[blockn].get();
-		switch (block->GetType()) {
+	for (; blockn >= 0; --blockn) {
+		switch (blocks[blockn]->GetType()) {
 			case AssBlockType::PLAIN:
-				plain = static_cast<AssDialogueBlockPlain *>(block);
-				break;
+			case AssBlockType::OVERRIDE:
+				return {.block = blockn, .raw_pos = orig_pos};
 			case AssBlockType::DRAWING:
-				--blockn;
 				break;
 			case AssBlockType::COMMENT:
-				--blockn;
 				orig_pos = line->Text.get().rfind('{', orig_pos);
-				break;
-			case AssBlockType::OVERRIDE:
-				ovr = static_cast<AssDialogueBlockOverride *>(block);
 				break;
 		}
 	}
+	return {.block = -1, .raw_pos = 0};
+}
 
-	if (blockn < 0)
-		orig_pos = 0;
-
+int ParsedLine::set_tag(
+	std::string const& tag,
+	std::string const& value,
+	int norm_pos,
+	int orig_pos,
+	int *written_block) {
+	auto const target = tag_write_target(norm_pos, orig_pos);
+	int const blockn = target.block;
+	orig_pos = target.raw_pos;
+	auto *ovr = blockn >= 0 ? dynamic_cast<AssDialogueBlockOverride *>(blocks[blockn].get()) : nullptr;
 	std::string insert(tag + value);
 	int shift = insert.size();
-	if (plain || blockn < 0) {
+	if (!ovr) {
 		std::string new_text = line->Text.get();
 		std::string wrapped_insert;
 		wrapped_insert.push_back('{');

@@ -106,13 +106,13 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
             phase = "font-accept-preview41"; SetSize(41, @"中😀{\b1}{\i1\fs41}éZ");
             phase = "font-accept"; CloseDialog("OK");
             Wait(() => ActiveText() == EventText(Font[0]), "Accept preserves only the final literal size preview");
-            AssertRange(16, 16); Capture("font-result", main); AssertAss("font", Font);
+            AssertRange(11, 11); Capture("font-result", main); AssertAss("font", Font);
             phase = "font-undo"; History("Undo set font");
             Wait(() => ActiveText() == EventText(Seed[0]), "One Undo removes the accepted operation, not just its last preview");
             AssertRange(11, 11); AssertAss("font-undo", Seed);
             phase = "font-redo"; History("Redo set font");
             Wait(() => ActiveText() == EventText(Font[0]), "One Redo restores final size 41 on the original cross-line anchors");
-            AssertRange(16, 16); AssertAss("font-redo", Font);
+            AssertRange(11, 11); AssertAss("font-redo", Font);
             Capture("saved-final", main); NormalExit(); Result(true); return 0;
         }
         catch (Exception error)
@@ -179,10 +179,10 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
         Action("native-font-size-input", input); Native.ReplaceText(size, input);
         try
         {
-            Wait(() => Text(size) == input && ActiveText() == expectedActive && ReadRange() == (16, 16),
-                "Size input, literal live preview and original-anchor native caret [16,16] all match");
+            Wait(() => Text(size) == input && ActiveText() == expectedActive && ReadRange() == (11, 11),
+                "Size preview keeps the native caret [11,11] inside the original tag, before the appended size tag");
             Require(ActiveText() == expectedActive, "Live preview equals the independent literal text, with no duplicate or displaced tag");
-            AssertRange(16, 16); ExpectFont("Arial");
+            AssertRange(11, 11); ExpectFont("Arial");
             Capture(phase + "-input", dialog); Capture(phase + "-main", main);
         }
         finally

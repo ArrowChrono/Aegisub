@@ -2,6 +2,12 @@
 
 #include "../../src/font_name_combo_box.h"
 
+#ifdef __WXMSW__
+#include <wx/app.h>
+#include <wx/frame.h>
+#include <wx/init.h>
+#endif
+
 namespace {
 
 std::vector<std::pair<wxString, FontFamilyId>> SampleChoices() {
@@ -88,6 +94,44 @@ TEST(font_name_combo_box, contains_match_works_for_enumerator_fallback_zero_ids)
 	EXPECT_EQ(0u, match->index);
 	EXPECT_EQ(0, match->family_id);
 }
+
+#ifdef __WXMSW__
+TEST(font_name_combo_box, replacing_choices_keeps_an_explicit_family_and_invalidates_deferred_matching) {
+	auto const initialize = wxApp::GetInitializerFunction();
+	wxApp::SetInitializerFunction([]() -> wxAppConsole * { return new wxApp; });
+	auto restore_initializer = agi::make_scope_exit([&] { wxApp::SetInitializerFunction(initialize); });
+	wxInitializer wx;
+	ASSERT_TRUE(wx.IsOk());
+	wxFrame parent(nullptr, wxID_ANY, wxS(""));
+	FontNameComboBox combo(&parent, wxS("Shared"), wxDefaultSize,
+						   {{.label = "Shared", .family_id = 1}, {.label = "Shared", .family_id = 2}, {.label = "Prior", .family_id = 3}}, true, true);
+	int notifications = 0;
+	combo.Bind(wxEVT_TEXT, [&](wxCommandEvent&) { ++notifications; });
+	combo.Bind(wxEVT_COMBOBOX, [&](wxCommandEvent&) { ++notifications; });
+
+	combo.SetExplicitSelection(wxS("Shared"), 2);
+	combo.SetSelection(1, 3);
+	combo.SetChoices({{.label = "Shared", .family_id = 1}});
+	long start = 0, end = 0;
+	combo.GetSelection(&start, &end);
+	EXPECT_EQ(1, start);
+	EXPECT_EQ(3, end);
+	EXPECT_EQ(2u, combo.SelectedFamilyId());
+	EXPECT_EQ(wxS("Shared"), combo.GetValue());
+	EXPECT_EQ(0, notifications);
+
+	combo.SetValue(wxS("Shared!"));
+	EXPECT_FALSE(combo.SelectedFamilyId());
+	combo.SetValue(wxS("Shared"));
+	EXPECT_EQ(1u, combo.SelectedFamilyId());
+	EXPECT_GT(notifications, 0);
+	combo.SetChoices({{.label = "Shared", .family_id = 4}});
+	combo.SetExplicitSelection(wxS("Chosen outside filter"), 2);
+	wxTheApp->ProcessPendingEvents();
+	EXPECT_EQ(wxS("Chosen outside filter"), combo.GetValue());
+	EXPECT_EQ(2u, combo.SelectedFamilyId());
+}
+#endif
 
 TEST(font_name_combo_box, contains_match_preserves_catalog_order) {
 	std::vector<std::pair<wxString, FontFamilyId>> choices = {

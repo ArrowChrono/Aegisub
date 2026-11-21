@@ -33,6 +33,7 @@
 #include "libaegisub/string_utils.h"
 
 #include <boost/interprocess/streams/bufferstream.hpp>
+#include <algorithm>
 #include <cassert>
 #include <memory>
 
@@ -50,6 +51,7 @@ class ConfigVisitor final : public json::ConstVisitor {
 	/// Log errors rather than throwing them, for when loading user config files
 	/// (as a bad user config file shouldn't make the program fail to start)
 	bool ignore_errors;
+	std::vector<std::unique_ptr<OptionValue>> const& defaults;
 
 	void Error(const char *message) {
 		if (ignore_errors)
@@ -58,8 +60,8 @@ class ConfigVisitor final : public json::ConstVisitor {
 			throw OptionJsonValueError(message);
 	}
 
-	template<class OptionValueType>
-	void ReadArray(json::Array const& src, std::string const& array_type) {
+	template <class OptionValueType>
+	void ReadArray(json::Array const& src) {
 		typename OptionValueType::value_type arr;
 		arr.reserve(src.size());
 		for (json::Object const& obj : src)
@@ -79,11 +81,22 @@ class ConfigVisitor final : public json::ConstVisitor {
 
 	void Visit(const json::Array& array) {
 		if (array.empty()) {
-			if (ignore_errors && name == "Subtitle/Edit Box/Command Buttons/Commands") {
-				values.push_back(agi::make_unique<OptionValueListString>(name, std::vector<std::string>{}));
+			if (!ignore_errors)
+				return Error("Cannot infer the type of an empty array");
+
+			auto const existing = std::ranges::lower_bound(defaults, name, {}, &OptionValue::GetName);
+			if (existing == defaults.end() || (*existing)->GetName() != name)
 				return;
+
+			switch ((*existing)->GetType()) {
+				case OptionType::ListString: ReadArray<OptionValueListString>(array); break;
+				case OptionType::ListInt: ReadArray<OptionValueListInt>(array); break;
+				case OptionType::ListDouble: ReadArray<OptionValueListDouble>(array); break;
+				case OptionType::ListBool: ReadArray<OptionValueListBool>(array); break;
+				case OptionType::ListColor: ReadArray<OptionValueListColor>(array); break;
+				default: break;
 			}
-			return Error("Cannot infer the type of an empty array");
+			return;
 		}
 
 		json::Object const& front = array.front();
@@ -99,15 +112,15 @@ class ConfigVisitor final : public json::ConstVisitor {
 		}
 
 		if (array_type == "string")
-			ReadArray<OptionValueListString>(array, array_type);
+			ReadArray<OptionValueListString>(array);
 		else if (array_type == "int")
-			ReadArray<OptionValueListInt>(array, array_type);
+			ReadArray<OptionValueListInt>(array);
 		else if (array_type == "double")
-			ReadArray<OptionValueListDouble>(array, array_type);
+			ReadArray<OptionValueListDouble>(array);
 		else if (array_type == "bool")
-			ReadArray<OptionValueListBool>(array, array_type);
+			ReadArray<OptionValueListBool>(array);
 		else if (array_type == "color")
-			ReadArray<OptionValueListColor>(array, array_type);
+			ReadArray<OptionValueListColor>(array);
 		else
 			Error("Array type not handled");
 	}
@@ -142,7 +155,8 @@ class ConfigVisitor final : public json::ConstVisitor {
 	}
 
 public:
-	ConfigVisitor(bool ignore_errors) : ignore_errors(ignore_errors) { }
+	ConfigVisitor(bool ignore_errors, std::vector<std::unique_ptr<OptionValue>> const& defaults)
+		: ignore_errors(ignore_errors), defaults(defaults) {}
 	std::vector<std::unique_ptr<OptionValue>> Values() { return std::move(values); }
 };
 
@@ -198,8 +212,14 @@ Options::Options(agi::fs::path const& file, std::pair<const char *, size_t> defa
 }
 
 Options::~Options() {
-	if ((setting & FLUSH_SKIP) != FLUSH_SKIP)
+	if ((setting & FLUSH_SKIP) == FLUSH_SKIP)
+		return;
+	try {
 		Flush();
+	}
+	catch (fs::FileSystemError const& error) {
+		LOG_E("option/save") << error.GetMessage();
+	}
 }
 
 void Options::ConfigUser() {
@@ -224,7 +244,7 @@ void Options::LoadConfig(std::istream& stream, bool ignore_errors) {
 		return;
 	}
 
-	ConfigVisitor config_visitor(ignore_errors);
+	ConfigVisitor config_visitor(ignore_errors, values);
 	config_root.Accept(config_visitor);
 
 	auto new_values = config_visitor.Values();
@@ -324,7 +344,15 @@ void Options::Flush() const {
 		}
 	}
 
-	agi::JsonWriter::Write(obj_out, io::Save(config_file).Get());
+	io::Save file(config_file);
+	try {
+		JsonWriter::Write(obj_out, file.Get());
+		file.Close();
+	}
+	catch (...) {
+		file.Cancel();
+		throw;
+	}
 }
 
 } // namespace agi

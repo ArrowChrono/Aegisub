@@ -1037,6 +1037,7 @@ set(AEGISUB_CORE_SOURCES
     src/fontcollector_cli_encoding.cpp
     src/ass_font_state.cpp
     src/font_face_selection.cpp
+    src/font_quick_lists.cpp
     src/font_family_catalog.cpp
     src/font_family_catalog_source.cpp
     src/font_family_selection_model.cpp

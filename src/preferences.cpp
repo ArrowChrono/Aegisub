@@ -26,6 +26,7 @@
 #include "command/command.h"
 #include "compat.h"
 #include "discord_presence.h"
+#include "font_quick_lists.h"
 #include "help_button.h"
 #include "hotkey_data_view_model.h"
 #include "include/aegisub/audio_player.h"
@@ -383,8 +384,14 @@ class PropertyGridOptionBinder {
 	}
 
 	wxPGProperty *AddChoice(wxString const& label, std::vector<std::pair<std::string, std::string>> const& choices, const char *opt_name) {
-		prefs->AddChangeableOption(opt_name);
 		auto opt = OPT_GET(opt_name);
+		if (choices.empty() && opt->GetType() == agi::OptionType::String) {
+			auto *prop = grid->Append(new wxStringProperty(label, to_wx(opt_name), to_wx(opt->GetString())));
+			grid->SetPropertyReadOnly(prop);
+			return prop;
+		}
+
+		prefs->AddChangeableOption(opt_name);
 		wxPGChoices pg_choices;
 		int selected = 0;
 
@@ -438,6 +445,8 @@ void BuildGeneralPage(OptionPage *p) {
 	auto recent = p->PageSizer(_("Recently Used Lists"));
 	p->OptionAdd(recent, _("Files"), "Limits/MRU", 0, 16);
 	p->OptionAdd(recent, _("Find/Replace"), "Limits/Find Replace");
+	p->OptionAdd(recent, _("Fonts"), font_quick_lists::RecentLimitOption, 0, font_quick_lists::MaxRecent)
+		->SetToolTip(_("Set to 0 to clear the recent fonts list and pause recording."));
 
 	auto font_names = p->PageSizer(_("ASS Font Names"));
 #ifdef _WIN32
@@ -1702,9 +1711,16 @@ void Preferences::OnOK(wxCommandEvent& event) {
 }
 
 void Preferences::OnApply(wxCommandEvent&) {
+	bool const font_limit_changed = pending_changes.contains(font_quick_lists::RecentLimitOption);
 	for (auto const& change : pending_changes)
 		OPT_SET(change.first)->Set(change.second.get());
 	pending_changes.clear();
+	if (font_limit_changed) {
+		auto *recent = OPT_SET(font_quick_lists::RecentOption);
+		auto trimmed = font_quick_lists::TrimRecent(recent->GetListString(), OPT_GET(font_quick_lists::RecentLimitOption)->GetInt());
+		if (trimmed != recent->GetListString())
+			recent->SetListString(std::move(trimmed));
+	}
 
 	for (auto const& thunk : pending_callbacks)
 		thunk();

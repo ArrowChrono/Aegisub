@@ -51,9 +51,9 @@ sealed class Scenario(string[] args, PrivateDesktop isolation)
     static readonly string[] Font =
     [
         @"Dialogue: 1,0:00:10.00,0:00:12.34,Default,pick-active,11,12,13,fx-one,{\i1}A😀{\fs41}BCdé tail",
-        @"Dialogue: 2,0:00:20.00,0:00:22.56,Alternate,pick-second,21,22,23,fx-two,{\bord3\c&H010203&}é界{\fs41\i1}XY😀 tail",
+        @"Dialogue: 2,0:00:20.00,0:00:22.56,Alternate,pick-second,21,22,23,fx-two,{\bord3\c&H010203&}é界{\fs41}XY😀 tail",
         @"Comment: 9,0:00:20.10,0:00:20.50,Third,untouched-comment,91,92,93,sentinel,{\b1\1a&H77&}untouched café 😀",
-        @"Dialogue: 3,0:00:30.00,0:00:32.78,Third,pick-third,31,32,33,fx-three,{\shad2\alpha&H40&}中🙂{\fs41\b0\i1}uv café"
+        @"Dialogue: 3,0:00:30.00,0:00:32.78,Third,pick-third,31,32,33,fx-three,{\shad2\alpha&H40&}中🙂{\fs41}uv café"
     ];
     readonly string artifacts = Path.GetFullPath(args[1]);
     readonly List<object> checks = [];

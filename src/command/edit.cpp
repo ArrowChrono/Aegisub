@@ -974,113 +974,79 @@ struct edit_font final : public Command {
 		auto font_model = BuildFontFamilyCatalogUiModel();
 		const ParsedLine active(core.selectionController->GetActiveLine());
 		const int active_insertion_point = core.textSelectionController->GetInsertionPoint();
-		const size_t insertion_chars = CharacterPos(active.line->Text, core.textSelectionController->GetInsertionPoint());
+		const AssStyle default_style;
+		auto event_style = [&](AssDialogue const& line) -> AssStyle const& {
+			auto const *style = aegisub::ass_style_resolution::ResolveEventStyle(*core.ass, line.Style);
+			return style ? *style : default_style;
+		};
+		auto resolve_reset_style = [&](std::string_view name) {
+			return aegisub::ass_style_resolution::ResolveResetStyle(*core.ass, std::string(name));
+		};
 
 		struct line_font_state {
-			FontFaceDialogSelection displayed;
-			bool valid = true;
+			aegisub::ass::AssFontRequest request;
+			bool underline = false;
 		};
 
-		auto font_for_line = [&](ParsedLine const& line, int insertion_point) -> line_font_state {
-			// Use the raw caret position so a caret inside an override reads the
-			// same block that set_tag will modify.
-			const int blockn = line.block_for_read(insertion_point);
-
-			const AssStyle *style = aegisub::ass_style_resolution::ResolveEventStyle(
-				*core.ass, line.line->Style);
-			const AssStyle default_style;
-			if (!style)
-				style = &default_style;
-			aegisub::ass::AssFontStateEvaluator evaluator(
-				aegisub::ass::MakeAssFontStyleBaseline(*style));
-			auto resolve_reset = [&](std::string_view name)
-				-> std::optional<aegisub::ass::AssFontStyleBaseline> {
-				auto const *reset = aegisub::ass_style_resolution::ResolveResetStyle(
-					*core.ass, std::string(name));
-				if (!reset)
-					return std::nullopt;
-				return aegisub::ass::MakeAssFontStyleBaseline(*reset);
+		auto font_for_line = [&](ParsedLine const& line, int blockn, AssStyle const& style) -> line_font_state {
+			aegisub::ass::AssFontStateEvaluator evaluator(aegisub::ass::MakeAssFontStyleBaseline(style));
+			auto resolve_reset = [&](std::string_view name) -> std::optional<aegisub::ass::AssFontStyleBaseline> {
+				if (auto const *reset = resolve_reset_style(name))
+					return aegisub::ass::MakeAssFontStyleBaseline(*reset);
+				return std::nullopt;
 			};
-			for (int index = 0; index <= blockn && index < static_cast<int>(line.blocks.size()); ++index) {
-				if (auto const *override_block =
-						dynamic_cast<AssDialogueBlockOverride const *>(line.blocks[index].get()))
-					evaluator.ApplyBlock(*override_block, resolve_reset);
+			for (int index = 0; index <= blockn; ++index) {
+				if (auto const *overrides = dynamic_cast<AssDialogueBlockOverride const *>(line.blocks[index].get()))
+					evaluator.ApplyBlock(*overrides, resolve_reset);
 			}
-			auto const& request = evaluator.Request();
-
-			line_font_state state;
-			state.valid = request.valid;
-			state.displayed.face_name = request.family;
-			state.displayed.point_size = static_cast<int>(std::lround(request.height));
-			state.displayed.charset = request.charset;
-			state.displayed.effective_weight = request.effective_weight;
-			state.displayed.bold = request.effective_weight == 700;
-			state.displayed.italic = request.italic;
-			state.displayed.has_explicit_weight = request.has_explicit_bold;
-			state.displayed.has_explicit_italic = request.has_explicit_italic;
-
-			// Underline is part of the font selection and must reflect the state at
-			// the cursor, including any \r reset.
-			auto resolve_reset_style = [&](std::string_view name) -> AssStyle const* {
-				return aegisub::ass_style_resolution::ResolveResetStyle(*core.ass, std::string(name));
+			return {
+				.request = evaluator.Request(),
+				.underline = line.get_value_with_reset(blockn, &AssStyle::underline, "\\u", style, resolve_reset_style),
 			};
-			state.displayed.underline = line.get_value_with_reset(blockn, &AssStyle::underline, "\\u", *style, resolve_reset_style);
-			return state;
 		};
 
-		// The dialog previews onto the real document, so every pass has to start
-		// from the same text and the same caret positions. Snapshot both once:
-		// set_tag is not idempotent (it only writes a tag when the value differs
-		// from the line's current state), and reading the caret after a preview
-		// would let it drift by the length of the tags the previous pass inserted.
 		struct preview_line {
-			AssDialogue *line = nullptr;
+			AssDialogue *line;
 			std::string pristine_text;
 			std::string rendered_text;
-			int sel_start = 0;
-			int sel_end = 0;
-			int norm_sel_start = 0;
-			int norm_sel_end = 0;
-			int insertion_point = 0;
+			int sel_start;
+			int sel_end;
+			FontOverrideEdit edit;
+			line_font_state font_at_target;
 		};
 
+		// Each preview uses the same bytes and write location. Applying one field
+		// cannot move an adjacent-block anchor used by a later field.
+		const auto start = CaptureOverridePosition(active.line->Text, core.textSelectionController->GetSelectionStart());
+		const auto end = CaptureOverridePosition(active.line->Text, core.textSelectionController->GetSelectionEnd());
+		auto const& selected_set = core.selectionController->GetSelectedSet();
 		std::vector<preview_line> preview_lines;
-		{
-			auto const *active_line = core.selectionController->GetActiveLine();
-			const int sel_start = core.textSelectionController->GetSelectionStart();
-			const int sel_end = core.textSelectionController->GetSelectionEnd();
-			const size_t sel_start_chars = CharacterPos(active_line->Text, sel_start);
-			const size_t sel_end_chars = CharacterPos(active_line->Text, sel_end);
-
-			auto const& selected_set = core.selectionController->GetSelectedSet();
-			preview_lines.reserve(selected_set.size());
-			for (auto *line : selected_set) {
-				preview_line snapshot;
-				snapshot.line = line;
-				snapshot.pristine_text = line->Text.get();
-				snapshot.rendered_text = snapshot.pristine_text;
-				if (line == active_line) {
-					snapshot.sel_start = sel_start;
-					snapshot.sel_end = sel_end;
-					snapshot.norm_sel_start = NormalizePos(line->Text, sel_start);
-					snapshot.norm_sel_end = NormalizePos(line->Text, sel_end);
-					snapshot.insertion_point = active_insertion_point;
-				}
-				else {
-					auto start = RemapPosForLine(line, sel_start_chars);
-					auto end = RemapPosForLine(line, sel_end_chars);
-					snapshot.sel_start = start.raw;
-					snapshot.sel_end = end.raw;
-					snapshot.norm_sel_start = start.plain;
-					snapshot.norm_sel_end = end.plain;
-					snapshot.insertion_point = RemapPosForLine(line, insertion_chars).raw;
-				}
-				preview_lines.push_back(std::move(snapshot));
-			}
+		preview_lines.reserve(selected_set.size());
+		FontAnimatedLineCounts animated;
+		for (auto *line : selected_set) {
+			bool const is_active = line == active.line;
+			auto const selection_start = start.ForLine(*line, is_active);
+			auto const selection_end = end.ForLine(*line, is_active);
+			const ParsedLine parsed(line);
+			auto const& style = event_style(*line);
+			auto edit = CaptureFontOverrideEdit(parsed, selection_start.plain, selection_start.raw, style, resolve_reset_style);
+			animated.scale_x += edit.InheritsAnimation(FontOverrideField::ScaleX);
+			animated.scale_y += edit.InheritsAnimation(FontOverrideField::ScaleY);
+			animated.spacing += edit.InheritsAnimation(FontOverrideField::Spacing);
+			auto font = font_for_line(parsed, edit.read_block, style);
+			preview_lines.push_back({
+				.line = line,
+				.pristine_text = line->Text.get(),
+				.rendered_text = line->Text.get(),
+				.sel_start = selection_start.raw,
+				.sel_end = selection_end.raw,
+				.edit = edit,
+				.font_at_target = std::move(font),
+			});
 		}
 		auto *active_preview = [&]() -> preview_line * {
-			auto found = std::find_if(
-				preview_lines.begin(), preview_lines.end(),
+			auto found = std::ranges::find_if(
+				preview_lines,
 				[&](preview_line const& snapshot) { return snapshot.line == active.line; });
 			return found == preview_lines.end() ? nullptr : &*found;
 		}();
@@ -1089,13 +1055,6 @@ struct edit_font final : public Command {
 		// Hoisted so the resolver's GDI probe memo survives across previews.
 		std::unique_ptr<FontVariantResolver> live_resolver;
 		auto apply_selection = [&](FontFaceDialogSelection const& selected, bool permanent) {
-			// Build every result from the state at dialog entry. The temporary
-			// restore and rewrite happen on the UI thread before a refresh is sent,
-			// so no intermediate frame is visible.
-			for (auto& snapshot : preview_lines) {
-				if (snapshot.line->Text.get() != snapshot.pristine_text)
-					snapshot.line->Text = snapshot.pristine_text;
-			}
 			// Preview caret shifts update the current undo snapshot. Put its saved
 			// caret back before creating the final snapshot so Undo restores both
 			// the entry text and selection from dialog entry.
@@ -1110,12 +1069,9 @@ struct edit_font final : public Command {
 			    !allow_replace_explicit && !(!permanent && !native_override_permission)) {
 				bool has_conflict = false;
 				for (auto const& snapshot : preview_lines) {
-					ParsedLine parsed(snapshot.line);
-					auto const current = font_for_line(parsed, snapshot.insertion_point);
-					if ((current.displayed.has_explicit_weight &&
-					     current.displayed.effective_weight != selected.effective_weight) ||
-					    (current.displayed.has_explicit_italic &&
-					     current.displayed.italic != selected.italic)) {
+					auto const& current = snapshot.font_at_target.request;
+					if ((current.has_explicit_bold && current.effective_weight != selected.effective_weight) ||
+						(current.has_explicit_italic && current.italic != selected.italic)) {
 						has_conflict = true;
 						break;
 					}
@@ -1133,11 +1089,11 @@ struct edit_font final : public Command {
 			}
 
 			auto may_write_weight = [&](line_font_state const& startfont) {
-				return !startfont.displayed.has_explicit_weight || allow_replace_explicit ||
+				return !startfont.request.has_explicit_bold || allow_replace_explicit ||
 					   selected.weight_modified;
 			};
 			auto may_write_italic = [&](line_font_state const& startfont) {
-				return !startfont.displayed.has_explicit_italic || allow_replace_explicit ||
+				return !startfont.request.has_explicit_italic || allow_replace_explicit ||
 					   selected.italic_modified;
 			};
 
@@ -1147,9 +1103,13 @@ struct edit_font final : public Command {
 				bool automatic_variant_reliable = true;
 			};
 
+			bool const automatic_variant = selected.face_modified && selected.implicit_variant_pinned && !selected.variant_modified;
+			bool const full_variant = selected.variant_modified && !selected.weight_modified && !selected.italic_modified;
+			bool const change_weight = automatic_variant || full_variant || selected.weight_modified;
+			bool const change_italic = automatic_variant || full_variant || selected.italic_modified;
 			FontFamilyRecord const *selected_record = nullptr;
-			if (selected.implicit_variant_pinned && !selected.variant_modified &&
-			    font_model.catalog && !font_model.catalog->empty()) {
+			if (automatic_variant &&
+				font_model.catalog && !font_model.catalog->empty()) {
 				if (selected.selected_family_id)
 					selected_record = font_model.catalog->Find(*selected.selected_family_id);
 				if (!selected_record) {
@@ -1161,45 +1121,40 @@ struct edit_font final : public Command {
 					live_resolver = CreatePlatformFontVariantResolver();
 			}
 
-			// Family and height are fixed within one pass, so the profile only
-			// varies by charset; most selections share one, collapsing N probes
-			// into one.
-			std::map<int, std::optional<FontFamilyVariantProfile>> profile_cache;
+			// Probe the chosen family at each distinct charset and effective size.
+			std::map<std::pair<int, double>, std::optional<FontFamilyVariantProfile>> profile_cache;
 
 			auto variant_for_line = [&](line_font_state const& startfont) {
-				line_variant_selection target{
-					selected.effective_weight,
-					selected.italic,
-					true};
-				if (!selected.implicit_variant_pinned || selected.variant_modified)
+				line_variant_selection target{.weight = selected.effective_weight, .italic = selected.italic};
+				if (!automatic_variant)
 					return target;
 
-				if (!startfont.valid || !selected_record || !live_resolver) {
+				if (!startfont.request.valid || !selected_record || !live_resolver) {
 					target.automatic_variant_reliable = false;
 					return target;
 				}
 
-				auto cached = profile_cache.find(startfont.displayed.charset);
-				if (cached == profile_cache.end()) {
-					cached = profile_cache.emplace(
-						startfont.displayed.charset,
-						BuildFontVariantProfileForFamily(
-							*live_resolver, *selected_record,
-							startfont.displayed.charset,
-							static_cast<double>(selected.point_size))).first;
-				}
+				int const charset = startfont.request.charset;
+				double const size = selected.point_size_modified ? selected.point_size : startfont.request.height;
+				auto const key = std::pair{charset, size};
+				auto cached = profile_cache.find(key);
+				if (cached == profile_cache.end())
+					cached = profile_cache.emplace(key, BuildFontVariantProfileForFamily(
+															*live_resolver, *selected_record, charset, size))
+								 .first;
 				auto const& profile = cached->second;
 				if (!profile || !profile->automatic_pinning_reliable) {
 					target.automatic_variant_reliable = false;
 					return target;
 				}
 				FontVariantSelection current{
-					startfont.displayed.effective_weight,
-					startfont.displayed.italic,
-					startfont.displayed.has_explicit_weight,
-					startfont.displayed.has_explicit_italic};
+					.weight = startfont.request.effective_weight,
+					.italic = startfont.request.italic,
+					.has_explicit_bold = startfont.request.has_explicit_bold,
+					.has_explicit_italic = startfont.request.has_explicit_italic,
+				};
 				auto adjusted = AdjustFamilySelection(
-					current, *profile, {true, allow_replace_explicit});
+					current, *profile, {.family_changed = true, .allow_replace_explicit = allow_replace_explicit});
 				if (adjusted.applied_implicit_selection) {
 					target.weight = adjusted.selection.weight;
 					target.italic = adjusted.selection.italic;
@@ -1229,7 +1184,7 @@ struct edit_font final : public Command {
 			// Single pass: derive from pristine text, write the tags, then compare
 			// both with the last rendered preview and the dialog-entry state.
 			int unknown_skipped = 0;
-			int active_shift = 0;
+			std::pair<int, int> active_selection{};
 			bool has_final_changes = false;
 			std::vector<AssDialogue const *> refresh_lines;
 			std::vector<AssDialogue const *> commit_lines;
@@ -1237,41 +1192,46 @@ struct edit_font final : public Command {
 			commit_lines.reserve(preview_lines.size());
 
 			for (auto& snapshot : preview_lines) {
-				AssDialogue *line = snapshot.line;
-				ParsedLine parsed(line);
-				auto const startfont = font_for_line(parsed, snapshot.insertion_point);
+				auto *line = snapshot.line;
+				auto const& startfont = snapshot.font_at_target;
+				auto const& request = startfont.request;
 				auto const variant = variant_for_line(startfont);
 				if (!variant.automatic_variant_reliable)
 					++unknown_skipped;
 
-				int shift = 0;
-				auto do_set_tag = [&](const char *tag_name, std::string const& value) {
-					shift += parsed.set_tag(
-						tag_name, value, snapshot.norm_sel_start, snapshot.sel_start + shift);
+				FontOverrideValues values;
+				auto set = [&](FontOverrideField field, std::string value) {
+					values[FontOverrideIndex(field)] = std::move(value);
 				};
-
-				if (ShouldWriteFontFace(
-						startfont.displayed.face_name,
-						selected.face_name,
-						selected.face_modified))
-					do_set_tag("\\fn", selected.face_name);
-				if (selected.point_size != startfont.displayed.point_size)
-					do_set_tag("\\fs", std::to_string(selected.point_size));
-				if (variant.automatic_variant_reliable && may_write_weight(startfont) &&
-				    variant.weight != startfont.displayed.effective_weight) {
-					std::string value = variant.weight == 400 ? "0" :
-					                    variant.weight == 700 ? "1" :
-					                    std::to_string(variant.weight);
-					do_set_tag("\\b", value);
+				if (ShouldWriteFontFace(request.family, selected.face_name, selected.face_modified))
+					set(FontOverrideField::Face, selected.face_name);
+				if (selected.point_size_modified && selected.point_size != request.height)
+					set(FontOverrideField::Size, std::to_string(selected.point_size));
+				if (change_weight && variant.automatic_variant_reliable && may_write_weight(startfont) &&
+					variant.weight != request.effective_weight) {
+					std::string value = variant.weight == 400 ? "0" : variant.weight == 700 ? "1"
+																							: std::to_string(variant.weight);
+					set(FontOverrideField::Weight, std::move(value));
 				}
-				if (variant.automatic_variant_reliable && may_write_italic(startfont) &&
-				    variant.italic != startfont.displayed.italic)
-					do_set_tag("\\i", std::to_string(variant.italic));
-				if (selected.underline != startfont.displayed.underline)
-					do_set_tag("\\u", std::to_string(selected.underline));
+				if (change_italic && variant.automatic_variant_reliable && may_write_italic(startfont) &&
+					variant.italic != request.italic)
+					set(FontOverrideField::Italic, std::to_string(variant.italic));
+				if (selected.underline_modified && selected.underline != startfont.underline)
+					set(FontOverrideField::Underline, std::to_string(selected.underline));
 
+				auto const& geometry = snapshot.edit.geometry;
+				if (selected.scale_x_modified && animated.scale_x == 0 && selected.geometry.scale_x != geometry.scale_x)
+					set(FontOverrideField::ScaleX, AssCompat::FormatFloat(selected.geometry.scale_x));
+				if (selected.scale_y_modified && animated.scale_y == 0 && selected.geometry.scale_y != geometry.scale_y)
+					set(FontOverrideField::ScaleY, AssCompat::FormatFloat(selected.geometry.scale_y));
+				if (selected.spacing_modified && animated.spacing == 0 && selected.geometry.spacing != geometry.spacing)
+					set(FontOverrideField::Spacing, AssCompat::FormatFloat(selected.geometry.spacing));
+
+				auto result = snapshot.edit.Apply(snapshot.pristine_text, values, snapshot.sel_start, snapshot.sel_end);
+				if (line->Text.get() != result.text)
+					line->Text = std::move(result.text);
 				if (line == active.line)
-					active_shift = shift;
+					active_selection = {result.selection_start, result.selection_end};
 
 				bool const needs_refresh = line->Text.get() != snapshot.rendered_text;
 				bool const differs_from_entry = line->Text.get() != snapshot.pristine_text;
@@ -1314,29 +1274,35 @@ struct edit_font final : public Command {
 
 			if (active_preview)
 				core.textSelectionController->SetSelection(
-					active_preview->sel_start + active_shift,
-					active_preview->sel_end + active_shift);
+					active_selection.first, active_selection.second);
 
 			show_unknown_summary();
 		};
 
-		auto initial = font_for_line(active, active_insertion_point);
+		auto const active_block = active.block_for_read(active_insertion_point);
+		auto const& active_style = event_style(*active.line);
+		auto const initial_font = font_for_line(active, active_block, active_style);
+		auto const& initial_request = initial_font.request;
+		FontFaceDialogSelection initial;
+		initial.face_name = initial_request.family;
+		initial.point_size = static_cast<int>(std::lround(std::clamp(initial_request.height, 0.0, 10000.0)));
+		initial.geometry = ReadFontGeometry(active, active_block, active_style, resolve_reset_style);
+		initial.charset = initial_request.charset;
+		initial.effective_weight = initial_request.effective_weight;
+		initial.bold = initial_request.effective_weight == 700;
+		initial.italic = initial_request.italic;
+		initial.underline = initial_font.underline;
+		initial.has_explicit_weight = initial_request.has_explicit_bold;
+		initial.has_explicit_italic = initial_request.has_explicit_italic;
 
 		FontFaceDialogHooks hooks;
 		hooks.on_preview = [&](FontFaceDialogSelection const& selected) {
 			apply_selection(selected, false);
 		};
-	hooks.on_commit = [&](FontFaceDialogSelection const& selected) {
+		hooks.on_commit = [&](FontFaceDialogSelection const& selected) {
 			apply_selection(selected, true);
 		};
 		hooks.on_revert = [&] {
-			// Restore the unshifted selection while the longer preview text is
-			// still displayed; shrinking the text first would briefly leave the
-			// edit control with a range past end-of-text.
-			if (active_preview)
-				core.textSelectionController->SetSelection(
-					active_preview->sel_start, active_preview->sel_end);
-
 			std::vector<AssDialogue const *> restored;
 			restored.reserve(preview_lines.size());
 			for (auto& snapshot : preview_lines) {
@@ -1351,14 +1317,17 @@ struct edit_font final : public Command {
 					restored.size() == 1 ? const_cast<AssDialogue *>(restored.front()) : nullptr,
 					AssDialogueCommitSpan(restored.data(), restored.size()));
 			}
+			// The styled editor collapses its selection when it replaces the text.
+			if (active_preview)
+				core.textSelectionController->SetSelection(
+					active_preview->sel_start, active_preview->sel_end);
 		};
 
 		auto autosave_inhibitor = core.subsController->InhibitAutosave();
 		auto selected = ShowFontFaceDialog(
-			ui.parent, initial.displayed, font_model, std::move(hooks));
-		// OK already committed through on_commit; applying `selected` again would
-		// double-write.
-		(void)selected;
+			ui.parent, initial, font_model, std::move(hooks), animated);
+		if (selected && selected->face_modified)
+			RecordRecentFont(ui.parent, selected->face_name);
 	}
 };
 

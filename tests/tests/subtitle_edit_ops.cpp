@@ -662,6 +662,17 @@ TEST(subtitle_edit_ops, tag_bounds_select_nothing_outside_tags) {
 	EXPECT_EQ("", TagAtCaret("|"));
 }
 
+TEST(subtitle_edit_ops, font_write_target_locates_original_bytes_of_adjacent_blocks) {
+	using namespace aegisub::subtitle_edit_ops;
+	AssDialogue line;
+	line.Text = R"(A{  \b0  }{\fscy80}B)";
+	ParsedLine parsed(&line);
+	auto const second = static_cast<int>(line.Text.get().find("\\fscy"));
+	EXPECT_EQ(2, parsed.tag_write_target(NormalizePos(line.Text, second), second).block);
+	EXPECT_EQ(2, parsed.block_for_read(second));
+	EXPECT_EQ(R"(  \b0  )", parsed.blocks[1]->GetRawText());
+}
+
 namespace {
 std::optional<int> TagEndAt(std::string const& text, int caret, std::string const& tag, std::string const& alt = "") {
 	AssDialogue line;

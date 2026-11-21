@@ -57,7 +57,7 @@ int FindDialogueBlockForRead(
 	size_t const position = static_cast<size_t>(std::max(raw_position, 0));
 	size_t block_end = 0;
 	for (size_t index = 0; index < blocks.size(); ++index) {
-		block_end += blocks[index]->GetText().size();
+		block_end += blocks[index]->GetRawLength();
 		// Caret positions sit between bytes. Choosing the block on the left at a
 		// boundary prevents a following override (notably a trailing \r) from
 		// affecting the state before the caret. Position zero still selects the

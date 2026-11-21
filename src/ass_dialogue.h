@@ -83,6 +83,7 @@ public:
 	/// brace-free contents, but AssDialogueBlockComment's constructor stores
 	/// "{" + text + "}", so a comment block's raw text includes the braces.
 	std::string const& GetRawText() const { return text; }
+	[[nodiscard]] std::size_t GetRawLength() const { return text.size() + (GetType() == AssBlockType::OVERRIDE ? 2 : 0); }
 };
 
 class AssDialogueBlockPlain final : public AssDialogueBlock {

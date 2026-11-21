@@ -3,6 +3,7 @@
 #include "../../src/ass_info.h"
 #include "../../src/ass_io_core.h"
 #include "../../src/ass_style.h"
+#include "../../src/font_face_selection.h"
 #include "../../src/libass_runtime.h"
 #include "../../src/motion_track/apply_source.h"
 #include "../../src/perspective_apply_plan.h"
@@ -347,6 +348,53 @@ LibassSession StartLibass() {
     return result;
 }
 
+}
+
+TEST(font_face_selection, scale_writer_preserves_the_libass_animation_target) {
+	if (!libass::runtime::IsAvailable())
+		GTEST_SKIP() << libass::runtime::GetLoadError();
+	auto const session = StartLibass();
+	ASSERT_NE(nullptr, session.renderer);
+	AssDialogue line;
+	line.Text = R"({\t(0,1000,\fscx200)}TEST)";
+	AssStyle const style;
+	auto const edit = CaptureFontOverrideEdit(aegisub::subtitle_edit_ops::ParsedLine(&line), 0, 2, style, {});
+	FontOverrideValues values;
+	values[FontOverrideIndex(FontOverrideField::ScaleX)] = "110";
+	auto const actual = edit.Apply(line.Text.get(), values, 2, 2).text;
+	std::string const expected = R"({\fscx110\t(0,1000,\fscx200)}TEST)";
+	int last_width = 0;
+	for (int const time : {0, 500, 1200}) {
+		SCOPED_TRACE(time);
+		auto const observed = Render(session.library, session.renderer, MakeScript(actual), time);
+		auto const reference = Render(session.library, session.renderer, MakeScript(expected), time);
+		EXPECT_TRUE(observed.alpha == reference.alpha);
+		auto const bounds = GetMaskBounds(observed);
+		int const width = bounds.right - bounds.left;
+		EXPECT_GT(width, last_width);
+		last_width = width;
+	}
+	auto const final = Render(session.library, session.renderer, MakeScript(actual), 1200);
+	auto const target = Render(session.library, session.renderer, MakeScript(R"({\fscx200}TEST)"), 1200);
+	EXPECT_TRUE(final.alpha == target.alpha);
+}
+
+TEST(font_face_selection, libass_distinguishes_empty_invalid_and_prefixed_geometry_arguments) {
+	if (!libass::runtime::IsAvailable())
+		GTEST_SKIP() << libass::runtime::GetLoadError();
+	auto const session = StartLibass();
+	ASSERT_NE(nullptr, session.renderer);
+	for (auto const& [input, expected] : {
+			 std::pair{R"({\fscx80\fscx\fsp20\fsp}TEST)", "TEST"},
+			 std::pair{R"({\fscxabc}TEST)", R"({\fscx0}TEST)"},
+			 std::pair{R"({\fspabc}TEST)", R"({\fsp0}TEST)"},
+			 std::pair{R"({\fscx110.25tail\fsp-1.5px}TEST)", R"({\fscx110.25\fsp-1.5}TEST)"},
+		 }) {
+		SCOPED_TRACE(input);
+		auto const observed = Render(session.library, session.renderer, MakeScript(input, 120));
+		auto const reference = Render(session.library, session.renderer, MakeScript(expected, 120));
+		EXPECT_TRUE(observed.alpha == reference.alpha);
+	}
 }
 
 TEST(perspective_libass_render, generated_tags_match_hand_drawn_quad_for_vector_and_text) {

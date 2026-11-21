@@ -415,7 +415,10 @@
 		},
 		"Font" : {
 			"Use Contains Matching" : false,
-			"Auto Expand List On Input" : false
+			"Auto Expand List On Input" : false,
+			"Recent" : [{"string": ""}],
+			"Recent Limit" : 16,
+			"Favorites" : [{"string": ""}]
 		},
 		"Edit Box" : {
 			"Character Markers" : {

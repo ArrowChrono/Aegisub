@@ -262,6 +262,11 @@ struct ParsedLine {
 	int block_for_read(int raw_pos) const;
 
 	static AssStyle const *reset_target(
+		std::string_view name,
+		AssStyle const& event_style,
+		ResetStyleResolver const& resolve_reset);
+
+	static AssStyle const *reset_target(
 		AssOverrideTag const& tag,
 		AssStyle const& event_style,
 		ResetStyleResolver const& resolve_reset);
@@ -296,6 +301,14 @@ struct ParsedLine {
 	}
 
 	int block_at_pos(int pos) const;
+
+	struct TagWriteTarget {
+		int block;
+		int raw_pos;
+	};
+
+	// Resolve against the original text before writing any tags.
+	[[nodiscard]] TagWriteTarget tag_write_target(int norm_pos, int raw_pos) const;
 
 	int set_tag(
 		std::string const& tag,
