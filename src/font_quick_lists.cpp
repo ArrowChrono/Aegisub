@@ -24,6 +24,12 @@ std::string Bare(std::string_view name) {
 	return FontFamilyCatalog::SplitVerticalPrefix(name).second;
 }
 
+std::string_view RecentName(std::string_view name) {
+	while (name.starts_with('@'))
+		name.remove_prefix(1);
+	return name;
+}
+
 FontFamilyId ResolvedFamily(FontFamilySelectionModel const& model, std::string_view bare_name) {
 	auto const *record = model.ResolveRecord(bare_name);
 	return record ? record->id : 0;
@@ -50,22 +56,22 @@ Names TrimRecent(Names const& names, std::int64_t limit) {
 	for (auto const& name : names) {
 		if (result.size() == count)
 			break;
-		if (!IsFontNameBlank(name) && seen.insert(Fold(name)).second)
-			result.push_back(name);
+		auto const bare = RecentName(name);
+		if (!IsFontNameBlank(bare) && seen.insert(Fold(bare)).second)
+			result.emplace_back(bare);
 	}
 	return result;
 }
 
 Names RecordRecent(Names const& names, std::string_view selected, std::int64_t limit) {
 	auto recent = names;
-	if (!IsFontNameBlank(selected))
-		recent.insert(recent.begin(), std::string(selected));
+	recent.emplace(recent.begin(), selected);
 	return TrimRecent(recent, limit);
 }
 
 void RemoveRecent(Names& names, std::string_view selected) {
-	auto const key = Fold(selected);
-	std::erase_if(names, [&](std::string const& name) { return Fold(name) == key; });
+	auto const key = Fold(RecentName(selected));
+	std::erase_if(names, [&](std::string const& name) { return Fold(RecentName(name)) == key; });
 }
 
 FontFamilyChoice FavoriteIdentity(FontFamilySelectionModel const& model, std::string_view label, FontFamilyId explicit_family) {

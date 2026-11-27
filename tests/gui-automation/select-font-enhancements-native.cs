@@ -46,7 +46,8 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
     const string BlockedB = @"A{\t(0,1000,\fscx200)}{\fscy90}Animated scale sample";
     const string QuickVertical = @"{\fn@Microsoft YaHei\fs32\b0\i0\u0\fscx100}Quick family sample";
     const string QuickHorizontal = @"{\fnMicrosoft YaHei\fs32\b0\i0\u0\fscx100}Quick family sample";
-    static readonly string[] RecentSeed = [VerticalFace, Face, CustomFace];
+    static readonly string[] LegacyRecent = [VerticalFace, Face, CustomFace];
+    static readonly string[] RecentFamilies = [Face, CustomFace];
     static readonly (string Prefix, string Text)[] Seed =
     [
         ("Dialogue: 1,0:00:00.00,0:00:02.00,Default,scale-active,11,12,13,fx-one,", ScaleA),
@@ -351,7 +352,7 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
         SetRange("Quick family sample", 4, 4);
         OpenFont();
         ExpectFont(VerticalFace, vertical: true);
-        ExpectQuickList("Recent Fonts", RecentSeed);
+        ExpectQuickList("Recent Fonts", RecentFamilies);
         var all = Candidates();
         Require(all.Contains(Face) && all.Contains("Arial") && all.Contains("Tahoma") && !all.Contains(VerticalFace),
             "Compact mode exposes real installed bare family candidates");
@@ -385,7 +386,7 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
         Require(refreshedRange == (1, 3), $"Candidate refresh preserves selection [1, 3], observed {refreshedRange}");
         ClickCheck(filter, true);
         EqualItems("Favorite-only candidate list after toggling again", ["Arial"], Candidates());
-        ExpectStoredFonts(RecentSeed, ["Arial"]);
+        ExpectStoredFonts(LegacyRecent, ["Arial"]);
 
         ChooseQuickPage("Favorite Fonts");
         ExpectQuickList("Favorite Fonts", ["Arial"]);
@@ -398,7 +399,7 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
         ChooseQuickPage("Favorite Fonts");
         ExpectQuickList("Favorite Fonts", []);
         ExpectEmptyListActions();
-        ExpectStoredFonts(RecentSeed, []);
+        ExpectStoredFonts(LegacyRecent, []);
 
         FocusEdit(fontEdit);
         TypeText(fontEdit, "Tahom");
@@ -408,12 +409,12 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
         Post(star, Native.ButtonClick);
         ExpectQuickList("Favorite Fonts", ["Tahoma"]);
         ExpectFontAfterCallbacks("Tahoma", vertical: false);
-        ExpectStoredFonts(RecentSeed, ["Tahoma"]);
+        ExpectStoredFonts(LegacyRecent, ["Tahoma"]);
         CloseDialog("Cancel");
         var cancelled = ExpectDocument("Cancel discards all quick-list and typed font previews");
         Require(cancelled.GetProperty("undo_empty").GetBoolean(), "Cancelled font previews leave no Undo entry");
         Require(ReadRange("Quick family sample") == (4, 4), "Font Cancel restores the exact native editor caret");
-        ExpectStoredFonts(RecentSeed, ["Tahoma"]);
+        ExpectStoredFonts(LegacyRecent, ["Tahoma"]);
 
         phase = "quick-filtered-recent-double-click";
         OpenFont();
@@ -422,18 +423,16 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
         ClickCheck(filter, true);
         EqualItems("Restored favorite-only candidates", ["Tahoma"], Candidates());
         ExpectFontAfterCallbacks(VerticalFace, vertical: true);
-        ExpectQuickList("Recent Fonts", RecentSeed);
+        ExpectQuickList("Recent Fonts", RecentFamilies);
         FocusEdit(fontEdit);
         TypeText(fontEdit, "ahom");
         Wait(() => Send(fontCombo, Native.ComboDropped) != 0, "The filtered combo opens for a pending Tahoma match");
-        ClickQuickItem(VerticalFace);
-        ExpectFontAfterCallbacks(VerticalFace, vertical: true);
         ClickQuickItem(Face);
         ExpectFontAfterCallbacks(Face, vertical: false);
         ExpectPreview("Quick family sample", (4, QuickHorizontal));
         EqualItems("Choosing a nonfavorite recent leaves the filter in effect", ["Tahoma"], Candidates());
-        ExpectStoredFonts(RecentSeed, ["Tahoma"]);
-        ClickQuickItem(VerticalFace);
+        ExpectStoredFonts(LegacyRecent, ["Tahoma"]);
+        ClickCheck(Control(dialog, "Vertical"), true);
         ExpectFontAfterCallbacks(VerticalFace, vertical: true);
         ExpectPreview("Quick family sample", (4, QuickVertical));
         ClickQuickItem(Face);
@@ -448,7 +447,7 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
         WaitForDialogClosed(old);
         ExpectDocument("Double-click accepts one final face-and-scale edit", (4, combined));
         AssertSaved("quick-double-click", changes: [(4, combined)]);
-        ExpectStoredFonts([Face, VerticalFace, CustomFace], ["Tahoma"]);
+        ExpectStoredFonts(RecentFamilies, ["Tahoma"]);
         History("Undo set font", "Quick family sample");
         var undone = ExpectDocument("One Undo restores the vertical face and original scale");
         Require(undone.GetProperty("undo_empty").GetBoolean(), "Double-click added exactly one Undo operation");
@@ -459,14 +458,24 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
         SetRange("Quick family sample", 4, 4);
         OpenFont();
         ExpectFont(Face, vertical: false);
-        ClickQuickItem(VerticalFace);
+        ClickCheck(Control(dialog, "Vertical"), true);
         ExpectFontAfterCallbacks(VerticalFace, vertical: true);
         const string verticalScaled = @"{\fn@Microsoft YaHei\fs32\b0\i0\u0\fscx135}Quick family sample";
         ExpectPreview("Quick family sample", (4, verticalScaled));
         CloseDialog("OK");
-        ExpectDocument("Confirming the vertical recent writes its exact @ spelling", (4, verticalScaled));
+        ExpectDocument("Confirming the vertical checkbox writes the @ face to the subtitle", (4, verticalScaled));
         AssertSaved("quick-vertical-confirm", changes: [(4, verticalScaled)]);
-        ExpectStoredFonts(RecentSeed, ["Tahoma"]);
+        ExpectStoredFonts(RecentFamilies, ["Tahoma"]);
+
+        SetRange("Quick family sample", 4, 4);
+        OpenFont();
+        ExpectFont(VerticalFace, vertical: true);
+        ExpectQuickList("Recent Fonts", RecentFamilies);
+        ClickQuickItem(Face);
+        ExpectFontAfterCallbacks(Face, vertical: false);
+        ExpectPreview("Quick family sample", (4, combined));
+        CloseDialog("Cancel");
+        ExpectDocument("Cancelling the horizontal recent restores the vertical subtitle", (4, verticalScaled));
     }
 
     void CheckVariantFamilyChanges()
@@ -534,15 +543,15 @@ sealed class Scenario(string[] args, PrivateDesktop desktop)
     {
         SelectLines("quick-font", 4);
         OpenFont();
-        ExpectQuickList("Recent Fonts", RecentSeed);
+        ExpectQuickList("Recent Fonts", RecentFamilies);
         ChooseQuickPage("Favorite Fonts");
         ExpectQuickList("Favorite Fonts", ["Tahoma"]);
         ChooseQuickPage("Recent Fonts");
         ClickQuickItem(CustomFace);
         ExpectFontAfterCallbacks(CustomFace, vertical: false);
         Click(Control(dialog, "Remove"));
-        ExpectQuickList("Recent Fonts", [VerticalFace, Face]);
-        ExpectStoredFonts([VerticalFace, Face], ["Tahoma"]);
+        ExpectQuickList("Recent Fonts", [Face]);
+        ExpectStoredFonts([Face], ["Tahoma"]);
         Click(Control(dialog, "Clear Recent Fonts"));
         ChooseQuickPage("Recent Fonts");
         ExpectQuickList("Recent Fonts", []);
