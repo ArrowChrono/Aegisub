@@ -68,14 +68,26 @@ TEST(font_quick_lists, unavailable_catalog_keeps_enumerated_vertical_faces_and_u
 	EXPECT_EQ((Names{"Not Installed", "NOT installed"}), names);
 }
 
-TEST(font_quick_lists, recent_deduplicates_unicode_case_without_rewriting_exact_ass_names) {
-	Names names = {"", "\t", "@fOo", "Foo", "Étoile", " Custom Face "};
-	EXPECT_EQ((Names{"éTOILE", "@fOo", "Foo", " Custom Face "}), RecordRecent(names, "éTOILE", 16));
-	EXPECT_EQ((Names{"fOo", "@fOo"}), RecordRecent(names, "fOo", 2));
-	auto recent = TrimRecent(names, 16);
-	RemoveRecent(recent, "FOO");
-	EXPECT_EQ((Names{"@fOo", "Étoile", " Custom Face "}), recent);
-	EXPECT_TRUE(RecordRecent(recent, "New face", 0).empty());
+TEST(font_quick_lists, recent_folds_vertical_and_horizontal_names_before_applying_the_limit) {
+	Names const legacy = {"", "\t", "@", "@ \t", "@fOo", "Foo", "Étoile", " Custom@Face "};
+	EXPECT_EQ((Names{"fOo", "Étoile", " Custom@Face "}), TrimRecent(legacy, 16));
+	EXPECT_EQ((Names{"éTOILE", "fOo"}), RecordRecent(legacy, "@éTOILE", 2));
+	EXPECT_EQ((Names{"FOO", "Étoile"}), RecordRecent(legacy, "FOO", 2));
+	EXPECT_TRUE(RecordRecent(legacy, "New face", 0).empty());
+}
+
+TEST(font_quick_lists, recent_names_stay_horizontal_after_repeated_reads) {
+	auto recent = RecordRecent({}, "@@Foo", 16);
+	EXPECT_EQ((Names{"Foo"}), recent);
+	EXPECT_EQ(recent, TrimRecent(recent, 16));
+}
+
+TEST(font_quick_lists, removing_a_recent_font_removes_both_legacy_spellings) {
+	for (auto selected : {"éTOILE", "@éTOILE"}) {
+		Names recent = {"@Étoile", "Other", "ÉTOILE"};
+		RemoveRecent(recent, selected);
+		EXPECT_EQ((Names{"Other"}), recent);
+	}
 }
 
 TEST(font_quick_lists, reduced_and_paused_recent_limits_survive_a_configuration_restart) {
